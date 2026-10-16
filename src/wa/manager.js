@@ -109,11 +109,12 @@ class Manager extends EventEmitter {
     return rows[0];
   }
 
-  async link(id, { pairPhone } = {}) {
+  async link(id, { pairPhone, history } = {}) {
     const s = this.get(id);
     if (s.status === 'open') throw new Error('Already connected');
+    if (history) await this.update(id, { settings: { historyMode: history } });
     if (s.sock) await s.stop();
-    await s.start({ pairPhone });
+    await s.start({ pairPhone, linking: true });
     return s.info();
   }
 

@@ -184,42 +184,70 @@
       ),
     );
     document.body.append(back);
-    linkModal = { id: a.id, el: back, body };
-    drawLink(a);
-    if (a.status !== 'qr' && a.status !== 'open') startLink(a.id);
+    // Poll as a fallback to live updates, so the QR on screen is never a stale one.
+    const poll = setInterval(async () => {
+      try {
+        const list = await api('/api/accounts');
+        const cur = list.find((x) => x.id === a.id);
+        if (cur) drawLink(cur);
+      } catch {}
+    }, 4000);
+    linkModal = { id: a.id, el: back, body, poll, started: a.status === 'qr' };
+    if (a.status === 'qr' || a.status === 'open') drawLink(a);
+    else drawChoice(a);
   }
   function closeLink() {
+    if (linkModal) clearInterval(linkModal.poll);
     linkModal?.el.remove();
     linkModal = null;
   }
-  const startLink = guard(async (id, pairPhone) => {
-    await api(`/api/accounts/${id}/link`, { body: pairPhone ? { pairPhone } : {} });
+  const startLink = guard(async (id, opts = {}) => {
+    if (linkModal) {
+      linkModal.started = true;
+      linkModal.lastQr = null;
+      fill(linkModal.body, h('div', { class: 'qrbox' }, h('span', { class: 'muted' }, 'Generating QR…')));
+    }
+    await api(`/api/accounts/${id}/link`, { body: opts });
   });
+  function drawChoice(a) {
+    const opt = (v, title, hint) => h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'history', value: v, checked: (a.settings?.historyMode || 'full') === v }), h('span', {}, title, h('em', {}, hint)));
+    const form = h('form', { onsubmit: (e) => {
+      e.preventDefault();
+      const history = e.target.history.value;
+      const phone = e.target.phone.value.trim();
+      startLink(a.id, phone ? { history, pairPhone: phone } : { history });
+    } },
+      h('p', { style: 'margin-top:0' }, 'What should be imported from this phone?'),
+      opt('full', 'Full chat history', 'Everything the phone has — needed to find old leads. Best done on the PC; keep the phone online until it finishes.'),
+      opt('recent', 'Recent history only', 'Roughly the last few months, as WhatsApp Web normally gets.'),
+      opt('none', 'No history — new messages only', 'For numbers that only send (e.g. dental reminders).'),
+      h('details', { style: 'margin:6px 0 12px' }, h('summary', {}, 'Linking on the same phone that shows this page? Use a pairing code'),
+        h('label', { class: 'field', style: 'margin-top:8px' }, h('span', {}, 'Number being linked (with country code)'), h('input', { type: 'text', name: 'phone', placeholder: '919876543210' }),
+          h('em', {}, 'Leave empty to use the QR code.'))),
+      h('button', { class: 'btn primary', type: 'submit' }, 'Continue'),
+    );
+    fill(linkModal.body, form);
+  }
   function drawLink(info) {
-    if (!linkModal || info.id !== linkModal.id) return;
+    if (!linkModal || info.id !== linkModal.id || !linkModal.started) return;
     const b = linkModal.body;
     if (info.status === 'open') {
-      b.replaceChildren(
-        h('p', {}, `Linked as +${info.phone}. Chat history is now downloading — keep the phone online with WhatsApp open until the Numbers page shows "Full history synced". This can take a while for big accounts.`),
-      );
+      clearInterval(linkModal.poll);
+      fill(b, h('p', {}, `Linked as +${info.phone}. If you chose to import history it is downloading now — keep the phone online with WhatsApp open until the Numbers page shows it has finished.`));
       return;
     }
+    if (info.status === 'qr' && info.qr === linkModal.lastQr && !info.pairingCode) return; // nothing new to draw
+    linkModal.lastQr = info.qr;
     const steps = h('ol', { class: 'steps' },
-      h('li', {}, 'On the phone open WhatsApp → Settings (or ⋮) → Linked devices → Link a device.'),
-      h('li', {}, 'Scan this code. Keep the phone online until history finishes syncing.'),
+      h('li', {}, 'On the phone: WhatsApp → Settings (or ⋮) → Linked devices → Link a device.'),
+      info.pairingCode ? h('li', {}, 'Tap "Link with phone number instead" and type the code below.') : h('li', {}, 'Scan this code. It refreshes by itself; always scan the one showing now.'),
     );
     const qr = info.qr ? h('img', { src: info.qr, alt: 'WhatsApp QR code' }) : h('span', { class: 'muted' }, info.status === 'stopped' ? 'QR expired.' : 'Generating QR…');
-    const pairForm = h('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); startLink(info.id, e.target.phone.value); } },
-      h('input', { type: 'text', name: 'phone', placeholder: 'Number with country code, e.g. 919876543210', class: 'grow', style: 'width:auto' }),
-      h('button', { class: 'btn', type: 'submit' }, 'Get code'),
-    );
     fill(b,
       steps,
-      h('div', { class: 'qrbox' }, qr),
-      info.status === 'stopped' ? h('button', { class: 'btn primary', onclick: () => startLink(info.id) }, 'New QR code') : null,
-      info.pairingCode
-        ? h('div', {}, h('p', {}, 'Or on the phone tap "Link with phone number instead" and enter:'), h('div', { class: 'code' }, info.pairingCode))
-        : h('details', {}, h('summary', {}, 'Linking on the same phone? Use a pairing code instead'), h('p', { class: 'muted' }, 'Enter the number being linked; a code will appear here to type into WhatsApp.'), pairForm),
+      info.pairingCode ? h('div', { class: 'code' }, info.pairingCode) : h('div', { class: 'qrbox' }, qr),
+      info.status === 'stopped' || info.status === 'logged_out' ? h('button', { class: 'btn primary', onclick: () => drawChoice(info) }, 'Start again') : null,
+      info.qrAt ? h('p', { class: 'muted', style: 'font-size:12px;margin:0' }, `Code shown at ${new Date(info.qrAt).toLocaleTimeString()}`) : null,
     );
   }
 

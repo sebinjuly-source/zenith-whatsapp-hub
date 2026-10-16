@@ -21,7 +21,7 @@ import QRCode from 'qrcode';
 import logger from '../logger.js';
 import config from '../config.js';
 import { query, logEvent } from '../db.js';
-import { useDbAuthState, clearAuthState } from './auth-state.js';
+import { useDbAuthState, clearAuthState, hasAuthState } from './auth-state.js';
 import { parseMessage, mediaMessageFromRow } from './parse.js';
 import * as store from '../store.js';
 import { putMedia, mediaPath } from '../media.js';
@@ -65,6 +65,7 @@ export class Session extends EventEmitter {
       id: this.id,
       status: this.status,
       qr: this.status === 'qr' ? this.qrDataUrl : null,
+      qrAt: this.status === 'qr' ? this.qrAt : null,
       pairingCode: this.status === 'qr' ? this.pairingCode : null,
       phone: this.account.phone,
       waName: this.account.wa_name,
@@ -75,6 +76,20 @@ export class Session extends EventEmitter {
   setStatus(status) {
     this.status = status;
     this.emit('change', this.info());
+  }
+
+  /** Gather small events for 300 ms and write them in one go (one DB round trip instead of hundreds). */
+  collect(kind, items, handler) {
+    this.batches ||= {};
+    const b = (this.batches[kind] ||= { items: [], scheduled: false });
+    b.items.push(...(items || []));
+    if (b.scheduled) return;
+    b.scheduled = true;
+    setTimeout(() => {
+      b.scheduled = false;
+      const list = b.items.splice(0);
+      if (list.length) this.enqueue(() => handler(list));
+    }, 300);
   }
 
   /** Run DB work for this account one job at a time, in arrival order. */
@@ -101,13 +116,18 @@ export class Session extends EventEmitter {
     ]).catch(() => {});
   }
 
-  async start({ pairPhone } = {}) {
+  async start({ pairPhone, linking = false } = {}) {
     this.stopping = false;
     clearTimeout(this.leaseRetry);
     if (!(await this.acquireLease())) {
       // Another server runs this number (e.g. the PC doing a first sync, or the old copy during a deploy).
       this.setStatus('elsewhere');
-      this.leaseRetry = setTimeout(() => !this.stopping && this.start({ pairPhone }), 30000);
+      this.leaseRetry = setTimeout(async () => {
+        if (this.stopping) return;
+        // Take over only a completed login — never start showing QR codes on our own.
+        if (!linking && !(await hasAuthState(this.id))) return this.setStatus('stopped');
+        this.start({ pairPhone, linking });
+      }, 30000);
       return;
     }
     if (!this.leaseTimer) {
@@ -138,8 +158,11 @@ export class Session extends EventEmitter {
       // A "Desktop" companion with requireFullSync asks the phone for the FULL history, not just recent chats.
       // (macOS/Windows Desktop currently get rejected with 428 at connect; Ubuntu Desktop is accepted.)
       browser: Browsers.ubuntu('Desktop'),
-      syncFullHistory: true,
+      syncFullHistory: this.settings.historyMode === 'full',
+      // Always accept history notifications: they also carry the lid↔phone mappings Baileys needs.
+      // With historyMode 'none' the old messages are simply not stored (see onHistory).
       shouldSyncHistoryMessage: () => true,
+      qrTimeout: 45000, // keep each QR on screen long enough to open the scanner
       markOnlineOnConnect: false, // keep notifications on your phone
       generateHighQualityLinkPreview: false,
       getMessage: async (key) => this.sentCache.get(key.id),
@@ -155,13 +178,14 @@ export class Session extends EventEmitter {
       this.enqueue(() => this.ingest(messages, { live: type === 'notify' })),
     );
     sock.ev.on('messages.update', (updates) => this.enqueue(() => this.onMessagesUpdate(updates)));
-    sock.ev.on('contacts.upsert', (c) => this.enqueue(() => this.saveContacts(c)));
-    sock.ev.on('contacts.update', (c) => this.enqueue(() => this.saveContacts(c)));
-    sock.ev.on('chats.upsert', (c) => this.enqueue(() => this.saveChats(c)));
-    sock.ev.on('chats.update', (c) => this.enqueue(() => this.saveChats(c)));
+    // These can arrive as thousands of tiny events right after linking — collect them into batches.
+    sock.ev.on('contacts.upsert', (c) => this.collect('contacts', c, (l) => this.saveContacts(l)));
+    sock.ev.on('contacts.update', (c) => this.collect('contacts', c, (l) => this.saveContacts(l)));
+    sock.ev.on('chats.upsert', (c) => this.collect('chats', c, (l) => this.saveChats(l)));
+    sock.ev.on('chats.update', (c) => this.collect('chats', c, (l) => this.saveChats(l)));
     sock.ev.on('groups.upsert', (g) => this.enqueue(() => this.saveGroups(g)));
     sock.ev.on('groups.update', (g) => this.enqueue(() => this.saveGroups(g)));
-    sock.ev.on('lid-mapping.update', (m) => this.enqueue(() => store.saveLidMappings(this.id, [m])));
+    sock.ev.on('lid-mapping.update', (m) => this.collect('lids', [m], (l) => store.saveLidMappings(this.id, l)));
     sock.ev.on('blocklist.set', ({ blocklist }) => this.enqueue(() => store.resetBlocklist(this.id, blocklist)));
     sock.ev.on('blocklist.update', ({ blocklist, type }) =>
       this.enqueue(() => store.setBlocked(this.id, blocklist, type === 'add')),
@@ -171,7 +195,8 @@ export class Session extends EventEmitter {
   async onConnection({ connection, lastDisconnect, qr }) {
     if (qr) {
       this.qr = qr;
-      this.qrDataUrl = await QRCode.toDataURL(qr, { margin: 1, width: 280 });
+      this.qrDataUrl = await QRCode.toDataURL(qr, { margin: 2, width: 300 });
+      this.qrAt = Date.now();
       if (this.pairPhone && !this.pairingCode) {
         try {
           this.pairingCode = await this.sock.requestPairingCode(this.pairPhone);
@@ -262,8 +287,9 @@ export class Session extends EventEmitter {
   async onHistory({ chats, contacts, messages, lidPnMappings, syncType, progress }) {
     if (lidPnMappings?.length) await store.saveLidMappings(this.id, lidPnMappings);
     await this.saveContacts(contacts || []);
-    await this.saveChats(chats || []);
-    const stored = await this.ingest(messages || [], { history: true });
+    const keepHistory = this.settings.historyMode !== 'none';
+    if (keepHistory) await this.saveChats(chats || []);
+    const stored = keepHistory ? await this.ingest(messages || [], { history: true }) : 0;
     const s = this.sync;
     s.state = 'syncing';
     s.chunks = (s.chunks || 0) + 1;

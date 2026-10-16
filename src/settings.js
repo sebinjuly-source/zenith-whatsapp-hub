@@ -22,6 +22,9 @@ export const DEFAULT_SETTINGS = {
   sendEnd: '19:00',
   sendDays: [1, 2, 3, 4, 5, 6], // 0 = Sunday
   // History & storage
+  // What to import when the number is linked: 'full' (everything the phone has), 'recent' (the phone's
+  // default — roughly the last few months), 'none' (only new messages from now on). Only used at link time.
+  historyMode: 'full',
   storeGroups: true,
   autosaveImages: false,
   autosaveDocuments: false,
@@ -54,6 +57,7 @@ export function normalizeSettings(input = {}) {
     sendDays: Array.isArray(s.sendDays)
       ? [...new Set(s.sendDays.map(Number).filter((d) => d >= 0 && d <= 6))].sort()
       : DEFAULT_SETTINGS.sendDays,
+    historyMode: ['full', 'recent', 'none'].includes(s.historyMode) ? s.historyMode : 'full',
     storeGroups: !!s.storeGroups,
     autosaveImages: !!s.autosaveImages,
     autosaveDocuments: !!s.autosaveDocuments,
