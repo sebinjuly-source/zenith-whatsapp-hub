@@ -20,8 +20,9 @@ const config = {
 };
 
 if (!config.apiKey) {
-  console.warn('WARNING: API_KEY is not set. Using "dev-key" — set API_KEY before deploying.');
-  config.apiKey = 'dev-key';
+  // Never fall back to a guessable key: without API_KEY the dashboard, API and MCP stay locked.
+  config.apiKey = crypto.randomBytes(32).toString('hex');
+  console.warn('WARNING: API_KEY is not set — dashboard, API and MCP are locked until you set it.');
 }
 
 export default config;
