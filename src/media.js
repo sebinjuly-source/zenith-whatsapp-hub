@@ -1,0 +1,77 @@
+/**
+ * Saved media (PDFs, images, resumes…). Stored in Supabase Storage when configured,
+ * otherwise in the media_files table. Nothing is saved unless a setting or a request asks for it.
+ */
+import mime from 'mime-types';
+import config from './config.js';
+import { query } from './db.js';
+
+const useSupabase = () => !!(config.supabase.url && config.supabase.serviceKey);
+
+export async function putMedia(path, buffer, mimetype) {
+  if (useSupabase()) {
+    const res = await fetch(`${config.supabase.url}/storage/v1/object/${config.supabase.bucket}/${encodeURI(path)}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.supabase.serviceKey}`,
+        'Content-Type': mimetype || 'application/octet-stream',
+        'x-upsert': 'true',
+      },
+      body: buffer,
+    });
+    if (!res.ok) throw new Error(`Supabase storage upload failed: ${res.status} ${await res.text()}`);
+    return `sb:${path}`;
+  }
+  await query(
+    `INSERT INTO media_files (path, mimetype, data) VALUES ($1,$2,$3)
+     ON CONFLICT (path) DO UPDATE SET data = EXCLUDED.data, mimetype = EXCLUDED.mimetype`,
+    [path, mimetype, buffer],
+  );
+  return `db:${path}`;
+}
+
+export async function getMedia(ref) {
+  if (ref.startsWith('sb:')) {
+    const path = ref.slice(3);
+    const res = await fetch(`${config.supabase.url}/storage/v1/object/${config.supabase.bucket}/${encodeURI(path)}`, {
+      headers: { Authorization: `Bearer ${config.supabase.serviceKey}` },
+    });
+    if (!res.ok) throw new Error(`Supabase storage download failed: ${res.status}`);
+    return { buffer: Buffer.from(await res.arrayBuffer()), mimetype: res.headers.get('content-type') };
+  }
+  const rows = await query('SELECT mimetype, data FROM media_files WHERE path = $1', [ref.replace(/^db:/, '')]);
+  if (!rows[0]) throw new Error('Saved media not found');
+  return { buffer: Buffer.from(rows[0].data), mimetype: rows[0].mimetype };
+}
+
+export function mediaPath(accountId, chatJid, msgId, mimetype, fileName) {
+  const ext = (fileName && fileName.includes('.') ? fileName.split('.').pop() : mime.extension(mimetype || '')) || 'bin';
+  return `${accountId}/${chatJid.split('@')[0]}/${msgId}.${ext.replace(/[^a-z0-9]/gi, '').slice(0, 8)}`;
+}
+
+/**
+ * Load an outgoing attachment given as { url } (http/https, incl. Google Drive share links) or { base64 }.
+ * Returns { buffer, mimetype, fileName }.
+ */
+export async function loadOutgoing({ url, base64, mimetype, fileName }) {
+  if (base64) {
+    const buffer = Buffer.from(base64.replace(/^data:[^,]+,/, ''), 'base64');
+    return { buffer, mimetype: mimetype || mime.lookup(fileName || '') || 'application/octet-stream', fileName };
+  }
+  if (!url) throw new Error('Attachment needs a url or base64');
+  // Google Drive "view" links → direct download links
+  const drive = url.match(/drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?(?:export=\w+&)?id=)([\w-]+)/);
+  const fetchUrl = drive ? `https://drive.google.com/uc?export=download&id=${drive[1]}` : url;
+  const res = await fetch(fetchUrl, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`Could not download attachment (${res.status})`);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const ctype = (res.headers.get('content-type') || '').split(';')[0];
+  const disp = res.headers.get('content-disposition') || '';
+  const dispName = disp.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i)?.[1];
+  const name = fileName || (dispName && decodeURIComponent(dispName)) || decodeURIComponent(new URL(url).pathname.split('/').pop() || '') || 'file';
+  return {
+    buffer,
+    mimetype: mimetype || (ctype && ctype !== 'application/octet-stream' ? ctype : mime.lookup(name) || 'application/octet-stream'),
+    fileName: name,
+  };
+}

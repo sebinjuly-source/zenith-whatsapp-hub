@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: zenith-whatsapp-hub
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: TZ_NAME
+        value: Asia/Kolkata
+      - key: NODE_VERSION
+        value: "22"
