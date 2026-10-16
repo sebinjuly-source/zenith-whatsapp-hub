@@ -67,6 +67,7 @@ export function buildApp() {
 
   // ---- Accounts
   api.get('/accounts', wrap(async (req, res) => {
+    await manager.refresh();
     const list = manager.list();
     for (const a of list) a.stats = await store.accountStats(a.id);
     res.json(list);
@@ -82,6 +83,12 @@ export function buildApp() {
   api.post('/accounts/:id/unlink', wrap(async (req, res) => {
     await manager.unlink(req.params.id);
     res.json({ ok: true });
+  }));
+
+  // Clean stop: finishes writing, releases every number so another server can take over, then exits.
+  api.post('/shutdown', wrap(async (req, res) => {
+    res.json({ ok: true, note: 'Stopping — numbers are released for another server.' });
+    setTimeout(() => req.app.locals.shutdown?.('api'), 200);
   }));
 
   // ---- Chats, messages, contacts

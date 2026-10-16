@@ -23,6 +23,24 @@ class Manager extends EventEmitter {
     }
   }
 
+  /**
+   * Pick up accounts added or re-enabled from another machine sharing the same database
+   * (e.g. a number linked on a PC for its first big history sync, then handed to the server).
+   */
+  async refresh() {
+    const accounts = await query('SELECT * FROM accounts ORDER BY created_at');
+    const ids = new Set(accounts.map((a) => a.id));
+    for (const acc of accounts) {
+      let s = this.sessions.get(acc.id);
+      if (!s) s = this.attach(acc);
+      else Object.assign(s.account, acc);
+      if (acc.enabled && s.status === 'stopped' && !s.sock && !s.stopping && (await hasAuthState(acc.id))) {
+        s.start().catch((err) => logEvent(acc.id, 'error', `Start failed: ${err.message}`));
+      }
+    }
+    for (const id of this.sessions.keys()) if (!ids.has(id)) this.sessions.delete(id);
+  }
+
   attach(account) {
     const s = new Session(account);
     s.on('change', (info) => this.emit('change', info));

@@ -19,6 +19,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import logger from '../logger.js';
+import config from '../config.js';
 import { query, logEvent } from '../db.js';
 import { useDbAuthState, clearAuthState } from './auth-state.js';
 import { parseMessage, mediaMessageFromRow } from './parse.js';
@@ -27,6 +28,7 @@ import { putMedia, mediaPath } from '../media.js';
 import { normalizeSettings } from '../settings.js';
 
 const SYNC_TYPE = proto.HistorySync.HistorySyncType;
+const LEASE_SEC = 90;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let cachedVersion = null;
 
@@ -35,7 +37,7 @@ export class Session extends EventEmitter {
     super();
     this.id = account.id;
     this.account = account;
-    this.status = 'stopped'; // stopped | connecting | qr | open | logged_out | replaced
+    this.status = 'stopped'; // stopped | connecting | qr | open | logged_out | replaced | elsewhere
     this.qr = null;
     this.qrDataUrl = null;
     this.pairingCode = null;
@@ -81,8 +83,41 @@ export class Session extends EventEmitter {
     return this.work;
   }
 
+  /** Claim this number for this server. Fails while another server holds a fresh lease. */
+  async acquireLease() {
+    const rows = await query(
+      `UPDATE accounts SET lease_owner = $2, lease_until = now() + ($3 || ' seconds')::interval
+       WHERE id = $1 AND (lease_owner IS NULL OR lease_owner = $2 OR lease_until < now()) RETURNING id`,
+      [this.id, config.instanceId, String(LEASE_SEC)],
+    );
+    return rows.length > 0;
+  }
+
+  async releaseLease() {
+    clearInterval(this.leaseTimer);
+    this.leaseTimer = null;
+    await query('UPDATE accounts SET lease_owner = NULL, lease_until = NULL WHERE id = $1 AND lease_owner = $2', [
+      this.id, config.instanceId,
+    ]).catch(() => {});
+  }
+
   async start({ pairPhone } = {}) {
     this.stopping = false;
+    clearTimeout(this.leaseRetry);
+    if (!(await this.acquireLease())) {
+      // Another server runs this number (e.g. the PC doing a first sync, or the old copy during a deploy).
+      this.setStatus('elsewhere');
+      this.leaseRetry = setTimeout(() => !this.stopping && this.start({ pairPhone }), 30000);
+      return;
+    }
+    if (!this.leaseTimer) {
+      this.leaseTimer = setInterval(async () => {
+        if (!(await this.acquireLease().catch(() => true))) {
+          await logEvent(this.id, 'warn', 'Another server took over this number — stopping here.');
+          await this.stop();
+        }
+      }, 30000);
+    }
     this.pairPhone = pairPhone ? String(pairPhone).replace(/\D/g, '') : null;
     this.pairingCode = null;
     if (!cachedVersion) {
@@ -93,6 +128,7 @@ export class Session extends EventEmitter {
       }
     }
     const { state, saveCreds } = await useDbAuthState(this.id);
+    await store.warmLidCache(this.id);
     this.setStatus('connecting');
 
     const sock = makeWASocket({
@@ -198,10 +234,13 @@ export class Session extends EventEmitter {
 
   async stop() {
     this.stopping = true;
+    clearTimeout(this.leaseRetry);
     try {
       this.sock?.end(undefined);
     } catch {}
     this.sock = null;
+    await this.work; // finish writing what already arrived
+    await this.releaseLease();
     this.setStatus('stopped');
   }
 
@@ -213,6 +252,7 @@ export class Session extends EventEmitter {
     } catch {}
     this.sock = null;
     await clearAuthState(this.id);
+    await this.releaseLease();
     this.setStatus('logged_out');
   }
 
@@ -273,6 +313,15 @@ export class Session extends EventEmitter {
     const rows = [];
     const seenContacts = [];
     const settings = this.settings;
+    // Learn all lid↔phone pairs in this batch in one go, so the per-message lookups below hit the cache.
+    const pairs = [];
+    for (const msg of messages) {
+      const k = msg.key || {};
+      for (const [a, b] of [[k.remoteJid, k.remoteJidAlt], [k.participant, k.participantAlt]]) {
+        if (a && b) pairs.push(a.endsWith('@lid') ? { lid: a, pn: b } : { lid: b, pn: a });
+      }
+    }
+    await store.saveLidMappings(this.id, pairs.filter((p) => p.lid.endsWith('@lid') && p.pn.endsWith('@s.whatsapp.net')));
     for (const msg of messages) {
       try {
         const remote = msg.key?.remoteJid;
@@ -375,11 +424,14 @@ export class Session extends EventEmitter {
 
   async saveContacts(list) {
     const out = [];
+    const ids = (c) => ({
+      pn: c.phoneNumber || (c.id.endsWith('@s.whatsapp.net') ? c.id : null),
+      lid: c.lid || (c.id.endsWith('@lid') ? c.id : null),
+    });
+    await store.saveLidMappings(this.id, (list || []).filter((c) => c?.id).map(ids).filter((m) => m.lid && m.pn));
     for (const c of list || []) {
       if (!c?.id) continue;
-      const pn = c.phoneNumber || (c.id.endsWith('@s.whatsapp.net') ? c.id : null);
-      const lid = c.lid || (c.id.endsWith('@lid') ? c.id : null);
-      if (lid && pn) await store.saveLidMappings(this.id, [{ lid, pn }]);
+      const { pn, lid } = ids(c);
       const jid = pn ? jidNormalizedUser(pn) : await store.canonicalJid(this.id, c.id);
       if (!jid) continue;
       out.push({ jid, lid: lid ? jidNormalizedUser(lid) : null, name: c.name, notify: c.notify, verifiedName: c.verifiedName });
@@ -389,11 +441,11 @@ export class Session extends EventEmitter {
 
   async saveChats(list) {
     const out = [];
+    await store.saveLidMappings(this.id, (list || []).filter((c) => c?.lidJid && c?.pnJid).map((c) => ({ lid: c.lidJid, pn: c.pnJid })));
     for (const c of list || []) {
       if (!c?.id || isJidStatusBroadcast(c.id) || isJidNewsletter(c.id) || isJidBroadcast(c.id)) continue;
       const isGroup = !!isJidGroup(c.id);
       if (isGroup && !this.settings.storeGroups) continue;
-      if (c.lidJid && c.pnJid) await store.saveLidMappings(this.id, [{ lid: c.lidJid, pn: c.pnJid }]);
       const jid = isGroup ? c.id : await store.canonicalJid(this.id, c.id, c.pnJid);
       const ts = c.conversationTimestamp || c.lastMessageRecvTimestamp;
       out.push({

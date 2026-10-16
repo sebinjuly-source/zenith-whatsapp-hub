@@ -24,6 +24,7 @@ async function main() {
     await closeDb();
     process.exit(0);
   };
+  app.locals.shutdown = shutdown;
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   process.on('unhandledRejection', (err) => logger.error({ err: err?.stack || err }, 'Unhandled rejection'));

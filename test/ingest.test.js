@@ -124,6 +124,23 @@ test('settings: 5 s minimum delay and sending window', () => {
   assert.equal(insideSendingWindow(w, new Date('2026-10-20T06:00:00Z')), false); // Tuesday
 });
 
+test('lease: only one server runs a number at a time', async () => {
+  const { default: config } = await import('../src/config.js');
+  const me = config.instanceId;
+  assert.equal(await s.acquireLease(), true);
+  assert.equal(await s.acquireLease(), true, 'renewing own lease works');
+  config.instanceId = 'other-server';
+  assert.equal(await s.acquireLease(), false, 'second server is refused while lease is fresh');
+  config.instanceId = me;
+  await s.releaseLease();
+  config.instanceId = 'other-server';
+  assert.equal(await s.acquireLease(), true, 'second server takes over after release');
+  await query(`UPDATE accounts SET lease_until = now() - interval '1 second' WHERE id = 't'`);
+  config.instanceId = me;
+  assert.equal(await s.acquireLease(), true, 'expired lease (crashed server) can be taken');
+  await s.releaseLease();
+});
+
 test.after(async () => {
   await closeDb();
   fs.rmSync(dir, { recursive: true, force: true });

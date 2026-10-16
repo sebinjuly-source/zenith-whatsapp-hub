@@ -110,8 +110,8 @@ label.field > em { display: block; font-style: normal; color: var(--ink-3); font
 .pill::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); }
 .pill.open { background: var(--accent-soft); color: var(--ink); border-color: transparent; }
 .pill.open::before { background: var(--accent); }
-.pill.qr, .pill.connecting, .pill.replaced { background: var(--warn-soft); color: var(--ink); border-color: transparent; }
-.pill.qr::before, .pill.connecting::before, .pill.replaced::before { background: var(--warn); }
+.pill.qr, .pill.connecting, .pill.replaced, .pill.elsewhere { background: var(--warn-soft); color: var(--ink); border-color: transparent; }
+.pill.qr::before, .pill.connecting::before, .pill.replaced::before, .pill.elsewhere::before { background: var(--warn); }
 .pill.logged_out { background: var(--bad-soft); color: var(--ink); border-color: transparent; }
 .pill.logged_out::before { background: var(--bad); }
 .tag { display: inline-block; font-size: 11.5px; padding: 1px 7px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2); margin: 0 3px 3px 0; }

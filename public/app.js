@@ -49,7 +49,7 @@
       ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : d.toLocaleDateString([], { day: '2-digit', month: 'short', year: d.getFullYear() === today.getFullYear() ? undefined : '2-digit' });
   };
-  const statusText = { open: 'Connected', qr: 'Waiting for scan', connecting: 'Connecting…', stopped: 'Not linked', logged_out: 'Logged out', replaced: 'Running elsewhere' };
+  const statusText = { open: 'Connected', qr: 'Waiting for scan', connecting: 'Connecting…', stopped: 'Not linked', logged_out: 'Logged out', replaced: 'Running elsewhere', elsewhere: 'Running on another server' };
   const nice = (n) => (n == null ? '–' : Number(n).toLocaleString());
   const guard = (fn) => async (...a) => {
     try {

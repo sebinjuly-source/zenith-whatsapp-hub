@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import os from 'os';
+import crypto from 'crypto';
 
 const config = {
   port: parseInt(process.env.PORT || '3000', 10),
@@ -12,6 +14,8 @@ const config = {
   },
   tz: process.env.TZ_NAME || 'Asia/Kolkata',
   logLevel: process.env.LOG_LEVEL || 'info',
+  // Identifies this running server in account leases.
+  instanceId: `${process.env.RENDER_INSTANCE_ID || os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString('hex')}`,
   publicUrl: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
 };
 

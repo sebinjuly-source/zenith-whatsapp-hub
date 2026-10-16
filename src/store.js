@@ -21,10 +21,19 @@ export function toJid(phoneOrJid) {
 // LID ↔ phone mapping
 // ---------------------------------------------------------------------------
 const lidCache = new Map(); // `${account}|${lid}` -> pn jid
+const warmAccounts = new Set(); // accounts whose whole lid_map is in lidCache
+
+/** Load every known mapping once, so lookups during a big history sync never hit the network. */
+export async function warmLidCache(accountId) {
+  const rows = await query('SELECT lid, pn FROM lid_map WHERE account_id = $1', [accountId]);
+  for (const r of rows) lidCache.set(`${accountId}|${r.lid}`, r.pn);
+  warmAccounts.add(accountId);
+}
 
 export async function lookupLid(accountId, lid) {
   const k = `${accountId}|${lid}`;
   if (lidCache.has(k)) return lidCache.get(k);
+  if (warmAccounts.has(accountId)) return null; // cache is complete: every write goes through saveLidMappings
   const rows = await query('SELECT pn FROM lid_map WHERE account_id = $1 AND lid = $2', [accountId, lid]);
   const pn = rows[0]?.pn || null;
   if (pn) lidCache.set(k, pn);
@@ -214,26 +223,24 @@ export async function insertMessages(accountId, rows) {
        media = COALESCE(EXCLUDED.media, messages.media),
        status = GREATEST(messages.status, EXCLUDED.status)`,
   );
-  // Update the chat list preview for each touched chat.
+  // Update the chat list preview for each touched chat (one statement per batch).
   const latest = new Map();
   for (const r of list) {
     const cur = latest.get(r.chatJid);
     if (!cur || r.ts >= cur.ts) latest.set(r.chatJid, r);
   }
-  for (const r of latest.values()) {
-    await query(
-      `INSERT INTO chats (account_id, jid, is_group, last_ts, last_preview, last_from_me)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (account_id, jid) DO UPDATE SET
-         last_preview = CASE WHEN chats.last_ts IS NULL OR EXCLUDED.last_ts >= chats.last_ts
-                             THEN EXCLUDED.last_preview ELSE chats.last_preview END,
-         last_from_me = CASE WHEN chats.last_ts IS NULL OR EXCLUDED.last_ts >= chats.last_ts
-                             THEN EXCLUDED.last_from_me ELSE chats.last_from_me END,
-         last_ts = GREATEST(chats.last_ts, EXCLUDED.last_ts),
-         updated_at = now()`,
-      [accountId, r.chatJid, isJidGroup(r.chatJid) || false, r.ts, preview(r), r.fromMe],
-    );
-  }
+  await insertMany(
+    'chats',
+    ['account_id', 'jid', 'is_group', 'last_ts', 'last_preview', 'last_from_me'],
+    [...latest.values()].map((r) => [accountId, r.chatJid, !!isJidGroup(r.chatJid), r.ts, preview(r), r.fromMe]),
+    `ON CONFLICT (account_id, jid) DO UPDATE SET
+       last_preview = CASE WHEN chats.last_ts IS NULL OR EXCLUDED.last_ts >= chats.last_ts
+                           THEN EXCLUDED.last_preview ELSE chats.last_preview END,
+       last_from_me = CASE WHEN chats.last_ts IS NULL OR EXCLUDED.last_ts >= chats.last_ts
+                           THEN EXCLUDED.last_from_me ELSE chats.last_from_me END,
+       last_ts = GREATEST(chats.last_ts, EXCLUDED.last_ts),
+       updated_at = now()`,
+  );
 }
 
 const preview = (r) => (r.body ? r.body.slice(0, 120) : `[${r.type}]`);

@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   last_connected_at TIMESTAMPTZ
 );
 
+-- Which server currently runs each number (so two servers never fight over one login).
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS lease_owner TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS lease_until TIMESTAMPTZ;
+
 CREATE TABLE IF NOT EXISTS wa_auth (
   account_id TEXT NOT NULL,
   key TEXT NOT NULL,
