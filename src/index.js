@@ -15,12 +15,20 @@ async function main() {
   await manager.init();
   await startOutbox();
 
+  // Render's free plan sleeps after 15 min without incoming requests, which would drop WhatsApp.
+  // Ping our own public URL every 10 min (counts as incoming traffic). Off when not on Render.
+  if (config.publicUrl && process.env.RENDER && process.env.KEEP_AWAKE !== '0') {
+    setInterval(() => {
+      fetch(`${config.publicUrl}/health`, { signal: AbortSignal.timeout(30000) }).catch(() => {});
+    }, 10 * 60 * 1000).unref();
+    logger.info('Keep-awake ping enabled');
+  }
+
   const shutdown = async (sig) => {
     logger.info({ sig }, 'Shutting down');
     server.close();
+    // stop() finishes pending writes (bounded) and saves the WhatsApp keys
     for (const s of manager.sessions.values()) await s.stop().catch(() => {});
-    // let queued DB writes finish
-    await Promise.all([...manager.sessions.values()].map((s) => s.work));
     await closeDb();
     process.exit(0);
   };

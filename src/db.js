@@ -132,6 +132,23 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE INDEX IF NOT EXISTS outbox_queue ON outbox (account_id, status, scheduled_at);
 
+CREATE TABLE IF NOT EXISTS tasks (
+  id BIGSERIAL PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  details TEXT,
+  kind TEXT NOT NULL DEFAULT 'todo',
+  status TEXT NOT NULL DEFAULT 'upcoming',
+  due_at TIMESTAMPTZ,
+  created_by TEXT NOT NULL DEFAULT 'you',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS tasks_board ON tasks (account_id, status);
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS task_id BIGINT;
+CREATE INDEX IF NOT EXISTS outbox_task ON outbox (task_id);
+
 CREATE TABLE IF NOT EXISTS events (
   id BIGSERIAL PRIMARY KEY,
   account_id TEXT,

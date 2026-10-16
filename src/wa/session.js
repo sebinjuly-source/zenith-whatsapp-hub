@@ -7,7 +7,6 @@ import makeWASocket, {
   Browsers,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
   jidNormalizedUser,
   isJidGroup,
   isJidBroadcast,
@@ -136,8 +135,8 @@ export class Session extends EventEmitter {
     if (!this.leaseTimer) {
       this.leaseTimer = setInterval(async () => {
         if (!(await this.acquireLease().catch(() => true))) {
-          await logEvent(this.id, 'warn', 'Another server took over this number — stopping here.');
-          await this.stop();
+          await logEvent(this.id, 'warn', 'Another server took over this number — standing by.');
+          await this.yieldToOther();
         }
       }, 30000);
     }
@@ -150,13 +149,15 @@ export class Session extends EventEmitter {
         cachedVersion = undefined; // use the version bundled with Baileys
       }
     }
-    const { state, saveCreds } = await useDbAuthState(this.id);
+    // Load the keys once per session; reconnects reuse the in-memory copy (it's the most current).
+    if (!this.auth) this.auth = await useDbAuthState(this.id);
+    const { state, saveCreds } = this.auth;
     await store.warmLidCache(this.id);
     this.setStatus('connecting');
 
     const sock = makeWASocket({
       version: cachedVersion,
-      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, this.log) },
+      auth: { creds: state.creds, keys: state.keys },
       logger: this.log.child({ lib: 'baileys' }, { level: process.env.BAILEYS_LOG_LEVEL || 'warn' }),
       // A "Desktop" companion with requireFullSync asks the phone for the FULL history, not just recent chats.
       // (macOS/Windows Desktop currently get rejected with 428 at connect; Ubuntu Desktop is accepted.)
@@ -174,7 +175,11 @@ export class Session extends EventEmitter {
     this.sock = sock;
 
     sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', (u) => this.onConnection(u).catch((e) => this.log.error({ e }, 'conn handler')));
+    // Ignore late events from an old socket (e.g. its "closed" event arriving after a re-link).
+    sock.ev.on('connection.update', (u) => {
+      if (sock !== this.sock) return;
+      this.onConnection(u).catch((e) => this.log.error({ err: e?.stack || e }, 'connection handler failed'));
+    });
     sock.ev.on('messaging-history.set', (h) => this.enqueue(() => this.onHistory(h)));
     sock.ev.on('messaging-history.status', (s) => this.enqueue(() => this.onHistoryStatus(s)));
     sock.ev.on('messages.upsert', ({ messages, type }) =>
@@ -235,7 +240,7 @@ export class Session extends EventEmitter {
         return this.setStatus('stopped');
       }
       if (code === DisconnectReason.loggedOut) {
-        await clearAuthState(this.id);
+        await this.forgetLogin();
         await logEvent(this.id, 'warn', 'Logged out from the phone (Linked devices). Link again to reconnect.');
         return this.setStatus('logged_out');
       }
@@ -267,9 +272,32 @@ export class Session extends EventEmitter {
       this.sock?.end(undefined);
     } catch {}
     this.sock = null;
-    await this.work; // finish writing what already arrived
+    // Finish writing what already arrived (bounded, so a long import can't block shutdown).
+    await Promise.race([this.work, sleep(15000)]);
+    await this.auth?.flush();
+    this.auth = null; // reload from the DB next time (another server may have used it meanwhile)
     await this.releaseLease();
     this.setStatus('stopped');
+  }
+
+  /** Another server holds the lease: disconnect here, keep keys saved, and keep checking (start() retries). */
+  async yieldToOther() {
+    clearInterval(this.leaseTimer);
+    this.leaseTimer = null;
+    const sock = this.sock;
+    this.sock = null; // so its close event is ignored
+    try {
+      sock?.end(undefined);
+    } catch {}
+    await this.auth?.flush();
+    this.auth = null;
+    await this.start(); // finds the lease taken → status "elsewhere" and retries every 30 s
+  }
+
+  async forgetLogin() {
+    this.auth?.discard();
+    this.auth = null;
+    await clearAuthState(this.id);
   }
 
   /** Unlink this device from the phone and forget the login. Stored chats are kept. */
@@ -279,7 +307,7 @@ export class Session extends EventEmitter {
       await this.sock?.logout();
     } catch {}
     this.sock = null;
-    await clearAuthState(this.id);
+    await this.forgetLogin();
     await this.releaseLease();
     this.setStatus('logged_out');
   }

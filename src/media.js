@@ -7,17 +7,37 @@ import config from './config.js';
 import { query } from './db.js';
 
 const useSupabase = () => !!(config.supabase.url && config.supabase.serviceKey);
+// New-style keys (sb_secret_…) go in the apikey header only; legacy JWT keys also as a Bearer token.
+const sbHeaders = (extra = {}) => {
+  const k = config.supabase.serviceKey;
+  return { apikey: k, ...(k.startsWith('eyJ') ? { Authorization: `Bearer ${k}` } : {}), ...extra };
+};
+let bucketReady = null;
+/** Create the private media bucket on first use if it doesn't exist yet. */
+function ensureBucket() {
+  bucketReady ||= fetch(`${config.supabase.url}/storage/v1/bucket`, {
+    method: 'POST',
+    headers: sbHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ id: config.supabase.bucket, name: config.supabase.bucket, public: false }),
+    signal: AbortSignal.timeout(20000),
+  }).then(async (res) => {
+    const body = await res.text();
+    if (!res.ok && !/already exists|Duplicate/i.test(body)) {
+      bucketReady = null;
+      throw new Error(`Could not create storage bucket: ${res.status} ${body}`);
+    }
+  });
+  return bucketReady;
+}
 
 export async function putMedia(path, buffer, mimetype) {
   if (useSupabase()) {
+    await ensureBucket();
     const res = await fetch(`${config.supabase.url}/storage/v1/object/${config.supabase.bucket}/${encodeURI(path)}`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.supabase.serviceKey}`,
-        'Content-Type': mimetype || 'application/octet-stream',
-        'x-upsert': 'true',
-      },
+      headers: sbHeaders({ 'Content-Type': mimetype || 'application/octet-stream', 'x-upsert': 'true' }),
       body: buffer,
+      signal: AbortSignal.timeout(60000),
     });
     if (!res.ok) throw new Error(`Supabase storage upload failed: ${res.status} ${await res.text()}`);
     return `sb:${path}`;
@@ -34,7 +54,8 @@ export async function getMedia(ref) {
   if (ref.startsWith('sb:')) {
     const path = ref.slice(3);
     const res = await fetch(`${config.supabase.url}/storage/v1/object/${config.supabase.bucket}/${encodeURI(path)}`, {
-      headers: { Authorization: `Bearer ${config.supabase.serviceKey}` },
+      headers: sbHeaders(),
+      signal: AbortSignal.timeout(60000),
     });
     if (!res.ok) throw new Error(`Supabase storage download failed: ${res.status}`);
     return { buffer: Buffer.from(await res.arrayBuffer()), mimetype: res.headers.get('content-type') };
@@ -62,7 +83,7 @@ export async function loadOutgoing({ url, base64, mimetype, fileName }) {
   // Google Drive "view" links → direct download links
   const drive = url.match(/drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?(?:export=\w+&)?id=)([\w-]+)/);
   const fetchUrl = drive ? `https://drive.google.com/uc?export=download&id=${drive[1]}` : url;
-  const res = await fetch(fetchUrl, { redirect: 'follow' });
+  const res = await fetch(fetchUrl, { redirect: 'follow', signal: AbortSignal.timeout(60000) });
   if (!res.ok) throw new Error(`Could not download attachment (${res.status})`);
   const buffer = Buffer.from(await res.arrayBuffer());
   const ctype = (res.headers.get('content-type') || '').split(';')[0];

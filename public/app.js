@@ -67,6 +67,7 @@
       h('div', { class: 'app' },
         h('nav', { class: 'nav', 'aria-label': 'Main' },
           h('div', { class: 'brand' }, 'WhatsApp Hub', h('small', {}, 'Zenith')),
+          link('board', 'Board'),
           link('accounts', 'Numbers'),
           link('inbox', 'Inbox'),
           link('outbox', 'Drafts & outbox', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null),
@@ -417,12 +418,122 @@
     state.reloadChats = loadChats;
   }
 
+  // ---------- task board ----------
+  async function viewBoard() {
+    await loadAccounts();
+    const accs = state.accounts;
+    if (!accs.length) return shell([h('h1', {}, 'Board'), h('p', { class: 'sub' }, 'Add and link a number first.')]);
+    const b = (state.board ||= { account: (accs.find((a) => a.isDefault) || accs[0]).id, past: false });
+    if (!accs.find((a) => a.id === b.account)) b.account = accs[0].id;
+    const [active, past] = await Promise.all([
+      api(`/api/tasks?account=${encodeURIComponent(b.account)}`),
+      b.past ? api(`/api/tasks?account=${encodeURIComponent(b.account)}&past=1`) : Promise.resolve([]),
+    ]);
+    const cols = [
+      ['upcoming', 'Upcoming'],
+      ['in_progress', 'In progress'],
+      ['waiting', 'Waiting for approval'],
+      ...(b.past ? [['done', 'Done & cancelled']] : []),
+    ];
+    const byCol = (k) => (k === 'done' ? past : active.filter((t) => t.status === k));
+    const card = (t) => {
+      const pct = t.total ? Math.round((100 * (t.sent + t.failed)) / t.total) : null;
+      const move = h('select', { 'aria-label': 'Move task', class: 'small-select', onchange: guard(async (e) => {
+        const v = e.target.value;
+        if (v === 'cancelled') {
+          if (!confirm('Cancel this task and its unsent messages?')) return (e.target.value = '');
+          await api(`/api/tasks/${t.id}/cancel`, { method: 'POST' });
+        } else await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: v } });
+        viewBoard();
+      }) },
+        h('option', { value: '' }, 'Move…'),
+        ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'].filter((s) => s !== t.status).map((s) => h('option', { value: s }, s.replace('_', ' '))),
+      );
+      return h('div', { class: 'card taskcard' },
+        h('div', { class: 'row' }, h('b', { class: 'grow' }, t.title), h('span', { class: 'tag' }, t.created_by === 'ai' ? 'AI' : 'You')),
+        t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, t.details) : null,
+        t.total
+          ? h('div', { style: 'margin:8px 0' },
+              h('div', { class: 'progress' }, h('i', { style: `width:${pct}%` })),
+              h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' },
+                `${t.sent}/${t.total} sent`, t.drafts ? ` · ${t.drafts} to approve` : '', t.failed ? ` · ${t.failed} failed` : '',
+                t.replied ? ` · ${t.replied} replied` : '', t.next_at && t.pending ? ` · next ${new Date(t.next_at).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}` : ''))
+          : null,
+        t.due_at ? h('div', { class: 'muted', style: 'font-size:12px' }, 'Due ', new Date(t.due_at).toLocaleString([], { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })) : null,
+        t.completed_at ? h('div', { class: 'muted', style: 'font-size:12px' }, `${t.status === 'cancelled' ? 'Cancelled' : 'Done'} `, new Date(t.completed_at).toLocaleString()) : null,
+        h('div', { class: 'row', style: 'margin-top:8px' },
+          t.drafts ? h('button', { class: 'btn small primary', onclick: guard(async () => {
+            if (!confirm(`Approve and start sending ${t.drafts} messages?`)) return;
+            await api(`/api/tasks/${t.id}/approve`, { method: 'POST' });
+            toast('Approved — sending with your delay settings');
+            viewBoard();
+          }) }, `Approve ${t.drafts}`) : null,
+          t.total ? h('button', { class: 'btn small', onclick: () => { state.outboxTask = t.id; state.outboxTab = 'all'; location.hash = 'outbox'; } }, 'Messages') : null,
+          t.status !== 'done' && t.status !== 'cancelled' ? move : null,
+        ),
+      );
+    };
+    const newTask = h('form', { class: 'card', onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      await api('/api/tasks', { body: { account: b.account, title: f.title.value, details: f.details.value || undefined, dueAt: f.due.value ? new Date(f.due.value).toISOString() : undefined } });
+      viewBoard();
+    }) },
+      h('h2', {}, 'New to-do'),
+      h('label', { class: 'field' }, h('span', {}, 'Title'), h('input', { type: 'text', name: 'title', required: true, placeholder: 'Follow up with interested chef candidates' })),
+      h('label', { class: 'field' }, h('span', {}, 'Details'), h('textarea', { name: 'details', rows: 2, placeholder: 'Who, what, any instructions for the AI' })),
+      h('label', { class: 'field' }, h('span', {}, 'Due'), h('input', { type: 'datetime-local', name: 'due' })),
+      h('button', { class: 'btn primary', type: 'submit' }, 'Add to board'),
+    );
+    const bulk = h('form', { class: 'card', onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const recipients = f.list.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
+        const [to, ...rest] = l.split(/[,\t;]/);
+        return { to: to.trim(), name: rest.join(' ').trim() || undefined };
+      });
+      const r = await api('/api/bulk', { body: { account: b.account, title: f.title.value, text: f.text.value, recipients,
+        scheduledAt: f.when.value ? new Date(f.when.value).toISOString() : undefined } });
+      alert(r.task
+        ? `${r.queued} messages ${r.mode === 'approve' ? 'saved for approval (see "Waiting for approval")' : 'queued'}.` + (r.skipped.length ? `\n\nSkipped ${r.skipped.length}:\n` + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n') : '')
+        : 'Nothing queued.\n' + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n'));
+      viewBoard();
+    }) },
+      h('h2', {}, 'Bulk send'),
+      h('label', { class: 'field' }, h('span', {}, 'Task title'), h('input', { type: 'text', name: 'title', required: true, placeholder: 'Chef candidates – WorkIndia' })),
+      h('label', { class: 'field' }, h('span', {}, 'Message'), h('textarea', { name: 'text', rows: 4, required: true, placeholder: 'Hi {name}, we have an opening for a Chef at Zenith Suites, Bengaluru. Interested?' }),
+        h('em', {}, '{name} is replaced by each person\'s name ("there" if missing).')),
+      h('label', { class: 'field' }, h('span', {}, 'People — one per line: number, name'), h('textarea', { name: 'list', rows: 5, required: true, placeholder: '9876543210, Ravi Kumar\n919812345678, Anita' }),
+        h('em', {}, 'Skips duplicates, opted-out contacts and anyone messaged in the last 30 days. Uses this number\'s delay, daily limit and hours.')),
+      h('label', { class: 'field' }, h('span', {}, 'Start at (optional)'), h('input', { type: 'datetime-local', name: 'when' })),
+      h('button', { class: 'btn primary', type: 'submit' }, 'Create bulk send'),
+    );
+    shell([
+      h('div', { class: 'row', style: 'margin-bottom:4px' },
+        h('h1', { class: 'grow', style: 'margin:0' }, 'Board'),
+        h('button', { class: 'btn small', onclick: () => { b.past = !b.past; viewBoard(); } }, b.past ? 'Hide past' : 'Show past'),
+      ),
+      h('p', { class: 'sub' }, 'What each number is doing and what\'s coming up. Bulk sends and follow-ups move between columns by themselves.'),
+      h('div', { class: 'seg', style: 'max-width:640px;margin-bottom:16px' },
+        accs.map((a) => h('button', { class: a.id === b.account ? 'on' : '', onclick: () => { b.account = a.id; viewBoard(); } }, a.label))),
+      h('div', { class: 'board' },
+        cols.map(([k, label]) => {
+          const items = byCol(k);
+          return h('section', { class: 'col', 'aria-label': label },
+            h('h2', {}, label, h('span', { class: 'muted', style: 'font-weight:400' }, ` ${items.length}`)),
+            items.length ? items.map(card) : h('p', { class: 'muted', style: 'font-size:13px' }, 'Nothing here'));
+        }),
+      ),
+      h('div', { class: 'settings-grid', style: 'margin-top:24px' }, newTask, bulk),
+    ]);
+  }
+
   // ---------- outbox ----------
   async function viewOutbox() {
     const tab = state.outboxTab || 'draft';
-    const rows = await api(`/api/outbox?status=${tab === 'draft' ? 'draft' : tab}&limit=100`);
+    const rows = await api(`/api/outbox?limit=200${tab === 'all' ? '' : `&status=${tab}`}${state.outboxTask ? `&task=${state.outboxTask}` : ''}`);
     const tabs = h('div', { class: 'seg', style: 'max-width:520px;margin-bottom:16px' },
-      [['draft', 'Drafts'], ['queued', 'Queued'], ['sent', 'Sent'], ['failed,rejected', 'Failed / rejected']].map(([k, l]) =>
+      [['draft', 'Drafts'], ['queued', 'Queued'], ['sent', 'Sent'], ['failed,rejected', 'Failed / rejected'], ['all', 'All']].map(([k, l]) =>
         h('button', { class: tab === k ? 'on' : '', onclick: () => { state.outboxTab = k; viewOutbox(); } }, l)));
     const items = rows.map((r) => {
       const ta = h('textarea', { rows: 3, value: r.payload.text || r.payload.attachment?.caption || '' });
@@ -444,6 +555,7 @@
     });
     shell([
       h('h1', {}, 'Drafts & outbox'),
+      state.outboxTask ? h('p', {}, `Showing messages of task #${state.outboxTask} · `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); state.outboxTask = null; viewOutbox(); } }, 'show all')) : null,
       h('p', { class: 'sub' }, 'Messages written by AI or campaigns wait here when a number is in approval mode. Edit, approve or reject.'),
       tabs,
       h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(380px,1fr))' }, items.length ? items : [h('p', { class: 'muted' }, 'Nothing here.')]),
@@ -592,9 +704,9 @@
   }
 
   // ---------- routing & live updates ----------
-  const views = { accounts: viewAccounts, inbox: viewInbox, outbox: viewOutbox, settings: viewSettings, connect: viewConnect, activity: viewActivity };
+  const views = { board: viewBoard, accounts: viewAccounts, inbox: viewInbox, outbox: viewOutbox, settings: viewSettings, connect: viewConnect, activity: viewActivity };
   async function route() {
-    state.route = location.hash.slice(1) || 'accounts';
+    state.route = location.hash.slice(1) || 'board';
     state.reloadChats = state.reloadThread = null;
     try {
       await (views[state.route] || viewAccounts)();

@@ -14,6 +14,7 @@ import * as outbox from './outbox.js';
 import { getMedia } from './media.js';
 import { mountMcp } from './mcp.js';
 import { toTs } from './util.js';
+import * as tasks from './tasks.js';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -130,8 +131,24 @@ export function buildApp() {
   }));
 
   api.get('/outbox', wrap(async (req, res) => res.json(await outbox.listOutbox({
-    account: req.query.account, status: req.query.status, limit: parseInt(req.query.limit, 10) || 50,
+    account: req.query.account, status: req.query.status, taskId: req.query.task, limit: parseInt(req.query.limit, 10) || 50,
   }))));
+
+  // ---- Task board
+  api.get('/tasks', wrap(async (req, res) => res.json(await tasks.listTasks({ account: req.query.account, past: req.query.past === '1' }))));
+  api.post('/tasks', wrap(async (req, res) => {
+    const { account, title, details, dueAt } = req.body || {};
+    const s = await manager.resolve(account);
+    res.json(await tasks.createTask({ account: s.id, title, details, dueAt, createdBy: 'you' }));
+  }));
+  api.patch('/tasks/:id', wrap(async (req, res) => res.json(await tasks.updateTask(req.params.id, req.body || {}))));
+  api.post('/tasks/:id/approve', wrap(async (req, res) => res.json(await outbox.approveTask(req.params.id))));
+  api.post('/tasks/:id/cancel', wrap(async (req, res) => res.json(await tasks.cancelTask(req.params.id))));
+  // Bulk send: { account, title, text (use {name}), recipients: [{ to, name, ... }], attachment?, scheduledAt?, skipIfContactedDays? }
+  api.post('/bulk', wrap(async (req, res) => {
+    const b = req.body || {};
+    res.json(await outbox.bulkSend({ ...b, source: b.automated === false ? 'api' : 'campaign', createdBy: 'you' }));
+  }));
   api.post('/outbox/:id/approve', wrap(async (req, res) => res.json(await outbox.approve(req.params.id, req.body || {}))));
   api.post('/outbox/:id/reject', wrap(async (req, res) => res.json(await outbox.reject(req.params.id))));
 

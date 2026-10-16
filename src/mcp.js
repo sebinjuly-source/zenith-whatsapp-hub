@@ -14,6 +14,7 @@ import { manager } from './wa/manager.js';
 import * as store from './store.js';
 import * as outbox from './outbox.js';
 import { toTs } from './util.js';
+import * as tasks from './tasks.js';
 
 const fmtTime = (ts) =>
   ts
@@ -284,12 +285,13 @@ function buildServer() {
       file_name: z.string().optional(),
       send_as: z.enum(['document', 'image', 'video', 'audio']).optional(),
       note: z.string().optional().describe('Why this message is being sent (shown to the owner on the draft)'),
+      task_id: z.number().int().optional().describe('Attach to a task on the board (e.g. a follow-up task)'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
       const jid = await resolveChat(s.id, a.to);
       const attachment = a.attachment_url ? { url: a.attachment_url, fileName: a.file_name, as: a.send_as } : undefined;
-      const row = await outbox.enqueue({ account: s.id, to: jid, payload: { text: a.text, attachment }, source: 'mcp', note: a.note });
+      const row = await outbox.enqueue({ account: s.id, to: jid, payload: { text: a.text, attachment }, source: 'mcp', note: a.note, taskId: a.task_id });
       return row.status === 'draft'
         ? `Draft #${row.id} created for ${jid} — waiting for approval in the dashboard (account "${s.id}" is in approve mode).`
         : `Queued #${row.id} for ${jid}; it goes out after the random delay, within sending hours and the daily cap.`;
@@ -335,6 +337,72 @@ function buildServer() {
     const jid = await resolveChat(s.id, a.chat);
     await s.fetchOlder(jid, a.count || 50);
     return 'Requested. Call get_messages again in about a minute.';
+  });
+
+  const taskLine = (t) =>
+    [
+      `#${t.id}`,
+      t.account_id,
+      t.status,
+      trim(t.title, 80),
+      t.total ? `sent ${t.sent}/${t.total}${t.drafts ? `, ${t.drafts} awaiting approval` : ''}${t.failed ? `, ${t.failed} failed` : ''}${t.replied ? `, ${t.replied} replied` : ''}` : null,
+      t.due_at ? `due ${fmtTime(Math.floor(new Date(t.due_at).getTime() / 1000))}` : null,
+      t.details ? `— ${trim(t.details, 160)}` : null,
+    ].filter(Boolean).join(' | ');
+
+  tool('list_tasks', 'Show the task board: what each number is doing or will do (bulk sends with progress, follow-ups, to-dos). Past tasks only if past=true.', {
+    account: z.string().optional(), past: z.boolean().optional(),
+  }, async (a) => {
+    const rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past });
+    return rows.length ? rows.map(taskLine).join('\n') : 'No tasks.';
+  });
+
+  tool('create_task', 'Add a card to the task board, e.g. "Follow up tomorrow with the 10 candidates who showed interest". Put the who/what in details so a later session can act on it.', {
+    account: accountArg, title: z.string(), details: z.string().optional(), due: z.string().optional().describe('YYYY-MM-DD or ISO datetime'),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    const t = await tasks.createTask({ account: s.id, title: a.title, details: a.details, dueAt: a.due, createdBy: 'ai' });
+    return `Task #${t.id} created on ${s.id}.`;
+  });
+
+  tool('update_task', 'Move or edit a task card (status: upcoming, in_progress, waiting, done, cancelled). Cancelling also stops its unsent messages.', {
+    id: z.number().int(), status: z.enum(['upcoming', 'in_progress', 'waiting', 'done', 'cancelled']).optional(),
+    title: z.string().optional(), details: z.string().optional(), due: z.string().optional(),
+  }, async (a) => {
+    const t = a.status === 'cancelled' ? await tasks.cancelTask(a.id) : await tasks.updateTask(a.id, { status: a.status, title: a.title, details: a.details, dueAt: a.due });
+    return `Task #${t.id}: ${t.status} — ${t.title}`;
+  });
+
+  tool(
+    'bulk_send',
+    'Send one message to many people as a single task on the board, e.g. job invites to candidates from a sheet. Use {name} (and any other recipient field like {role}) in the text. Skips invalid numbers, duplicates, opted-out contacts, and people this number messaged in the last N days. Respects the number\'s approval mode, random delay, daily cap and sending hours. Returns what was queued and what was skipped and why.',
+    {
+      account: accountArg,
+      title: z.string().describe('Short card title, e.g. "Chef candidates – WorkIndia 16 Oct"'),
+      text: z.string().describe('Message, may contain {name} etc.'),
+      recipients: z.array(z.object({ to: z.string(), name: z.string().optional() }).passthrough()).min(1),
+      details: z.string().optional(),
+      attachment_url: z.string().optional(),
+      file_name: z.string().optional(),
+      schedule_at: z.string().optional().describe('ISO datetime to start (default now)'),
+      skip_if_contacted_days: z.number().int().min(0).optional().describe('Default 30; 0 = do not skip'),
+    },
+    async (a) => {
+      const r = await outbox.bulkSend({
+        account: a.account, title: a.title, details: a.details, text: a.text, recipients: a.recipients,
+        attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : undefined,
+        scheduledAt: a.schedule_at, source: 'mcp', createdBy: 'ai',
+        skipIfContactedDays: a.skip_if_contacted_days ?? 30, allowRepeat: a.skip_if_contacted_days === 0,
+      });
+      const skipped = r.skipped.length ? `\nSkipped ${r.skipped.length}: ${r.skipped.slice(0, 30).map((x) => `${x.to} (${x.reason})`).join('; ')}` : '';
+      if (!r.task) return `Nothing queued.${skipped}`;
+      return `Task #${r.task.id}: ${r.queued} messages ${r.mode === 'approve' ? 'saved as drafts — waiting for the owner to approve on the board' : 'queued'}.${skipped}`;
+    },
+  );
+
+  tool('approve_task', 'Approve all drafts of a task so they start sending. Only when the user has explicitly approved in this conversation.', { id: z.number().int() }, async (a) => {
+    const r = await outbox.approveTask(a.id);
+    return `Approved ${r.approved} messages of task #${a.id}.`;
   });
 
   return server;

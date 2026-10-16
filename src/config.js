@@ -8,11 +8,14 @@ const config = {
   databaseUrl: process.env.DATABASE_URL || '',
   localDbDir: process.env.LOCAL_DB_DIR || './data/pglite',
   supabase: {
-    url: (process.env.SUPABASE_URL || '').replace(/\/$/, ''),
+    // Accept the project URL with or without a trailing /rest/v1/.
+    url: (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1$/, ''),
     serviceKey: process.env.SUPABASE_SERVICE_KEY || '',
     bucket: process.env.SUPABASE_BUCKET || 'whatsapp-media',
   },
   tz: process.env.TZ_NAME || 'Asia/Kolkata',
+  // Tests only: shrink send gaps (1 = real time).
+  timeScale: parseFloat(process.env.TIME_SCALE || '1'),
   logLevel: process.env.LOG_LEVEL || 'info',
   // Identifies this running server in account leases.
   instanceId: `${process.env.RENDER_INSTANCE_ID || os.hostname()}-${process.pid}-${crypto.randomBytes(3).toString('hex')}`,

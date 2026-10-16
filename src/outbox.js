@@ -1,7 +1,7 @@
 /**
  * Every outgoing message goes through the outbox table.
- *  - You (dashboard / REST / Apps Script): queued and sent right away, at least 5 s apart.
- *  - AI agents and campaigns: become drafts when the account is in "approve" mode, otherwise queued;
+ *  - You (dashboard / REST / Apps Script): sent right away (jumping ahead of bulk sends), at least 5 s apart.
+ *  - AI agents and bulk sends: become drafts when the number is in "approve" mode, otherwise queued;
  *    they respect the random delay, the daily cap and the sending window.
  */
 import { EventEmitter } from 'events';
@@ -11,8 +11,10 @@ import { manager } from './wa/manager.js';
 import { loadOutgoing } from './media.js';
 import { toJid } from './store.js';
 import { MIN_DELAY_SEC, randomDelayMs, insideSendingWindow } from './settings.js';
+import { createTask, refreshTask, fillTemplate, planRecipients } from './tasks.js';
 
 const AUTOMATED = ['mcp', 'campaign'];
+const PRIORITY_YOU = 10; // your own / API sends go before queued bulk messages
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const done = new EventEmitter();
 done.setMaxListeners(0);
@@ -21,64 +23,112 @@ const workers = new Map(); // accountId -> { wake }
 /**
  * payload: { text?, attachment?: { url | base64, fileName?, mimetype?, caption?, as?: 'document'|'image'|'video'|'audio' } }
  */
-export async function enqueue({ account, to, payload, source, note, scheduledAt, priority = 0, campaignId = null }) {
+export async function enqueue({ account, to, payload, source, note, scheduledAt, taskId = null }) {
   const session = await manager.resolve(account);
   if (!payload?.text && !payload?.attachment) throw new Error('Nothing to send: give text and/or attachment');
   const jid = toJid(to);
   const automated = AUTOMATED.includes(source);
   const status = automated && session.settings.aiMode === 'approve' ? 'draft' : 'queued';
-  const rows = await query(
-    `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, campaign_id)
+  const [row] = await query(
+    `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id)
      VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz, now()),$9) RETURNING *`,
-    [session.id, jid, JSON.stringify(payload), source, status, priority, note || null, scheduledAt || null, campaignId],
+    [session.id, jid, JSON.stringify(payload), source, status, automated ? 0 : PRIORITY_YOU, note || null, scheduledAt || null, taskId],
   );
+  if (taskId) await refreshTask(taskId);
   if (status === 'queued') wake(session.id);
-  return rows[0];
+  return row;
 }
 
-/** Resolve when the outbox row is sent or failed (or after timeoutMs). */
+/**
+ * Send one message (template with {name} etc.) to many people as one task on the board.
+ * recipients: [{ to, name?, ...extra fields usable as {field} }] or plain numbers.
+ */
+export async function bulkSend({ account, title, details, recipients, text, attachment, scheduledAt, source = 'campaign',
+  createdBy = 'you', skipIfContactedDays = 30, allowRepeat = false, taskId }) {
+  const session = await manager.resolve(account);
+  if (!text && !attachment) throw new Error('Give the message text (can use {name}) and/or an attachment');
+  const { ok, skipped } = await planRecipients(session.id, recipients, { skipIfContactedDays, allowRepeat });
+  if (!ok.length) return { task: null, queued: 0, skipped };
+  const task = taskId
+    ? { id: taskId }
+    : await createTask({ account: session.id, title: title || `Message ${ok.length} people`, details, kind: 'bulk', createdBy });
+  let n = 0;
+  for (const r of ok) {
+    const vars = { ...r.vars, name: r.vars.name || r.vars.Name };
+    const body = text ? fillTemplate(r.vars.text || text, vars) : undefined;
+    const att = attachment ? { ...attachment, caption: attachment.caption ? fillTemplate(attachment.caption, vars) : undefined } : undefined;
+    await query(
+      `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id)
+       VALUES ($1,$2,$3,$4,$5,0,$6,COALESCE($7::timestamptz, now()),$8)`,
+      [session.id, r.jid, JSON.stringify({ text: body, attachment: att }), source,
+        AUTOMATED.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued',
+        title || null, scheduledAt || null, task.id],
+    );
+    n++;
+  }
+  await refreshTask(task.id);
+  wake(session.id);
+  return { task, queued: n, skipped, mode: session.settings.aiMode };
+}
+
+/** Resolve when the outbox row is sent or failed (or null after timeoutMs). */
 export function waitFor(id, timeoutMs = 90000) {
   return new Promise((resolve) => {
-    const t = setTimeout(() => {
-      done.removeListener(String(id), on);
-      resolve(null);
-    }, timeoutMs);
     const on = (row) => {
       clearTimeout(t);
       resolve(row);
     };
+    const t = setTimeout(() => {
+      done.removeListener(String(id), on);
+      resolve(null);
+    }, timeoutMs);
     done.once(String(id), on);
   });
 }
 
 export async function approve(id, { text } = {}) {
-  const rows = await query(`SELECT * FROM outbox WHERE id = $1`, [id]);
-  const row = rows[0];
+  const [row] = await query(`SELECT * FROM outbox WHERE id = $1`, [id]);
   if (!row) throw new Error('Draft not found');
   if (row.status !== 'draft') throw new Error(`Item is ${row.status}, not a draft`);
   const payload = { ...row.payload };
   if (typeof text === 'string' && text.trim()) {
-    if (payload.attachment && !payload.text) payload.attachment.caption = text;
+    if (payload.attachment && !payload.text) payload.attachment = { ...payload.attachment, caption: text };
     else payload.text = text;
   }
-  const updated = await query(
-    `UPDATE outbox SET status = 'queued', payload = $2, scheduled_at = now() WHERE id = $1 RETURNING *`,
+  const [updated] = await query(
+    `UPDATE outbox SET status = 'queued', payload = $2, scheduled_at = GREATEST(scheduled_at, now())
+     WHERE id = $1 AND status = 'draft' RETURNING *`,
     [id, JSON.stringify(payload)],
   );
+  if (!updated) throw new Error('Draft was already handled');
+  await refreshTask(row.task_id);
   wake(row.account_id);
-  return updated[0];
+  return updated;
+}
+
+/** Approve every draft of a task in one go. */
+export async function approveTask(taskId) {
+  const rows = await query(
+    `UPDATE outbox SET status = 'queued', scheduled_at = GREATEST(scheduled_at, now())
+     WHERE task_id = $1 AND status = 'draft' RETURNING account_id`,
+    [taskId],
+  );
+  await refreshTask(taskId);
+  for (const a of new Set(rows.map((r) => r.account_id))) wake(a);
+  return { approved: rows.length };
 }
 
 export async function reject(id) {
-  const rows = await query(
+  const [row] = await query(
     `UPDATE outbox SET status = 'rejected' WHERE id = $1 AND status IN ('draft','queued') RETURNING *`,
     [id],
   );
-  if (!rows[0]) throw new Error('Nothing to reject (already sent?)');
-  return rows[0];
+  if (!row) throw new Error('Nothing to reject (already sent?)');
+  await refreshTask(row.task_id);
+  return row;
 }
 
-export async function listOutbox({ account, status, limit = 50 } = {}) {
+export async function listOutbox({ account, status, taskId, limit = 50 } = {}) {
   const p = [];
   const where = [];
   if (account) {
@@ -89,12 +139,17 @@ export async function listOutbox({ account, status, limit = 50 } = {}) {
     p.push(status.split(','));
     where.push(`o.status = ANY($${p.length})`);
   }
-  p.push(Math.min(limit, 200));
+  if (taskId) {
+    p.push(taskId);
+    where.push(`o.task_id = $${p.length}`);
+  }
+  p.push(Math.min(limit, 500));
   return query(
-    `SELECT o.*, COALESCE(ct.name, ct.notify, ch.name) AS to_name
+    `SELECT o.*, COALESCE(ct.name, ct.notify, ch.name) AS to_name, t.title AS task_title
      FROM outbox o
      LEFT JOIN contacts ct ON ct.account_id = o.account_id AND ct.jid = o.to_jid
      LEFT JOIN chats ch ON ch.account_id = o.account_id AND ch.jid = o.to_jid
+     LEFT JOIN tasks t ON t.id = o.task_id
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
      ORDER BY o.id DESC LIMIT $${p.length}`,
     p,
@@ -102,13 +157,13 @@ export async function listOutbox({ account, status, limit = 50 } = {}) {
 }
 
 async function automatedSentToday(accountId) {
-  const rows = await query(
+  const [r] = await query(
     `SELECT count(*)::int AS n FROM outbox
      WHERE account_id = $1 AND source = ANY($2) AND status = 'sent'
        AND sent_at >= (date_trunc('day', now() AT TIME ZONE $3) AT TIME ZONE $3)`,
     [accountId, AUTOMATED, config.tz],
   );
-  return rows[0].n;
+  return r.n;
 }
 
 async function buildContent(payload) {
@@ -131,8 +186,8 @@ function wake(accountId) {
 
 function startWorker(accountId) {
   let wakeUp = () => {};
-  const w = { wake: () => wakeUp() };
-  workers.set(accountId, w);
+  let nextAutomatedAt = 0; // random gap applies between automated messages only
+  workers.set(accountId, { wake: () => wakeUp() });
   const nap = (ms) =>
     new Promise((resolve) => {
       const t = setTimeout(resolve, ms);
@@ -154,60 +209,81 @@ function startWorker(accountId) {
   })();
 
   async function tick() {
-      let session;
-      try {
-        session = manager.get(accountId);
-      } catch {
-        workers.delete(accountId);
-        return 'stop'; // account removed
-      }
-      if (session.status !== 'open') {
-        await nap(15000);
-        return;
-      }
-      const s = session.settings;
-      const automatedAllowed = insideSendingWindow(s) && (await automatedSentToday(accountId)) < s.dailyCap;
-      const rows = await query(
-        `SELECT * FROM outbox WHERE account_id = $1 AND status = 'queued' AND scheduled_at <= now()
+    let session;
+    try {
+      session = manager.get(accountId);
+    } catch {
+      workers.delete(accountId);
+      return 'stop'; // account removed
+    }
+    if (session.status !== 'open') {
+      await nap(15000);
+      return;
+    }
+    const s = session.settings;
+    const gapOver = Date.now() >= nextAutomatedAt;
+    const automatedAllowed = gapOver && insideSendingWindow(s) && (await automatedSentToday(accountId)) < s.dailyCap;
+    // Claim one row atomically, so two servers can never pick the same message.
+    const [row] = await query(
+      `UPDATE outbox SET status = 'sending', sent_at = now() WHERE id = (
+         SELECT id FROM outbox WHERE account_id = $1 AND status = 'queued' AND scheduled_at <= now()
            AND ($2 OR source <> ALL($3))
-         ORDER BY priority DESC, id LIMIT 1`,
-        [accountId, automatedAllowed, AUTOMATED],
+         ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED)
+       RETURNING *`,
+      [accountId, automatedAllowed, AUTOMATED],
+    );
+    if (!row) {
+      // Wait for new work, or until the random gap ends, whichever is first.
+      const wait = !gapOver ? Math.max(1000, nextAutomatedAt - Date.now()) : automatedAllowed ? 60000 : 5 * 60000;
+      await nap(Math.min(wait, 5 * 60000));
+      return;
+    }
+    const automated = AUTOMATED.includes(row.source);
+    let result;
+    try {
+      const content = await buildContent(row.payload);
+      const textLen = (row.payload.text || '').length;
+      const typingMs = s.typing ? Math.min(6000, Math.max(1500, textLen * 40)) : 0;
+      const sent = await session.send(row.to_jid, content, { typingMs });
+      [result] = await query(
+        `UPDATE outbox SET status = 'sent', sent_at = now(), message_id = $2, error = NULL WHERE id = $1 RETURNING *`,
+        [row.id, sent?.key?.id || null],
       );
-      const row = rows[0];
-      if (!row) {
-        await nap(automatedAllowed ? 60000 : 5 * 60000);
-        return;
-      }
-      const automated = AUTOMATED.includes(row.source);
-      await query(`UPDATE outbox SET status = 'sending' WHERE id = $1`, [row.id]);
-      let result;
-      try {
-        const content = await buildContent(row.payload);
-        const textLen = (row.payload.text || '').length;
-        const typingMs = s.typing ? Math.min(6000, Math.max(1500, textLen * 40)) : 0;
-        const sent = await session.send(row.to_jid, content, { typingMs });
-        result = (
-          await query(`UPDATE outbox SET status = 'sent', sent_at = now(), message_id = $2, error = NULL WHERE id = $1 RETURNING *`, [
-            row.id, sent?.key?.id || null,
-          ])
-        )[0];
-      } catch (err) {
-        result = (
-          await query(`UPDATE outbox SET status = 'failed', error = $2 WHERE id = $1 RETURNING *`, [row.id, err.message])
-        )[0];
-        await logEvent(accountId, 'warn', `Send to ${row.to_jid.split('@')[0]} failed: ${err.message}`);
-      }
-      done.emit(String(row.id), result);
-      await sleep(automated ? randomDelayMs(s) : MIN_DELAY_SEC * 1000);
+    } catch (err) {
+      [result] = await query(`UPDATE outbox SET status = 'failed', error = $2 WHERE id = $1 RETURNING *`, [row.id, err.message]);
+      await logEvent(accountId, 'warn', `Send to ${row.to_jid.split('@')[0]} failed: ${err.message}`);
+    }
+    done.emit(String(row.id), result);
+    if (row.task_id) await refreshTask(row.task_id).catch(() => {});
+    if (automated) nextAutomatedAt = Date.now() + randomDelayMs(s) * config.timeScale;
+    await sleep(MIN_DELAY_SEC * 1000 * config.timeScale); // never two messages from one number within 5 s
   }
 }
 
-export async function startOutbox() {
-  // A send that was in progress when the server stopped may or may not have gone out — don't resend blindly.
-  await query(
-    `UPDATE outbox SET status = 'failed', error = 'Interrupted by a restart — check the chat before resending'
-     WHERE status = 'sending'`,
+/**
+ * A send stuck in "sending" for minutes was interrupted (server restarted mid-send). It may or may not
+ * have gone out, so mark it failed instead of resending blindly. Safe with two servers: a live send
+ * never takes this long (sending times out after 2 min).
+ */
+export async function sweepStuck() {
+  const rows = await query(
+    `UPDATE outbox SET status = 'failed', error = 'Interrupted (server restart) — check the chat before resending'
+     WHERE status = 'sending' AND sent_at < now() - interval '4 minutes' RETURNING task_id`,
   );
+  for (const r of rows) if (r.task_id) await refreshTask(r.task_id).catch(() => {});
+}
+
+export async function startOutbox() {
+  await sweepStuck();
+  setInterval(() => sweepStuck().catch(() => {}), 5 * 60000).unref();
+  // Tasks scheduled for later move to "in progress" when their time comes.
+  setInterval(async () => {
+    const due = await query(
+      `SELECT DISTINCT task_id FROM outbox WHERE task_id IS NOT NULL AND status = 'queued'
+         AND scheduled_at BETWEEN now() - interval '10 minutes' AND now() + interval '1 minute'`,
+    ).catch(() => []);
+    for (const d of due) await refreshTask(d.task_id).catch(() => {});
+  }, 60000).unref();
   const rows = await query(`SELECT id FROM accounts`);
   for (const r of rows) startWorker(r.id);
   manager.on('change', (info) => {

@@ -6,7 +6,7 @@ per-number rules for delays, daily limits, sending hours and draft-for-approval.
 
 - **Engine:** [Baileys](https://github.com/WhiskeySockets/Baileys) v7 (WhatsApp Web protocol, linked device — your phone keeps working normally)
 - **Storage:** Postgres (Supabase in production; an embedded local Postgres when `DATABASE_URL` is empty). WhatsApp logins are stored in the database too, so Render wipes/restarts don't log you out.
-- **Dashboard:** `/` — numbers & QR/pairing-code linking, inbox, drafts/outbox, per-number settings, activity
+- **Dashboard:** `/` — task board per number, numbers & QR/pairing-code linking (choose full / recent / no history), inbox, drafts/outbox, per-number settings, activity
 - **REST API:** `/api/*` — see below
 - **MCP for AI agents:** `/mcp/<API_KEY>`
 
@@ -28,6 +28,14 @@ npm test
 4. Open the dashboard, add a number, scan the QR (or use a pairing code). **Keep the phone online with WhatsApp open, and don't redeploy, until "Full history synced" shows.**
 
 Only one server may run a given number at a time (a second one gets "Running elsewhere").
+
+## Reliability notes
+
+- WhatsApp's encryption keys live in memory (like a file-based bot) and are saved to Postgres in the background (~0.3 s), so sending never waits on the database.
+- A per-number lease in Postgres guarantees only one server runs a number (PC first sync → Render hand-over, overlapping Render deploys).
+- Every send has a time limit; an interrupted send is marked failed, never re-sent blindly. Your own/API sends jump ahead of bulk sends.
+- Messages that arrive while the server is offline are delivered by WhatsApp on reconnect. After ~14 days offline WhatsApp unlinks the device — re-link with "Recent" to fill the gap.
+- On Render the server pings itself every 10 min so the free plan doesn't sleep.
 
 ## Linking & history
 
@@ -57,7 +65,9 @@ Replies with an opt-out word ("stop", "not interested", …) tag the contact `op
 | GET | `/api/accounts/:id/chats/:jid/messages` | `limit, before, after` |
 | GET | `/api/search` | `q, account, chat, fromMe, since, until, type, limit` |
 | PATCH | `/api/accounts/:id/contacts/:jid` | `{ addTags, removeTags, leadStatus, notes, summary, markReviewed }` |
-| GET | `/api/outbox` · POST `/api/outbox/:id/approve` · `/reject` | drafts & queue |
+| GET | `/api/outbox` · POST `/api/outbox/:id/approve` · `/reject` | drafts & queue (`?task=` filters by task) |
+| POST | `/api/bulk` | `{ account, title, text (uses {name}), recipients: [{ to, name, … }], attachment?, scheduledAt?, skipIfContactedDays? }` → one task |
+| GET/POST/PATCH | `/api/tasks` · `/api/tasks/:id` · POST `/api/tasks/:id/approve` · `/cancel` | task board |
 | GET | `/api/media/:id/:jid/:msgId` | file (`?save=1` keeps a copy) |
 
 `account` = account id (e.g. `hiring`) or its phone number; omitted = default number.
@@ -66,7 +76,8 @@ Phone numbers: `9198…`, `+91 98…`, or 10-digit Indian numbers (91 is added).
 ## MCP tools
 
 `list_accounts, list_chats, get_messages, search_messages, list_shared_contacts, find_followups, get_contact,
-update_contact, send_message, list_outbox, approve_draft, reject_draft, save_media, fetch_older_messages`
+update_contact, send_message, bulk_send, list_tasks, create_task, update_task, approve_task, list_outbox,
+approve_draft, reject_draft, save_media, fetch_older_messages`
 
 All return compact one-line-per-item text with small default limits; agents save summaries/tags with
 `update_contact` (+ `mark_reviewed`) so later sessions don't re-read whole chats.

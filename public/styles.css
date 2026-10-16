@@ -184,3 +184,11 @@ table.list th { color: var(--ink-3); font-weight: 550; background: var(--panel-2
   .inbox:not(.has-chat) .thread { display: none; }
   .thread { height: calc(100vh - 54px); }
 }
+
+/* board */
+.board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr); gap: 14px; overflow-x: auto; align-items: start; padding-bottom: 6px; }
+.board .col { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; min-height: 120px; display: grid; gap: 10px; align-content: start; }
+.board .col h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-2); margin: 0; }
+.taskcard { padding: 12px; }
+.small-select { width: auto; padding: 4px 8px; font-size: 13px; }
+@media (max-width: 760px) { .board { grid-auto-flow: row; grid-auto-columns: auto; } }
