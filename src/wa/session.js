@@ -545,7 +545,7 @@ export class Session extends EventEmitter {
       this.sentCache.set(sent.key.id, sent.message);
       if (this.sentCache.size > 500) this.sentCache.delete(this.sentCache.keys().next().value);
       // Record it now: WhatsApp's own "you sent this" event can be held back for a while during a sync.
-      await this.enqueue(() => this.ingest([sent]));
+      this.enqueue(() => this.ingest([sent])); // not awaited: a big history chunk in the queue must not delay sending
     }
     return sent;
   }
