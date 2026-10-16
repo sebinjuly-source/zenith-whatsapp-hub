@@ -30,6 +30,9 @@ import { normalizeSettings } from '../settings.js';
 const SYNC_TYPE = proto.HistorySync.HistorySyncType;
 const LEASE_SEC = 90;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Reject if a WhatsApp call doesn't finish in time, so nothing waits forever. */
+const withTimeout = (promise, ms, what) =>
+  Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} timed out after ${ms / 1000}s`)), ms))]);
 let cachedVersion = null;
 
 export class Session extends EventEmitter {
@@ -154,7 +157,7 @@ export class Session extends EventEmitter {
     const sock = makeWASocket({
       version: cachedVersion,
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, this.log) },
-      logger: this.log.child({ lib: 'baileys' }, { level: 'warn' }),
+      logger: this.log.child({ lib: 'baileys' }, { level: process.env.BAILEYS_LOG_LEVEL || 'warn' }),
       // A "Desktop" companion with requireFullSync asks the phone for the FULL history, not just recent chats.
       // (macOS/Windows Desktop currently get rejected with 428 at connect; Ubuntu Desktop is accepted.)
       browser: Browsers.ubuntu('Desktop'),
@@ -528,7 +531,7 @@ export class Session extends EventEmitter {
   async send(jid, content, { typingMs = 0 } = {}) {
     if (!this.sock || this.status !== 'open') throw new Error(`Number "${this.id}" is not connected`);
     if (!isJidGroup(jid)) {
-      const [check] = await this.sock.onWhatsApp(jid).catch(() => [null]);
+      const [check] = await withTimeout(this.sock.onWhatsApp(jid), 30000, 'Number check').catch(() => [null]);
       if (check && !check.exists) throw new Error(`${jid.split('@')[0]} is not on WhatsApp`);
     }
     if (typingMs > 0) {
@@ -537,10 +540,12 @@ export class Session extends EventEmitter {
       await sleep(typingMs);
       await this.sock.sendPresenceUpdate('paused', jid).catch(() => {});
     }
-    const sent = await this.sock.sendMessage(jid, content);
+    const sent = await withTimeout(this.sock.sendMessage(jid, content), 120000, 'Sending (it may still go out — check the chat before resending)');
     if (sent?.key?.id) {
       this.sentCache.set(sent.key.id, sent.message);
       if (this.sentCache.size > 500) this.sentCache.delete(this.sentCache.keys().next().value);
+      // Record it now: WhatsApp's own "you sent this" event can be held back for a while during a sync.
+      await this.enqueue(() => this.ingest([sent]));
     }
     return sent;
   }
