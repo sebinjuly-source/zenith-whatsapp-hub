@@ -14,13 +14,9 @@ class Manager extends EventEmitter {
   }
 
   async init() {
-    const accounts = await query('SELECT * FROM accounts ORDER BY created_at');
-    for (const acc of accounts) {
-      const s = this.attach(acc);
-      if (acc.enabled && (await hasAuthState(acc.id))) {
-        s.start().catch((err) => logEvent(acc.id, 'error', `Start failed: ${err.message}`));
-      }
-    }
+    await this.refresh();
+    // Keep in step with other servers sharing the database (numbers added, linked or handed over elsewhere).
+    setInterval(() => this.refresh().catch(() => {}), 30000).unref();
   }
 
   /**
@@ -38,7 +34,11 @@ class Manager extends EventEmitter {
         s.start().catch((err) => logEvent(acc.id, 'error', `Start failed: ${err.message}`));
       }
     }
-    for (const id of this.sessions.keys()) if (!ids.has(id)) this.sessions.delete(id);
+    for (const [id, s] of this.sessions) {
+      if (ids.has(id)) continue;
+      await s.stop().catch(() => {}); // deleted from another server
+      this.sessions.delete(id);
+    }
   }
 
   attach(account) {
@@ -56,6 +56,7 @@ class Manager extends EventEmitter {
   }
 
   async defaultId() {
+    if (!this.sessions.size) await this.refresh();
     const rows = await query('SELECT id FROM accounts ORDER BY is_default DESC, created_at LIMIT 1');
     return rows[0]?.id || null;
   }
@@ -67,9 +68,12 @@ class Manager extends EventEmitter {
       if (!id) throw new Error('No accounts yet — add one in the dashboard');
       return this.get(id);
     }
-    if (this.sessions.has(idOrPhone)) return this.get(idOrPhone);
-    const digits = String(idOrPhone).replace(/\D/g, '');
-    for (const s of this.sessions.values()) if (digits && s.account.phone === digits) return s;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (this.sessions.has(idOrPhone)) return this.get(idOrPhone);
+      const digits = String(idOrPhone).replace(/\D/g, '');
+      for (const s of this.sessions.values()) if (digits && s.account.phone === digits) return s;
+      if (attempt === 0) await this.refresh(); // maybe added on another server a moment ago
+    }
     throw new Error(`Unknown account "${idOrPhone}"`);
   }
 

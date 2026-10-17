@@ -118,7 +118,17 @@ export class Session extends EventEmitter {
     ]).catch(() => {});
   }
 
-  async start({ pairPhone, linking = false } = {}) {
+  /** Connect (or wait for the lease). Overlapping calls (refresh timer, retries, the dashboard) run only once. */
+  async start(opts = {}) {
+    if (this.starting) return this.starting;
+    this.starting = this.doStart(opts).finally(() => {
+      this.starting = null;
+    });
+    return this.starting;
+  }
+
+  async doStart({ pairPhone, linking = false } = {}) {
+    if (this.sock && !linking) return; // already connected/connecting
     this.stopping = false;
     clearTimeout(this.leaseRetry);
     if (!(await this.acquireLease())) {

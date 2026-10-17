@@ -78,6 +78,7 @@ function buildServer() {
 
   tool('list_accounts', 'List the WhatsApp numbers in the hub: id, purpose, phone, connection status, AI mode (approve/auto), and how much history is stored. Start here.', {}, async () => {
     const lines = [];
+    await manager.refresh();
     for (const a of manager.list()) {
       const st = await store.accountStats(a.id);
       lines.push(
