@@ -303,12 +303,14 @@ export async function backfillStatus(accountId) {
 const backfills = new Set(); // accounts with a backfill running in this process
 
 async function runJobs(session) {
-  // A backfill whose server died mid-way (no progress saved for 10 min) becomes pending again and resumes.
-  await query(
-    `UPDATE jobs SET status = 'pending' WHERE account_id = $1 AND kind = 'backfill' AND status = 'running'
-       AND updated_at < now() - interval '10 minutes'`,
-    [session.id],
-  );
+  // We hold this number's lease, so no other server can be running its backfill: one marked "running"
+  // but not running here was cut off by a restart/deploy — resume it right away from its saved progress.
+  if (!backfills.has(session.id)) {
+    await query(
+      `UPDATE jobs SET status = 'pending' WHERE account_id = $1 AND kind = 'backfill' AND status = 'running'`,
+      [session.id],
+    );
+  }
   for (;;) {
     const [job] = await query(
       `UPDATE jobs SET status = 'running' WHERE id = (
