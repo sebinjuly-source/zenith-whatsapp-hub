@@ -551,7 +551,13 @@
   // ---------- outbox ----------
   async function viewOutbox() {
     const tab = state.outboxTab || 'draft';
-    const rows = await api(`/api/outbox?limit=200${tab === 'all' ? '' : `&status=${tab}`}${state.outboxTask ? `&task=${state.outboxTask}` : ''}`);
+    if (!state.accounts.length) await loadAccounts();
+    const acc = state.outboxAccount || '';
+    const rows = await api(`/api/outbox?limit=200${tab === 'all' ? '' : `&status=${tab}`}${state.outboxTask ? `&task=${state.outboxTask}` : ''}${acc ? `&account=${encodeURIComponent(acc)}` : ''}`);
+    const labelOf = (id) => state.accounts.find((a) => a.id === id)?.label || id;
+    const numberPick = h('div', { class: 'seg', style: 'max-width:640px;margin-bottom:10px' },
+      [['', 'All numbers'], ...state.accounts.map((a) => [a.id, `${a.label}${a.phone ? ' · +' + a.phone : ''}`])].map(([k, l]) =>
+        h('button', { class: acc === k ? 'on' : '', onclick: () => { state.outboxAccount = k; viewOutbox(); } }, l)));
     const tabs = h('div', { class: 'seg', style: 'max-width:520px;margin-bottom:16px' },
       [['draft', 'Drafts'], ['queued', 'Queued'], ['sent', 'Sent'], ['failed,rejected', 'Failed / rejected'], ['all', 'All']].map(([k, l]) =>
         h('button', { class: tab === k ? 'on' : '', onclick: () => { state.outboxTab = k; viewOutbox(); } }, l)));
@@ -560,7 +566,7 @@
       return h('div', { class: 'card' },
         h('div', { class: 'row' },
           h('b', { class: 'grow' }, r.to_name || '+' + r.to_jid.split('@')[0]),
-          h('span', { class: 'tag' }, r.account_id), h('span', { class: 'tag' }, r.source), h('span', { class: 'muted' }, new Date(r.created_at).toLocaleString())),
+          h('span', { class: 'tag', title: 'Sent from this number' }, 'From: ' + labelOf(r.account_id)), h('span', { class: 'tag' }, { mcp: 'AI', campaign: 'bulk', api: 'script', dashboard: 'you' }[r.source] || r.source), h('span', { class: 'muted' }, new Date(r.created_at).toLocaleString())),
         r.note ? h('p', { class: 'muted', style: 'margin:6px 0' }, 'Why: ', r.note) : null,
         r.payload.attachment ? h('p', { class: 'muted', style: 'margin:6px 0' }, '📎 ', r.payload.attachment.fileName || r.payload.attachment.url || 'file') : null,
         r.status === 'draft'
@@ -577,6 +583,7 @@
       h('h1', {}, 'Drafts & outbox'),
       state.outboxTask ? h('p', {}, `Showing messages of task #${state.outboxTask} · `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); state.outboxTask = null; viewOutbox(); } }, 'show all')) : null,
       h('p', { class: 'sub' }, 'Messages written by AI or campaigns wait here when a number is in approval mode. Edit, approve or reject.'),
+      numberPick,
       tabs,
       h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(380px,1fr))' }, items.length ? items : [h('p', { class: 'muted' }, 'Nothing here.')]),
     ]);
@@ -601,6 +608,7 @@
         delayMinSec: +fd.delayMinSec.value,
         delayMaxSec: +fd.delayMaxSec.value,
         typing: fd.typing.checked,
+        anytime: fd.anytime.checked,
         dailyCap: +fd.dailyCap.value,
         sendStart: fd.sendStart.value,
         sendEnd: fd.sendEnd.value,
@@ -634,12 +642,13 @@
           ),
           h('p', { class: 'muted', style: 'margin:-6px 0 12px;font-size:12px' }, 'Gap between two automated messages, picked at random in this range. Minimum 5 seconds.'),
           sw('typing', 'Show "typing…" before each message'),
+          sw('anytime', 'Send at any time', 'Day and night, every day. Turn off to use the time window below.'),
           f('dailyCap', 'Daily limit (automated messages)', h('input', { type: 'number', name: 'dailyCap', min: 0, value: s.dailyCap }), 'Messages you send yourself or from Apps Script are not counted.'),
-          h('div', { class: 'row' },
+          h('div', { class: 'row', style: s.anytime ? 'opacity:.5' : '' },
             f('sendStart', 'Send between', h('input', { type: 'time', name: 'sendStart', value: s.sendStart })),
             f('sendEnd', 'and', h('input', { type: 'time', name: 'sendEnd', value: s.sendEnd })),
           ),
-          h('div', { class: 'field' }, h('span', { style: 'display:block;font-weight:550;margin-bottom:4px' }, 'On these days'),
+          h('div', { class: 'field', style: s.anytime ? 'opacity:.5' : '' }, h('span', { style: 'display:block;font-weight:550;margin-bottom:4px' }, 'On these days'),
             h('div', { class: 'daypick' }, days.map((d, i) => h('label', {}, h('input', { type: 'checkbox', name: 'day', value: i, checked: s.sendDays.includes(i) }), d)))),
         ),
         h('div', { class: 'card' },
@@ -714,11 +723,11 @@
     const rows = await api('/api/events?limit=200');
     shell([
       h('h1', {}, 'Activity'),
-      h('p', { class: 'sub' }, 'What you, the AI and the system did: linking (and the history option chosen), settings changes, approvals, tasks, opt-outs, failures. The AI reads this too.'),
+      h('p', { class: 'sub' }, 'What you (dashboard), the AI (MCP), scripts (API key, e.g. Apps Script) and the system did: linking (and the history option chosen), settings changes, approvals, tasks, opt-outs, failures. The AI reads this too.'),
       h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'Number'), h('th', {}, 'What'))),
         h('tbody', {}, rows.map((r) => h('tr', {}, h('td', { style: 'white-space:nowrap' }, new Date(r.created_at).toLocaleString()),
-          h('td', {}, r.actor === 'you' ? 'You' : r.actor === 'ai' ? 'AI' : 'System'), h('td', {}, r.account_id || '–'),
+          h('td', {}, { you: 'You', ai: 'AI', script: 'Script' }[r.actor] || 'System'), h('td', {}, r.account_id || '–'),
           h('td', { style: r.level === 'error' || r.level === 'warn' ? 'color:var(--bad)' : '' }, r.text)))),
       ),
     ]);

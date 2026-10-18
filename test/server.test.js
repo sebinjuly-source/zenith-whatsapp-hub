@@ -209,7 +209,7 @@ test('daily cap and sending window hold automated messages, but your own sends s
   // Outside the sending window: still held even after raising the cap
   const now = new Date();
   const closedDay = (now.getDay() + 3) % 7;
-  await manager.update('hotel', { settings: { dailyCap: 50, sendDays: [closedDay] } });
+  await manager.update('hotel', { settings: { dailyCap: 50, anytime: false, sendDays: [closedDay] } });
   await sleep(200);
   assert.equal(sent.filter((s) => s.jid === '919866666661@s.whatsapp.net').length, 0);
   // Open the window → it goes
@@ -358,13 +358,18 @@ test('your actions are recorded with who did them, and the AI can read them', as
   await manager.update('hotel', { settings: { historyMode: 'recent' } }); // as if chosen in the link dialog
   await call('PATCH', '/api/accounts/hotel', { settings: { aiMode: 'approve' } });
   const out = await mcp('recent_activity', { account: 'hotel' });
-  assert.match(out, /owner \| hotel \| Changed settings — Daily limit: 50 → 25/);
-  assert.match(out, /owner \| hotel \| Changed settings — AI sending: auto → approve/);
+  assert.match(out, /script \| hotel \| Changed settings — Daily limit: 50 → 25/);
+  assert.match(out, /script \| hotel \| Changed settings — AI sending: auto → approve/);
   assert.match(out, /ai \| hotel \| /, 'AI actions from earlier tests are listed too');
   assert.doesNotMatch(out, /\| system \|/, 'system noise hidden by default');
   assert.match(await mcp('list_accounts'), /hotel \(default\).*history chosen at link: Recent history only/);
-  const ev = (await call('GET', '/api/events?actor=you&account=hotel')).data;
-  assert.ok(ev.length >= 2 && ev.every((e) => e.actor === 'you'));
+  const ev = (await call('GET', '/api/events?actor=script&account=hotel')).data;
+  assert.ok(ev.length >= 2 && ev.every((e) => e.actor === 'script'), 'API-key changes are logged as script');
+  // the dashboard (login cookie, no key) is logged as you
+  const login = await fetch(base + '/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: 'k' }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  await fetch(base + '/api/accounts/hotel', { method: 'PATCH', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ settings: { dailyCap: 26 } }) });
+  assert.match(await mcp('recent_activity', { account: 'hotel', who: 'you' }), /owner \| hotel \| Changed settings — Daily limit: 25 → 26/);
 });
 
 test('incoming messages show the saved contact name, not just the WhatsApp profile name', async () => {

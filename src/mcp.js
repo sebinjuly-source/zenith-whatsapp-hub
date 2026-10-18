@@ -357,10 +357,10 @@ function buildServer() {
 
   tool(
     'recent_activity',
-    'What the owner (you), the AI and the system did recently: numbers linked and which history option was chosen, settings changes, approvals, tasks, bulk sends, opt-outs, failures. Check this before assuming how something was set up.',
+    'What the owner (dashboard), the AI, scripts (API key, e.g. Apps Script) and the system did recently: numbers linked and which history option was chosen, settings changes, approvals, tasks, bulk sends, opt-outs, failures. Check this before assuming how something was set up.',
     {
       account: z.string().optional(),
-      who: z.enum(['you', 'ai', 'system', 'people']).optional().describe('"people" = the owner and the AI (default); or one actor'),
+      who: z.enum(['you', 'ai', 'script', 'system', 'people']).optional().describe('"people" = the owner, the AI and scripts (default); "you" = the owner in the dashboard; "script" = API-key callers such as Apps Script'),
       limit: z.number().int().min(1).max(200).optional(),
     },
     async (a) => {
@@ -371,7 +371,7 @@ function buildServer() {
         conds.push(`account_id = $${p.length}`);
       }
       const who = a.who || 'people';
-      p.push(who === 'people' ? ['you', 'ai'] : [who]);
+      p.push(who === 'people' ? ['you', 'ai', 'script'] : [who]);
       conds.push(`actor = ANY($${p.length})`);
       const rows = await query(`SELECT * FROM events WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT $1`, p);
       return rows.length

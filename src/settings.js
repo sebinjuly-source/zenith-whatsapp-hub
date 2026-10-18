@@ -16,8 +16,9 @@ export const DEFAULT_SETTINGS = {
   // Show "typing…" for a few seconds before each automated message.
   typing: true,
   // Max automated messages (campaign + AI) per day. API/dashboard sends you make yourself are not capped.
-  dailyCap: 30,
-  // Automated messages only go out inside this window (your timezone).
+  dailyCap: 35,
+  // Send at any time of day, every day. Turn off to use the window below (your timezone).
+  anytime: true,
   sendStart: '10:00',
   sendEnd: '19:00',
   sendDays: [1, 2, 3, 4, 5, 6], // 0 = Sunday
@@ -51,6 +52,7 @@ export function normalizeSettings(input = {}) {
     delayMinSec: clampInt(s.delayMinSec, MIN_DELAY_SEC, 3600, DEFAULT_SETTINGS.delayMinSec),
     delayMaxSec: clampInt(s.delayMaxSec, MIN_DELAY_SEC, 7200, DEFAULT_SETTINGS.delayMaxSec),
     typing: !!s.typing,
+    anytime: s.anytime !== false,
     dailyCap: clampInt(s.dailyCap, 0, 1000, DEFAULT_SETTINGS.dailyCap),
     sendStart: isTime(s.sendStart) ? s.sendStart : DEFAULT_SETTINGS.sendStart,
     sendEnd: isTime(s.sendEnd) ? s.sendEnd : DEFAULT_SETTINGS.sendEnd,
@@ -105,6 +107,7 @@ export function localNow(now = new Date()) {
 const toMin = (hhmm) => parseInt(hhmm.slice(0, 2), 10) * 60 + parseInt(hhmm.slice(3), 10);
 
 export function insideSendingWindow(settings, now = new Date()) {
+  if (settings.anytime) return true;
   const { day, minutes } = localNow(now);
   if (!settings.sendDays.includes(day)) return false;
   return minutes >= toMin(settings.sendStart) && minutes < toMin(settings.sendEnd);

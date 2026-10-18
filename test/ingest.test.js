@@ -118,10 +118,14 @@ test('settings: 5 s minimum delay and sending window', () => {
   assert.equal(st.delayMinSec, 5);
   assert.equal(st.delayMaxSec, 5);
   for (let i = 0; i < 50; i++) assert.ok(randomDelayMs(normalizeSettings({ delayMinSec: 5, delayMaxSec: 9 })) >= 5000);
-  const w = normalizeSettings({ sendStart: '10:00', sendEnd: '19:00', sendDays: [1] });
+  const w = normalizeSettings({ anytime: false, sendStart: '10:00', sendEnd: '19:00', sendDays: [1] });
   assert.equal(insideSendingWindow(w, new Date('2026-10-19T06:00:00Z')), true); // Mon 11:30 IST
   assert.equal(insideSendingWindow(w, new Date('2026-10-19T14:00:00Z')), false); // Mon 19:30 IST
   assert.equal(insideSendingWindow(w, new Date('2026-10-20T06:00:00Z')), false); // Tuesday
+  const d = normalizeSettings({});
+  assert.equal(d.anytime, true, 'default: send any time');
+  assert.equal(d.dailyCap, 35, 'default daily limit');
+  assert.equal(insideSendingWindow(d, new Date('2026-10-18T22:30:00Z')), true, 'Sunday 4 am IST is fine by default');
 });
 
 test('lease: only one server runs a number at a time', async () => {

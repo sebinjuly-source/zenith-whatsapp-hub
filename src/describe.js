@@ -9,7 +9,7 @@ export const HISTORY_MODES = {
 export function describeSettingsChange(before = {}, after = {}) {
   const label = {
     aiMode: 'AI sending', delayMinSec: 'Delay min (s)', delayMaxSec: 'Delay max (s)', typing: 'Typing indicator',
-    dailyCap: 'Daily limit', sendStart: 'Send from', sendEnd: 'Send until', sendDays: 'Send days', storeGroups: 'Store groups',
+    dailyCap: 'Daily limit', anytime: 'Send any time', sendStart: 'Send from', sendEnd: 'Send until', sendDays: 'Send days', storeGroups: 'Store groups',
     autosaveImages: 'Auto-save images', autosaveDocuments: 'Auto-save documents', autosaveKnownOnly: 'Auto-save only known',
     autosaveMaxMb: 'Auto-save max MB', optOutWords: 'Opt-out words', webhookUrl: 'Notify URL', historyMode: 'History on link',
   };

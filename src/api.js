@@ -19,8 +19,12 @@ import { logEvent } from './db.js';
 import { normalizeSettings } from './settings.js';
 import { describeSettingsChange, HISTORY_MODES } from './describe.js';
 
-/** Record something you did (dashboard / REST) so the AI can see your choices later. */
-const you = (accountId, text) => logEvent(accountId, 'info', text, 'you');
+/**
+ * Record an action so the AI can see who chose what. Dashboard (login cookie) = "you";
+ * anything using the API key (Apps Script, scripts) = "script". MCP logs its own actions as "ai".
+ */
+const actorOf = (req) => (req.get('x-api-key') || req.query.key ? 'script' : 'you');
+const act = (req, accountId, text) => logEvent(accountId, 'info', text, actorOf(req));
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -89,7 +93,7 @@ export function buildApp() {
   }));
   api.post('/accounts', wrap(async (req, res) => {
     const acc = await manager.create(req.body || {});
-    await you(acc.id, `Added number "${acc.label}"${acc.purpose ? ` (purpose: ${acc.purpose})` : ''}`);
+    await act(req, acc.id, `Added number "${acc.label}"${acc.purpose ? ` (purpose: ${acc.purpose})` : ''}`);
     res.json(acc);
   }));
   api.patch('/accounts/:id', wrap(async (req, res) => {
@@ -102,24 +106,24 @@ export function buildApp() {
     if (req.body?.enabled !== undefined && req.body.enabled !== prev.enabled) changes.push(req.body.enabled ? 'Number resumed' : 'Number paused');
     if (req.body?.isDefault) changes.push('Made default number');
     const text = changes.filter(Boolean).join('; ');
-    if (text) await you(acc.id, `Changed settings — ${text}`);
+    if (text) await act(req, acc.id, `Changed settings — ${text}`);
     res.json(acc);
   }));
   api.delete('/accounts/:id', wrap(async (req, res) => {
     if (req.query.confirm !== req.params.id) throw new Error('Add ?confirm=<account id> to delete an account and all its data');
     await manager.remove(req.params.id);
-    await you(null, `Deleted number "${req.params.id}" and its stored data`);
+    await act(req, null, `Deleted number "${req.params.id}" and its stored data`);
     res.json({ ok: true });
   }));
   api.post('/accounts/:id/link', wrap(async (req, res) => {
     const info = await manager.link(req.params.id, req.body || {});
     const mode = normalizeSettings(manager.get(req.params.id).account.settings).historyMode;
-    await you(req.params.id, `Started linking the number — history chosen: ${HISTORY_MODES[mode]}${req.body?.pairPhone ? ' (pairing code)' : ' (QR)'}`);
+    await act(req, req.params.id, `Started linking the number — history chosen: ${HISTORY_MODES[mode]}${req.body?.pairPhone ? ' (pairing code)' : ' (QR)'}`);
     res.json(info);
   }));
   api.post('/accounts/:id/unlink', wrap(async (req, res) => {
     await manager.unlink(req.params.id);
-    await you(req.params.id, 'Unlinked the number from WhatsApp');
+    await act(req, req.params.id, 'Unlinked the number from WhatsApp');
     res.json({ ok: true });
   }));
 
@@ -149,12 +153,12 @@ export function buildApp() {
   api.post('/accounts/:id/backfill', wrap(async (req, res) => {
     const s = manager.get(req.params.id);
     const r = await outbox.requestJob(s, 'backfill', { sinceTs: toTs(req.body?.since) || 0, includeGroups: !!req.body?.groups });
-    await you(s.id, `Started deep history import (back to ${req.body?.since || 'the beginning'}, ${req.body?.groups ? 'people + groups' : 'people only'})`);
+    await act(req, s.id, `Started deep history import (back to ${req.body?.since || 'the beginning'}, ${req.body?.groups ? 'people + groups' : 'people only'})`);
     res.json({ ok: true, jobId: r.jobId });
   }));
   api.post('/jobs/:id/cancel', wrap(async (req, res) => {
     const [j] = await query(`UPDATE jobs SET status = 'cancelled', done_at = now() WHERE id = $1 AND status IN ('pending','running') RETURNING account_id, kind`, [req.params.id]);
-    if (j) await you(j.account_id, `Stopped ${j.kind === 'backfill' ? 'deep history import' : j.kind} (job #${req.params.id})`);
+    if (j) await act(req, j.account_id, `Stopped ${j.kind === 'backfill' ? 'deep history import' : j.kind} (job #${req.params.id})`);
     res.json({ ok: true });
   }));
   api.get('/accounts/:id/contacts/:jid', wrap(async (req, res) => res.json(await store.getContact(req.params.id, req.params.jid))));
@@ -163,7 +167,7 @@ export function buildApp() {
     const c = await store.updateContact(req.params.id, req.params.jid, b);
     const what = [b.addTags?.length && `+tags ${b.addTags.join(',')}`, b.removeTags?.length && `-tags ${b.removeTags.join(',')}`,
       b.leadStatus !== undefined && `status ${b.leadStatus || '(none)'}`, b.notes !== undefined && 'notes'].filter(Boolean).join(', ');
-    if (what) await you(req.params.id, `Edited contact ${req.params.jid.split('@')[0]}: ${what}`);
+    if (what) await act(req, req.params.id, `Edited contact ${req.params.jid.split('@')[0]}: ${what}`);
     res.json(c);
   }));
 
@@ -180,7 +184,7 @@ export function buildApp() {
     const { account, to, text, attachment, wait = true } = req.body || {};
     if (!to) throw new Error('Missing "to" (phone number or chat id)');
     const row = await outbox.enqueue({ account, to, payload: { text, attachment }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api' });
-    if (req.body?.source === 'dashboard') await you(row.account_id, `Sent a message from the dashboard to ${row.to_jid.split('@')[0]}`);
+    if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent a message from the dashboard to ${row.to_jid.split('@')[0]}`);
     if (!wait) return res.json(row);
     const result = await outbox.waitFor(row.id);
     if (!result) return res.status(202).json({ ...row, note: 'Still queued (number not connected?)' });
@@ -197,40 +201,40 @@ export function buildApp() {
     const { account, title, details, dueAt } = req.body || {};
     const s = await manager.resolve(account);
     const t = await tasks.createTask({ account: s.id, title, details, dueAt, createdBy: 'you' });
-    await you(s.id, `Created task #${t.id} "${t.title}"`);
+    await act(req, s.id, `Created task #${t.id} "${t.title}"`);
     res.json(t);
   }));
   api.patch('/tasks/:id', wrap(async (req, res) => {
     const t = await tasks.updateTask(req.params.id, req.body || {});
-    await you(t.account_id, `Updated task #${t.id} "${t.title}"${req.body?.status ? ` → ${t.status}` : ''}`);
+    await act(req, t.account_id, `Updated task #${t.id} "${t.title}"${req.body?.status ? ` → ${t.status}` : ''}`);
     res.json(t);
   }));
   api.post('/tasks/:id/approve', wrap(async (req, res) => {
     const r = await outbox.approveTask(req.params.id);
     const [t] = await query('SELECT account_id, title FROM tasks WHERE id = $1', [req.params.id]);
-    await you(t?.account_id, `Approved ${r.approved} messages of task #${req.params.id} "${t?.title}"`);
+    await act(req, t?.account_id, `Approved ${r.approved} messages of task #${req.params.id} "${t?.title}"`);
     res.json(r);
   }));
   api.post('/tasks/:id/cancel', wrap(async (req, res) => {
     const t = await tasks.cancelTask(req.params.id);
-    await you(t.account_id, `Cancelled task #${t.id} "${t.title}"`);
+    await act(req, t.account_id, `Cancelled task #${t.id} "${t.title}"`);
     res.json(t);
   }));
   // Bulk send: { account, title, text (use {name}), recipients: [{ to, name, ... }], attachment?, scheduledAt?, skipIfContactedDays? }
   api.post('/bulk', wrap(async (req, res) => {
     const b = req.body || {};
     const r = await outbox.bulkSend({ ...b, source: b.automated === false ? 'api' : 'campaign', createdBy: 'you' });
-    if (r.task) await you(r.task.account_id || b.account, `Created bulk send "${b.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);
+    if (r.task) await act(req, r.task.account_id || b.account, `Created bulk send "${b.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);
     res.json(r);
   }));
   api.post('/outbox/:id/approve', wrap(async (req, res) => {
     const r = await outbox.approve(req.params.id, req.body || {});
-    await you(r.account_id, `Approved draft #${r.id} to ${r.to_jid.split('@')[0]}${req.body?.text ? ' (edited)' : ''}`);
+    await act(req, r.account_id, `Approved draft #${r.id} to ${r.to_jid.split('@')[0]}${req.body?.text ? ' (edited)' : ''}`);
     res.json(r);
   }));
   api.post('/outbox/:id/reject', wrap(async (req, res) => {
     const r = await outbox.reject(req.params.id);
-    await you(r.account_id, `Rejected ${r.status === 'rejected' ? 'draft' : 'message'} #${r.id} to ${r.to_jid.split('@')[0]}`);
+    await act(req, r.account_id, `Rejected ${r.status === 'rejected' ? 'draft' : 'message'} #${r.id} to ${r.to_jid.split('@')[0]}`);
     res.json(r);
   }));
 
