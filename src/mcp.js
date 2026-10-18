@@ -302,12 +302,14 @@ function buildServer() {
       send_as: z.enum(['document', 'image', 'video', 'audio']).optional(),
       note: z.string().optional().describe('Why this message is being sent (shown to the owner on the draft)'),
       task_id: z.number().int().optional().describe('Attach to a task on the board (e.g. a follow-up task)'),
+      idempotency_key: z.string().optional().describe('Optional unique key; retrying with the same key never sends twice'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
       const jid = await resolveChat(s.id, a.to);
       const attachment = a.attachment_url ? { url: a.attachment_url, fileName: a.file_name, as: a.send_as } : undefined;
-      const row = await outbox.enqueue({ account: s.id, to: jid, payload: { text: a.text, attachment }, source: 'mcp', note: a.note, taskId: a.task_id });
+      const row = await outbox.enqueue({ account: s.id, to: jid, payload: { text: a.text, attachment }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key });
+      if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
       await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} message #${row.id} to ${jid.split('@')[0]}${a.note ? ` — ${a.note}` : ''}`);
       return row.status === 'draft'
         ? `Draft #${row.id} created for ${jid} — waiting for approval in the dashboard (account "${s.id}" is in approve mode).`
@@ -448,14 +450,16 @@ function buildServer() {
       file_name: z.string().optional(),
       schedule_at: z.string().optional().describe('ISO datetime to start (default now)'),
       skip_if_contacted_days: z.number().int().min(0).optional().describe('Default 30; 0 = do not skip'),
+      idempotency_key: z.string().optional().describe('Optional unique key, e.g. sheet name + date; repeating it never creates a second bulk send'),
     },
     async (a) => {
       const r = await outbox.bulkSend({
         account: a.account, title: a.title, details: a.details, text: a.text, recipients: a.recipients,
         attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : undefined,
         scheduledAt: a.schedule_at, source: 'mcp', createdBy: 'ai',
-        skipIfContactedDays: a.skip_if_contacted_days ?? 30, allowRepeat: a.skip_if_contacted_days === 0,
+        skipIfContactedDays: a.skip_if_contacted_days ?? 30, allowRepeat: a.skip_if_contacted_days === 0, idemKey: a.idempotency_key,
       });
+      if (r.duplicate) return `Already created earlier as task #${r.task.id} — nothing new queued.`;
       const skipped = r.skipped.length ? `\nSkipped ${r.skipped.length}: ${r.skipped.slice(0, 30).map((x) => `${x.to} (${x.reason})`).join('; ')}` : '';
       if (!r.task) return `Nothing queued.${skipped}`;
       await ai(r.task.account_id, `Created bulk send "${a.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);

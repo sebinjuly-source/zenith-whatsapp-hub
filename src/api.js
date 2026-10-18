@@ -81,8 +81,9 @@ export function buildApp() {
       : documentUrl
         ? { url: documentUrl, fileName, caption: message }
         : undefined;
-    const row = await outbox.enqueue({ account, to: phone, payload: { text: message, attachment }, source: 'api' });
-    const result = await outbox.waitFor(row.id);
+    const row = await outbox.enqueue({ account, to: phone, payload: { text: message, attachment }, source: 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key') });
+    if (row.duplicate && row.status === 'sent') return res.status(200).send('Success');
+    const result = row.status === 'sent' || row.status === 'failed' ? row : await outbox.waitFor(row.id);
     if (result?.status === 'sent') return res.status(200).send('Success');
     res.status(500).send(result?.error || 'Timed out waiting to send');
   }));
@@ -192,7 +193,8 @@ export function buildApp() {
   api.post('/send', wrap(async (req, res) => {
     const { account, to, text, attachment, wait = true } = req.body || {};
     if (!to) throw new Error('Missing "to" (phone number or chat id)');
-    const row = await outbox.enqueue({ account, to, payload: { text, attachment }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api' });
+    const row = await outbox.enqueue({ account, to, payload: { text, attachment }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key') });
+    if (row.duplicate && ['sent', 'failed', 'rejected'].includes(row.status)) return res.status(row.status === 'sent' ? 200 : 502).json(row);
     if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent a message from the dashboard to ${row.to_jid.split('@')[0]}`);
     if (!wait) return res.json(row);
     const result = await outbox.waitFor(row.id);
@@ -232,7 +234,7 @@ export function buildApp() {
   // Bulk send: { account, title, text (use {name}), recipients: [{ to, name, ... }], attachment?, scheduledAt?, skipIfContactedDays? }
   api.post('/bulk', wrap(async (req, res) => {
     const b = req.body || {};
-    const r = await outbox.bulkSend({ ...b, source: b.automated === false ? 'api' : 'campaign', createdBy: 'you' });
+    const r = await outbox.bulkSend({ ...b, source: b.automated === false ? 'api' : 'campaign', createdBy: 'you', idemKey: b.idempotencyKey || req.get('idempotency-key') });
     if (r.task) await act(req, r.task.account_id || b.account, `Created bulk send "${b.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);
     res.json(r);
   }));

@@ -25,6 +25,8 @@ import { parseMessage, mediaMessageFromRow } from './parse.js';
 import * as store from '../store.js';
 import { putMedia, mediaPath } from '../media.js';
 import { normalizeSettings } from '../settings.js';
+import { postWebhook } from '../notify.js';
+import { refreshTask } from '../tasks.js';
 
 const SYNC_TYPE = proto.HistorySync.HistorySyncType;
 const LEASE_SEC = 90;
@@ -549,6 +551,11 @@ export class Session extends EventEmitter {
 
   async afterIncoming(r) {
     const settings = this.settings;
+    // Messages from contacts you blocked are stored, but trigger nothing (no opt-out, autosave or webhook).
+    if (!isJidGroup(r.chatJid)) {
+      const [c] = await query('SELECT is_blocked FROM contacts WHERE account_id = $1 AND jid = $2', [this.id, r.chatJid]);
+      if (c?.is_blocked) return;
+    }
     // Opt-out replies ("stop", "not interested" …) tag the contact so campaigns skip them.
     if (r.body && !isJidGroup(r.chatJid)) {
       const text = r.body.trim().toLowerCase();
@@ -571,21 +578,33 @@ export class Session extends EventEmitter {
     }
     // Notify an external webhook (e.g. Apps Script) if configured.
     if (settings.webhookUrl) {
-      fetch(settings.webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          event: 'message', account: this.id, chat: r.chatJid, from: r.senderJid, name: r.senderName,
-          type: r.type, text: r.body, ts: r.ts, id: r.id,
-        }),
-      }).catch(() => {});
+      postWebhook(settings.webhookUrl, {
+        event: 'message', account: this.id, chat: r.chatJid, from: r.senderJid, name: r.senderName,
+        type: r.type, text: r.body, ts: r.ts, id: r.id,
+      });
     }
+  }
+
+  /** WhatsApp reported a message as failed (status ERROR). Show it instead of leaving it "sent". */
+  async onDeliveryFailed(key) {
+    await query('UPDATE messages SET status = 0 WHERE account_id = $1 AND id = $2', [this.id, key.id]);
+    const rows = await query(
+      `UPDATE outbox SET status = 'failed', error = 'WhatsApp reported this message as not delivered'
+       WHERE account_id = $1 AND message_id = $2 AND status = 'sent' RETURNING id, task_id, to_jid`,
+      [this.id, key.id],
+    );
+    const to = (rows[0]?.to_jid || key.remoteJid || '').split('@')[0];
+    await logEvent(this.id, 'warn', `Message to ${to} was not delivered (WhatsApp reported an error)`);
+    if (rows[0]?.task_id) await refreshTask(rows[0].task_id);
+    const url = this.settings.webhookUrl;
+    if (url) postWebhook(url, { event: 'message.failed', account: this.id, to, id: key.id, ts: Math.floor(Date.now() / 1000) });
   }
 
   async onMessagesUpdate(updates) {
     for (const { key, update } of updates) {
       if (!key?.id) continue;
-      if (typeof update?.status === 'number') await store.updateStatus(this.id, key.id, update.status);
+      if (update?.status === 0) await this.onDeliveryFailed(key);
+      else if (typeof update?.status === 'number') await store.updateStatus(this.id, key.id, update.status);
       if (update?.message) {
         const parsed = parseMessage({ key, message: update.message });
         if (parsed.kind === 'edit') await store.applyEdit(this.id, parsed.targetId, parsed.body);

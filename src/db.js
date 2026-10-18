@@ -148,6 +148,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS tasks_board ON tasks (account_id, status);
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS task_id BIGINT;
 CREATE INDEX IF NOT EXISTS outbox_task ON outbox (task_id);
+-- Same key = same request: a retried API call never sends twice.
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS idem_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS outbox_idem ON outbox (account_id, idem_key) WHERE idem_key IS NOT NULL;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS idem_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_idem ON tasks (account_id, idem_key) WHERE idem_key IS NOT NULL;
 
 -- Actions that need the live WhatsApp connection, run by whichever server holds the number.
 CREATE TABLE IF NOT EXISTS jobs (

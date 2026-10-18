@@ -401,3 +401,108 @@ test('dashboard page carries a version so open tabs reload after a deploy', asyn
   assert.ok(html.includes("window.HUB_VERSION = '" + health.version + "'"), 'page knows its version');
   assert.equal((await fetch(base + '/app.js')).status, 200);
 });
+
+test('a delivery WhatsApp reports as failed shows as failed (not stuck on "sent")', async () => {
+  const r = await call('POST', '/api/send', { account: 'hotel', to: '9744444444', text: 'will fail' });
+  assert.equal(r.data.status, 'sent');
+  const s = manager.get('hotel');
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body, status) VALUES ('hotel','919744444444@s.whatsapp.net',$1,true,extract(epoch from now())::bigint,'text','will fail',2)`, [r.data.message_id]);
+  await s.onMessagesUpdate([{ key: { id: r.data.message_id, remoteJid: '919744444444@s.whatsapp.net' }, update: { status: 0 } }]);
+  const [o] = await query('SELECT status, error FROM outbox WHERE id = $1', [r.data.id]);
+  assert.equal(o.status, 'failed');
+  assert.match(o.error, /not delivered/);
+  const [m] = await query('SELECT status FROM messages WHERE account_id = $1 AND id = $2', ['hotel', r.data.message_id]);
+  assert.equal(m.status, 0);
+});
+
+test('sending from a number that cannot send fails at once with a clear reason', async () => {
+  await manager.create({ id: 'ghost', label: 'Ghost' }); // never linked
+  let r = await call('POST', '/api/send', { account: 'ghost', to: '9755555555', text: 'x' });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /not linked yet/);
+  const g = fake('ghost');
+  g.status = 'logged_out';
+  r = await call('POST', '/api/send', { account: 'ghost', to: '9755555555', text: 'x' });
+  assert.match(r.data.error, /logged out of WhatsApp/);
+  await manager.update('ghost', { enabled: false });
+  g.status = 'open'; // keep the fake "open" to prove the paused check on its own
+  r = await call('POST', '/api/send', { account: 'ghost', to: '9755555555', text: 'x' });
+  assert.match(r.data.error, /paused/);
+  const w = await call('POST', '/webhook?key=k', { phone: '9755555555', message: 'x', account: 'ghost' }, { key: null });
+  assert.equal(w.status, 400, 'old /webhook format gets a fast error too');
+});
+
+test('idempotency: the same key never sends twice (send, old /webhook, bulk)', async () => {
+  const before = sent.length;
+  const a = await call('POST', '/api/send', { account: 'hotel', to: '9766666666', text: 'once', idempotencyKey: 'row-17-2026-10-19' });
+  const b = await call('POST', '/api/send', { account: 'hotel', to: '9766666666', text: 'once', idempotencyKey: 'row-17-2026-10-19' });
+  assert.equal(a.data.status, 'sent');
+  assert.equal(b.status, 200);
+  assert.equal(b.data.id, a.data.id);
+  assert.equal(sent.length, before + 1, 'sent exactly once');
+  const hdr = { 'content-type': 'application/json', 'idempotency-key': 'adhp-42' };
+  const w1 = await fetch(`${base}/webhook?key=k`, { method: 'POST', headers: hdr, body: JSON.stringify({ phone: '9766666667', message: 'reminder' }) });
+  const w2 = await fetch(`${base}/webhook?key=k`, { method: 'POST', headers: hdr, body: JSON.stringify({ phone: '9766666667', message: 'reminder' }) });
+  assert.equal(await w1.text(), 'Success');
+  assert.equal(await w2.text(), 'Success');
+  assert.equal(sent.filter((x) => x.jid === '919766666667@s.whatsapp.net').length, 1);
+  const args = { account: 'hotel', title: 'Idem bulk', text: 'Hi {name}', recipients: [{ to: '9766666668', name: 'A' }], skip_if_contacted_days: 0, idempotency_key: 'sheet-chefs-19oct' };
+  assert.match(await mcp('bulk_send', args), /Task #\d+/);
+  assert.match(await mcp('bulk_send', args), /Already created earlier as task #/);
+});
+
+test('outgoing notifications are signed, retried, and skipped for blocked contacts', async () => {
+  const http = await import('http');
+  const crypto = await import('crypto');
+  const got = [];
+  let failFirst = true;
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (failFirst) {
+        failFirst = false;
+        res.writeHead(500).end();
+        return;
+      }
+      got.push({ body, ts: req.headers['x-hub-timestamp'], sig: req.headers['x-hub-signature'] });
+      res.writeHead(200).end('ok');
+    });
+  });
+  await new Promise((r) => srv.listen(0, r));
+  const { postWebhook } = await import('../src/notify.js');
+  const status = await postWebhook(`http://127.0.0.1:${srv.address().port}/hook`, { event: 'message', text: 'hi' }, { attempts: 2 });
+  assert.equal(status, 200, 'succeeded on the retry');
+  const expect = 'sha256=' + crypto.createHmac('sha256', 'k').update(`${got[0].ts}.${got[0].body}`).digest('hex');
+  assert.equal(got[0].sig, expect, 'signature verifies with the API key');
+  await query(`INSERT INTO contacts (account_id, jid, phone, is_blocked) VALUES ('hotel','919777777777@s.whatsapp.net','919777777777',true)`);
+  await manager.get('hotel').afterIncoming({ chatJid: '919777777777@s.whatsapp.net', body: 'STOP', type: 'text' });
+  const [c] = await query(`SELECT tags FROM contacts WHERE account_id = 'hotel' AND jid = '919777777777@s.whatsapp.net'`);
+  assert.ok(!c.tags.includes('opted-out'), 'blocked contacts trigger nothing');
+  srv.close();
+});
+
+test('alerts: owner gets a WhatsApp from another number when one is logged out', async () => {
+  const { startAlerts } = await import('../src/notify.js');
+  const { EventEmitter } = await import('events');
+  const fakeMgr = new EventEmitter();
+  const list = [
+    { id: 'n1', label: 'Hiring', phone: '919300000001', status: 'open', enabled: true },
+    { id: 'n2', label: 'Hotel', phone: '919300000002', status: 'open', enabled: true },
+  ];
+  fakeMgr.list = () => list;
+  const alerts = [];
+  process.env.ALERT_PHONE = '919999999999';
+  startAlerts(fakeMgr, async (from, to, text) => alerts.push({ from, to, text }));
+  list[0].status = 'logged_out';
+  fakeMgr.emit('change', { id: 'n1', status: 'logged_out' });
+  await sleep(50);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].from, 'n2', 'sent from the other connected number');
+  assert.equal(alerts[0].to, '919999999999');
+  assert.match(alerts[0].text, /Hiring.*logged out/);
+  fakeMgr.emit('change', { id: 'n1', status: 'logged_out' });
+  await sleep(50);
+  assert.equal(alerts.length, 1, 'not repeated within 6 hours');
+  delete process.env.ALERT_PHONE;
+});

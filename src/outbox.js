@@ -12,6 +12,7 @@ import { loadOutgoing } from './media.js';
 import { toJid } from './store.js';
 import { MIN_DELAY_SEC, randomDelayMs, insideSendingWindow } from './settings.js';
 import { createTask, refreshTask, fillTemplate, planRecipients } from './tasks.js';
+import { hasAuthState } from './wa/auth-state.js';
 
 const AUTOMATED = ['mcp', 'campaign'];
 const PRIORITY_YOU = 10; // your own / API sends go before queued bulk messages
@@ -23,17 +24,37 @@ const workers = new Map(); // accountId -> { wake }
 /**
  * payload: { text?, attachment?: { url | base64, fileName?, mimetype?, caption?, as?: 'document'|'image'|'video'|'audio' } }
  */
-export async function enqueue({ account, to, payload, source, note, scheduledAt, taskId = null }) {
+/** Refuse right away (with a clear reason) when a number can't send, instead of queueing into a void. */
+export async function assertCanSend(session) {
+  if (!session.account.enabled) throw new Error(`Number "${session.account.label}" is paused — resume it in Settings`);
+  if (session.status === 'logged_out') throw new Error(`Number "${session.account.label}" is logged out of WhatsApp — re-link it in the dashboard (Numbers → Link number)`);
+  if (session.status === 'stopped' && !(await hasAuthState(session.id))) {
+    throw new Error(`Number "${session.account.label}" is not linked yet — link it in the dashboard first`);
+  }
+}
+
+export async function enqueue({ account, to, payload, source, note, scheduledAt, taskId = null, idemKey = null }) {
   const session = await manager.resolve(account);
   if (!payload?.text && !payload?.attachment) throw new Error('Nothing to send: give text and/or attachment');
   const jid = toJid(to);
+  if (idemKey) {
+    const [dup] = await query('SELECT * FROM outbox WHERE account_id = $1 AND idem_key = $2', [session.id, String(idemKey)]);
+    if (dup) return { ...dup, duplicate: true }; // same request seen before: don't send again
+  }
+  await assertCanSend(session);
   const automated = AUTOMATED.includes(source);
   const status = automated && session.settings.aiMode === 'approve' ? 'draft' : 'queued';
   const [row] = await query(
-    `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz, now()),$9) RETURNING *`,
-    [session.id, jid, JSON.stringify(payload), source, status, automated ? 0 : PRIORITY_YOU, note || null, scheduledAt || null, taskId],
+    `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id, idem_key)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz, now()),$9,$10)
+     ON CONFLICT (account_id, idem_key) WHERE idem_key IS NOT NULL DO NOTHING RETURNING *`,
+    [session.id, jid, JSON.stringify(payload), source, status, automated ? 0 : PRIORITY_YOU, note || null, scheduledAt || null, taskId, idemKey ? String(idemKey) : null],
   );
+  if (!row) {
+    // a concurrent identical request won the race
+    const [dup] = await query('SELECT * FROM outbox WHERE account_id = $1 AND idem_key = $2', [session.id, String(idemKey)]);
+    return { ...dup, duplicate: true };
+  }
   if (taskId) await refreshTask(taskId);
   if (status === 'queued') wake(session.id);
   return row;
@@ -44,14 +65,19 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
  * recipients: [{ to, name?, ...extra fields usable as {field} }] or plain numbers.
  */
 export async function bulkSend({ account, title, details, recipients, text, attachment, scheduledAt, source = 'campaign',
-  createdBy = 'you', skipIfContactedDays = 30, allowRepeat = false, taskId }) {
+  createdBy = 'you', skipIfContactedDays = 30, allowRepeat = false, taskId, idemKey = null }) {
   const session = await manager.resolve(account);
   if (!text && !attachment) throw new Error('Give the message text (can use {name}) and/or an attachment');
+  if (idemKey) {
+    const [t] = await query('SELECT * FROM tasks WHERE account_id = $1 AND idem_key = $2', [session.id, String(idemKey)]);
+    if (t) return { task: t, queued: 0, skipped: [], mode: session.settings.aiMode, duplicate: true };
+  }
+  await assertCanSend(session);
   const { ok, skipped } = await planRecipients(session.id, recipients, { skipIfContactedDays, allowRepeat });
   if (!ok.length) return { task: null, queued: 0, skipped };
   const task = taskId
     ? { id: taskId }
-    : await createTask({ account: session.id, title: title || `Message ${ok.length} people`, details, kind: 'bulk', createdBy });
+    : await createTask({ account: session.id, title: title || `Message ${ok.length} people`, details, kind: 'bulk', createdBy, idemKey });
   let n = 0;
   for (const r of ok) {
     const vars = { ...r.vars, name: r.vars.name || r.vars.Name };

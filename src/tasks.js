@@ -31,12 +31,12 @@ export async function refreshTask(taskId) {
   );
 }
 
-export async function createTask({ account, title, details, kind = 'todo', dueAt, createdBy = 'you' }) {
+export async function createTask({ account, title, details, kind = 'todo', dueAt, createdBy = 'you', idemKey = null }) {
   if (!title?.trim()) throw new Error('A task needs a title');
   const [row] = await query(
-    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by)
-     VALUES ($1,$2,$3,$4,'upcoming',$5,$6) RETURNING *`,
-    [account, title.trim(), details || null, kind, dueAt || null, createdBy],
+    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, idem_key)
+     VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7) RETURNING *`,
+    [account, title.trim(), details || null, kind, dueAt || null, createdBy, idemKey ? String(idemKey) : null],
   );
   return row;
 }

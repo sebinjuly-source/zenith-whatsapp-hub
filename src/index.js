@@ -2,7 +2,8 @@ import config from './config.js';
 import logger from './logger.js';
 import { initDb, closeDb } from './db.js';
 import { manager } from './wa/manager.js';
-import { startOutbox } from './outbox.js';
+import { startOutbox, enqueue as enqueueAlert } from './outbox.js';
+import { startAlerts } from './notify.js';
 import { buildApp } from './api.js';
 
 async function main() {
@@ -14,6 +15,8 @@ async function main() {
   });
   await manager.init();
   await startOutbox();
+  // WhatsApp alerts to ALERT_PHONE when a number is logged out / disconnected for 15+ min
+  startAlerts(manager, (from, to, text) => enqueueAlert({ account: from, to, payload: { text }, source: 'api', note: 'connection alert' }));
 
   // Render's free plan sleeps after 15 min without incoming requests, which would drop WhatsApp.
   // Ping our own public URL every 10 min (counts as incoming traffic). Off when not on Render.
