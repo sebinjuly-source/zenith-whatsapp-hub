@@ -823,3 +823,12 @@ test('playbook: stored in the hub, editable, and given to every AI client', asyn
   assert.equal(await mcp('get_playbook'), 'RULE: always be polite.');
   assert.match(await mcp('recent_activity', { who: 'script' }), /Updated the playbook/);
 });
+
+test('changing one follow-up setting keeps the saved message', async () => {
+  await mcp('import_list', { account: 'hiring', name: 'Keep text', members: [{ phone: '9300000001', name: 'X' }] });
+  await mcp('set_followup', { list: 'Keep text', enabled: true, text: 'saved text' });
+  assert.match(await mcp('set_followup', { list: 'Keep text', enabled: true, auto_send: true }), /on — after/);
+  const [l] = await query(`SELECT followup FROM lists WHERE name = 'Keep text'`);
+  assert.equal(l.followup.text, 'saved text');
+  assert.equal(l.followup.autoSend, true);
+});

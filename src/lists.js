@@ -306,7 +306,9 @@ export async function pipelineSummary(account) {
 export async function setFollowup(listId, settings) {
   const [l] = await query('SELECT followup FROM lists WHERE id = $1', [listId]);
   if (!l) throw new Error('List not found');
-  const f = { ...DEFAULT_FOLLOWUP, ...(l.followup || {}), ...settings };
+  // Only the settings actually given change; the rest (e.g. the message) stay as saved.
+  const given = Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== undefined));
+  const f = { ...DEFAULT_FOLLOWUP, ...(l.followup || {}), ...given };
   f.afterDays = Math.max(0.01, Number(f.afterDays) || 2);
   f.max = Math.max(0, Math.min(5, parseInt(f.max, 10) || 0));
   f.enabled = !!f.enabled;
