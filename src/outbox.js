@@ -192,6 +192,21 @@ export async function listOutbox({ account, status, taskId, limit = 50 } = {}) {
   );
 }
 
+/**
+ * Is this number reaching out to NEW people today? True if a first-contact message (bulk/AI, not a
+ * follow-up) was sent today, or is still waiting as a draft/queued. Follow-ups wait for days when this is false.
+ */
+export async function newOutreachToday(accountId) {
+  const [r] = await query(
+    `SELECT 1 FROM outbox WHERE account_id = $1 AND source = ANY($2) AND note IS DISTINCT FROM 'follow-up'
+       AND (status IN ('draft','queued','sending')
+            OR (status = 'sent' AND sent_at >= (date_trunc('day', now() AT TIME ZONE $3) AT TIME ZONE $3)))
+     LIMIT 1`,
+    [accountId, ['campaign', 'mcp'], config.tz],
+  );
+  return !!r;
+}
+
 async function automatedSentToday(accountId) {
   const [r] = await query(
     `SELECT count(*)::int AS n FROM outbox
@@ -286,14 +301,17 @@ function startWorker(accountId) {
     const s = session.settings;
     const gapOver = Date.now() >= nextAutomatedAt;
     const automatedAllowed = gapOver && insideSendingWindow(s) && (await automatedSentToday(accountId)) < s.dailyCap;
+    // Follow-ups only go out on days with no new outreach (new candidates get the limited capacity first).
+    const followupsAllowed = automatedAllowed && !(await newOutreachToday(accountId));
     // Claim one row atomically, so two servers can never pick the same message.
     const [row] = await query(
       `UPDATE outbox SET status = 'sending', sent_at = now() WHERE id = (
          SELECT id FROM outbox WHERE account_id = $1 AND status = 'queued' AND scheduled_at <= now()
            AND ($2 OR source <> ALL($3))
+           AND (note IS DISTINCT FROM 'follow-up' OR $4)
          ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED)
        RETURNING *`,
-      [accountId, automatedAllowed, AUTOMATED],
+      [accountId, automatedAllowed, AUTOMATED, followupsAllowed],
     );
     if (!row) {
       // Wait for new work, or until the random gap ends, whichever is first.

@@ -528,17 +528,18 @@ function buildServer() {
     return r.task ? `Task #${r.task.id}: ${r.queued} messages ${r.mode === 'approve' ? 'saved as drafts — waiting for approval on the board' : 'queued'}.${skipped}` : `Nothing to send.${skipped}`;
   });
 
-  tool('set_followup', 'Automatic follow-ups for a list: people who were messaged but have not replied after N days get the follow-up message (quoting our last message), up to max times. Checked every 10 minutes.', {
+  tool('set_followup', 'Automatic follow-ups for a list: people who were messaged but have not replied after N days get the follow-up message (quoting our last message), up to max times. By default only on days the number sends no first messages to new people (new candidates have priority). Checked every 10 minutes.', {
     list: listArg, enabled: z.boolean(), after_days: z.number().optional(), max: z.number().int().optional(),
     text: z.string().optional().describe('Follow-up message; may use {first_name}, {name}'), template: z.string().optional(),
+    quiet_days_only: z.boolean().optional().describe('Default true: follow-ups only on days this number sends no first messages to new people'),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    const u = await lists.setFollowup(l.id, { enabled: a.enabled, afterDays: a.after_days, max: a.max, text: a.text, template: a.template });
+    const u = await lists.setFollowup(l.id, { enabled: a.enabled, afterDays: a.after_days, max: a.max, text: a.text, template: a.template, quietDaysOnly: a.quiet_days_only });
     await ai(l.account_id, `Follow-ups for "${l.name}": ${u.followup.enabled ? 'on' : 'off'}`);
     return `Follow-ups for "${l.name}": ${u.followup.enabled ? `on — after ${u.followup.afterDays} day(s) without reply, up to ${u.followup.max}` : 'off'}.`;
   });
 
-  tool('update_list_member', 'Record the outcome for a person on a list (e.g. interested, not-interested, trial-booked, hired, wants-travel-allowance) and/or notes.', {
+  tool('update_list_member', 'Record the outcome for a person on a list and/or notes. Outcomes starting with rejected / not interested / hired / joined / do not contact close the person: no more sends or follow-ups from the list. Owner rule: anyone asking for money (fuel, travel, advance) before joining → "rejected – asked for money before joining".', {
     list: listArg, phone: z.string(), outcome: z.string().optional(), notes: z.string().optional(),
   }, async (a) => {
     const l = await lists.getList(a.list);

@@ -32,7 +32,11 @@ export function decodeMessage(text) {
   });
 }
 
-const DEFAULT_FOLLOWUP = { enabled: false, afterDays: 2, max: 1, text: '', template: '' };
+const DEFAULT_FOLLOWUP = { enabled: false, afterDays: 2, max: 1, text: '', template: '', quietDaysOnly: true };
+
+/** Outcomes that close a person: never messaged again from the list (no sends, no follow-ups). */
+export const CLOSED_OUTCOME = /^\s*(rejected|not[\s-]?interested|hired|joined|do[\s-]?not[\s-]?contact)/i;
+const CLOSED_SQL = `COALESCE(m.outcome, '') !~* '^\\s*(rejected|not[\\s-]?interested|hired|joined|do[\\s-]?not[\\s-]?contact)'`;
 
 export async function getList(ref, account) {
   const isId = /^\d+$/.test(String(ref));
@@ -183,6 +187,7 @@ export async function setFollowup(listId, settings) {
   f.afterDays = Math.max(0.01, Number(f.afterDays) || 2);
   f.max = Math.max(0, Math.min(5, parseInt(f.max, 10) || 0));
   f.enabled = !!f.enabled;
+  f.quietDaysOnly = f.quietDaysOnly !== false;
   if (f.enabled && !String(f.text || '').trim() && !f.template) throw new Error('Follow-ups need a message or a template');
   const [u] = await query('UPDATE lists SET followup = $2, updated_at = now() WHERE id = $1 RETURNING *', [listId, JSON.stringify(f)]);
   return u;
@@ -207,6 +212,10 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
   const plan = [];
   const skipped = [];
   for (const m of members) {
+    if (CLOSED_OUTCOME.test(m.outcome || '')) {
+      skipped.push({ to: m.phone, reason: `outcome: ${m.outcome}` });
+      continue;
+    }
     const first = (m.name || '').trim().split(/\s+/)[0];
     const vars = { ...m.fields, name: m.name, first_name: first, phone: m.phone };
     const body = text ? fillTemplate(text, vars) : tpl ? fillTemplate(tpl.body, vars) : m.message;
@@ -241,10 +250,13 @@ export async function runFollowups() {
     try {
       await refreshList(list.id);
       const f = list.followup;
+      // New candidates first: no follow-ups on a day this number messages (or is about to message) new people.
+      if (f.quietDaysOnly !== false && (await outbox.newOutreachToday(list.account_id))) continue;
       const due = await query(
         `SELECT m.* FROM list_members m WHERE m.list_id = $1 AND m.status = 'sent' AND m.followups_sent < $2
            AND m.last_sent_at <= now() - ($3 || ' days')::interval
-           AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.list_id = m.list_id AND o.to_jid = m.jid AND o.status IN ('draft','queued','sending'))`,
+           AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.list_id = m.list_id AND o.to_jid = m.jid AND o.status IN ('draft','queued','sending'))
+           AND ${CLOSED_SQL}`,
         [list.id, f.max, String(f.afterDays)],
       );
       if (!due.length) continue;
@@ -259,7 +271,7 @@ export async function runFollowups() {
           `SELECT id FROM messages WHERE account_id = $1 AND chat_jid = $2 AND from_me ORDER BY ts DESC LIMIT 1`,
           [list.account_id, m.jid],
         );
-        rows.push([list.account_id, m.jid, JSON.stringify({ text: body, attachment: tpl?.attachment || undefined, replyTo: last?.id }), 'campaign', approve ? 'draft' : 'queued', 0, 'follow-up', task.id, list.id]);
+        rows.push([list.account_id, m.jid, JSON.stringify({ text: body, attachment: tpl?.attachment || undefined, replyTo: last?.id }), 'campaign', approve ? 'draft' : 'queued', -1, 'follow-up', task.id, list.id]);
       }
       await insertMany('outbox', ['account_id', 'to_jid', 'payload', 'source', 'status', 'priority', 'note', 'task_id', 'list_id'], rows);
       await refreshTask(task.id);

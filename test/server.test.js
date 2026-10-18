@@ -668,7 +668,7 @@ test('lists: import, status from real messages, send to new+failed only, follow-
   assert.match(f5.error, /not on WhatsApp/);
 
   // follow-ups: only #1 qualifies (messaged 3 days ago, no reply); #2 replied; #3/#4 just messaged
-  assert.match(await mcp('set_followup', { list: 'Chef Batch T', enabled: true, after_days: 2, max: 1, text: 'Namaste {first_name} ji, kya aap interested hain?' }), /on — after 2 day/);
+  assert.match(await mcp('set_followup', { list: 'Chef Batch T', enabled: true, after_days: 2, max: 1, text: 'Namaste {first_name} ji, kya aap interested hain?', quiet_days_only: false }), /on — after 2 day/);
   await listsMod.runFollowups();
   const fu = await query(`SELECT to_jid, payload, status FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
   assert.deepEqual(fu.map((x) => x.to_jid), [P(1)]);
@@ -690,4 +690,48 @@ test('lists: import, status from real messages, send to new+failed only, follow-
   assert.equal(v.status, 'replied');
   assert.equal(v.outcome, 'wants-travel-allowance');
   assert.equal(v.last_reply_text, 'Yes interested, location?');
+});
+
+test('priorities: rejected people are never messaged; follow-ups wait for days without new outreach', async () => {
+  const listsMod = await import('../src/lists.js');
+  const outboxMod = await import('../src/outbox.js');
+  await manager.create({ id: 'hire2', label: 'Hire2' });
+  fake('hire2');
+  const now = Math.floor(Date.now() / 1000);
+  const J = (n) => `91960000000${n}@s.whatsapp.net`;
+  // #1 and #2 messaged 4 days ago, silent; #3 never messaged
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hire2',$1,'H1',true,$3,'text','offer'), ('hire2',$2,'H2',true,$3,'text','offer')`, [J(1), J(2), now - 4 * 86400]);
+  await mcp('import_list', { account: 'hire2', name: 'Prio', since: new Date((now - 10 * 86400) * 1000).toISOString(),
+    members: [{ phone: '9600000001', name: 'Silent One', message: 'hi' }, { phone: '9600000002', name: 'Asked Money', message: 'hi' }, { phone: '9600000003', name: 'New Guy', message: 'Namaste New ji' }] });
+  // owner rule: asked for money before joining → rejected → never messaged again
+  await mcp('update_list_member', { list: 'Prio', phone: '9600000002', outcome: 'rejected – asked for money before joining' });
+  await mcp('set_followup', { list: 'Prio', enabled: true, after_days: 2, max: 1, text: 'follow up {first_name}' });
+  const l = await listsMod.getList('Prio');
+
+  // a first message to a new person is waiting → no follow-ups today
+  const s = await mcp('send_to_list', { list: 'Prio' });
+  assert.match(s, /1 messages saved as drafts/, 'only New Guy is new');
+  assert.equal(await outboxMod.newOutreachToday('hire2'), true);
+  await listsMod.runFollowups();
+  assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]))[0].n, 0, 'busy day: no follow-ups drafted');
+
+  // the new-person draft is rejected (nothing new going out today) → follow-ups allowed, but never to the rejected person
+  await query(`UPDATE outbox SET status = 'rejected' WHERE list_id = $1 AND note IS DISTINCT FROM 'follow-up'`, [l.id]);
+  assert.equal(await outboxMod.newOutreachToday('hire2'), false);
+  await listsMod.runFollowups();
+  const fu = await query(`SELECT to_jid, priority FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
+  assert.deepEqual(fu.map((x) => x.to_jid), [J(1)], 'Silent One only — the rejected person gets nothing');
+  assert.equal(fu[0].priority, -1, 'follow-ups sit behind first messages in the queue');
+
+  // a follow-up already queued is held back at send time if new outreach starts that day
+  await query(`UPDATE outbox SET status = 'queued' WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
+  await outboxMod.enqueue({ account: 'hire2', to: '9600000009', payload: { text: 'first message to a new person' }, source: 'campaign' });
+  await query(`UPDATE outbox SET status = 'queued' WHERE account_id = 'hire2' AND to_jid = '919600000009@s.whatsapp.net'`); // approved
+  const before = sent.length;
+  outboxMod.wakeAccount('hire2');
+  await until(() => sent.slice(before).some((x) => x.jid === '919600000009@s.whatsapp.net'), 6000);
+  await sleep(300);
+  assert.ok(!sent.slice(before).some((x) => x.jid === J(1)), 'follow-up not sent on a day with new outreach');
+  const [held] = await query(`SELECT status FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
+  assert.equal(held.status, 'queued', 'held, goes out on a quiet day');
 });

@@ -665,12 +665,13 @@
     const fuForm = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
       const x = e.target;
-      await api(`/api/lists/${sel.id}/followup`, { method: 'PATCH', body: { enabled: x.enabled.checked, afterDays: Number(x.afterDays.value), max: Number(x.max.value), text: x.text.value } });
+      await api(`/api/lists/${sel.id}/followup`, { method: 'PATCH', body: { enabled: x.enabled.checked, quietDaysOnly: x.quiet.checked, afterDays: Number(x.afterDays.value), max: Number(x.max.value), text: x.text.value } });
       toast('Follow-up settings saved');
       viewLists();
     }) },
       h('h2', {}, 'Automatic follow-ups'),
       h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: !!f.enabled }), h('span', {}, 'On', h('em', {}, 'People messaged but silent get this, quoting your last message. Uses the number\'s approval mode, delay and daily limit.'))),
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'quiet', checked: f.quietDaysOnly !== false }), h('span', {}, 'Only on days with no new outreach', h('em', {}, 'New candidates get the limited daily messages first; follow-ups wait for a day this number messages no new people.'))),
       h('div', { class: 'row' },
         h('label', { class: 'field grow' }, h('span', {}, 'After (days without reply)'), h('input', { type: 'number', name: 'afterDays', min: 0.5, step: 0.5, value: f.afterDays ?? 2 })),
         h('label', { class: 'field grow' }, h('span', {}, 'At most (follow-ups per person)'), h('input', { type: 'number', name: 'max', min: 0, max: 5, value: f.max ?? 1 }))),
