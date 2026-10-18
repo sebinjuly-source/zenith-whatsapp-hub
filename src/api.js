@@ -38,7 +38,12 @@ export function buildApp() {
   app.use(cookieParser());
 
   app.get('/health', (req, res) =>
-    res.json({ ok: true, db: dbKind(), accounts: manager.list().map((a) => ({ id: a.id, status: a.status })) }),
+    res.json({
+      ok: true,
+      db: dbKind(),
+      memoryMb: Math.round(process.memoryUsage().rss / 1048576), // Render free plan: 512 MB
+      accounts: manager.list().map((a) => ({ id: a.id, status: a.status })),
+    }),
   );
 
   app.post('/login', (req, res) => {

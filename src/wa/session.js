@@ -222,6 +222,7 @@ export class Session extends EventEmitter {
           await logEvent(this.id, 'warn', `Pairing code failed: ${err.message} — scan the QR instead`);
         }
       }
+      this.linkedNow = true; // a QR/pairing code was shown in this session, so the next 'open' is a fresh link
       this.setStatus('qr');
     }
     if (connection === 'open') {
@@ -236,7 +237,12 @@ export class Session extends EventEmitter {
       this.account.phone = phone;
       this.account.wa_name = waName || this.account.wa_name;
       this.setStatus('open');
-      await logEvent(this.id, 'info', `Connected as +${phone}`);
+      if (this.linkedNow) {
+        // First connection after a QR scan / pairing code
+        const mode = { full: 'Full chat history', recent: 'Recent history only', none: 'No history (new messages only)' }[this.settings.historyMode];
+        await logEvent(this.id, 'info', `Linked successfully as +${phone} — history: ${mode}`, 'you');
+        this.linkedNow = false;
+      } else await logEvent(this.id, 'info', `Connected as +${phone}`);
       this.afterOpen().catch((err) => this.log.warn({ err: err.message }, 'post-connect sync failed'));
     }
     if (connection === 'close') {
@@ -463,7 +469,7 @@ export class Session extends EventEmitter {
         progress.added += got;
         await sleep((2500 + Math.random() * 2500) * config.timeScale);
       }
-      progress.done++;
+      progress.done = progress.index + 1; // not ++: a chat cut off by a restart is redone, not double-counted
       if (progress.index % 5 === 0) await save();
       await sleep((1500 + Math.random() * 1500) * config.timeScale);
     }
