@@ -98,7 +98,7 @@ label.field > em { display: block; font-style: normal; color: var(--ink-3); font
 .muted { color: var(--ink-3); }
 .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12.5px; word-break: break-all; }
 
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(330px, 100%), 1fr)); gap: 14px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
 .card h3 { margin: 0; font-size: 15px; }
 .card .meta { color: var(--ink-2); font-size: 13px; margin: 2px 0 10px; }
@@ -162,7 +162,7 @@ ol.steps { padding-left: 18px; color: var(--ink-2); margin: 8px 0; }
 table.list { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 table.list th, table.list td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
 table.list th { color: var(--ink-3); font-weight: 550; background: var(--panel-2); }
-.settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; }
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 16px; align-items: start; }
 .daypick { display: flex; gap: 4px; flex-wrap: wrap; }
 .daypick label { border: 1px solid var(--line); border-radius: 7px; padding: 4px 8px; cursor: pointer; font-size: 13px; }
 .daypick input { display: none; }
@@ -192,3 +192,44 @@ table.list th { color: var(--ink-3); font-weight: 550; background: var(--panel-2
 .taskcard { padding: 12px; }
 .small-select { width: auto; padding: 4px 8px; font-size: 13px; }
 @media (max-width: 760px) { .board { grid-auto-flow: row; grid-auto-columns: auto; } }
+
+/* lists: person cards (mobile friendly) */
+.people { display: grid; gap: 8px; }
+.person { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; display: grid; gap: 4px; }
+.person.closed { opacity: .6; }
+.p-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.p-meta { font-size: 12px; }
+.p-reply { font-size: 13px; background: var(--panel-2); border-radius: 8px; padding: 6px 8px; }
+.p-edit { display: grid; grid-template-columns: 150px 210px 1fr; gap: 6px; }
+.p-edit select, .p-edit input { padding: 5px 8px; font-size: 13px; }
+.funnel { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.funnel .tag { cursor: pointer; font-size: 12.5px; padding: 3px 9px; }
+.funnel .tag.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+/* ---- phones ---- */
+main { min-width: 0; }
+.seg { overflow-x: auto; scrollbar-width: none; }
+.seg button { white-space: nowrap; }
+@media (max-width: 760px) {
+  body { font-size: 15px; }
+  .nav { position: sticky; top: 0; z-index: 5; gap: 2px; scrollbar-width: none; }
+  .nav a { white-space: nowrap; padding: 8px 10px; flex-shrink: 0; }
+  main { padding: 14px 12px 40px; overflow-x: hidden; }
+  h1 { font-size: 19px; }
+  .card { padding: 12px; }
+  .p-edit { grid-template-columns: 1fr; }
+  .p-edit input, .p-edit select, input, select, textarea { font-size: 16px; } /* stops iPhone zooming into fields */
+  .row > .btn { flex-shrink: 0; }
+  .btn { padding: 9px 12px; } /* bigger touch targets */
+  .btn.small { padding: 7px 10px; }
+  .modal { padding: 16px; }
+  .qrbox img { width: min(260px, 70vw); height: auto; }
+  table.list { display: block; overflow-x: auto; }
+  .thread header { flex-wrap: wrap; gap: 6px; padding: 10px; }
+  .thread header .who { flex-basis: 60%; }
+  .composer { padding: 8px; }
+  .composer select { max-width: 96px; }
+  .msg { max-width: 88%; }
+  .kv { grid-template-columns: 1fr; gap: 0 12px; }
+  .kv dt { margin-top: 6px; }
+}

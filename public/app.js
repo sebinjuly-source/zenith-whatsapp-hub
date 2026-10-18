@@ -70,7 +70,7 @@
           link('board', 'Board'),
           link('accounts', 'Numbers'),
           link('inbox', 'Inbox'),
-          link('outbox', 'Drafts & outbox', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null),
+          link('outbox', 'Drafts', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null),
           link('lists', 'Lists'),
           link('templates', 'Templates'),
           link('rules', 'Rules'),
@@ -625,7 +625,7 @@
     const sel = (state.listId && all.find((l) => l.id === state.listId)) || all[0];
     state.listId = sel?.id;
     const fmtD = (t) => (t ? new Date(t).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '–');
-    const picker = h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(260px,1fr));margin-bottom:16px' },
+    const picker = h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(min(260px,100%),1fr));margin-bottom:16px' },
       all.map((l) => h('div', { class: 'card', style: `cursor:pointer;${l.id === sel?.id ? 'border-color:var(--accent)' : ''}`, onclick: () => { state.listId = l.id; state.listFilter = ''; viewLists(); } },
         h('b', {}, l.name), h('div', { class: 'muted', style: 'font-size:12px' }, l.account_label, ' · ', l.total, ' people'),
         h('div', { style: 'margin-top:6px' }, ['new', 'sent', 'replied', 'failed'].map((k) => h('span', { class: 'tag' }, `${STATUS_LABEL[k]}: ${l[k]}`)),
@@ -665,43 +665,71 @@
     const fuForm = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
       const x = e.target;
-      await api(`/api/lists/${sel.id}/followup`, { method: 'PATCH', body: { enabled: x.enabled.checked, quietDaysOnly: x.quiet.checked, afterDays: Number(x.afterDays.value), max: Number(x.max.value), text: x.text.value } });
+      await api(`/api/lists/${sel.id}/followup`, { method: 'PATCH', body: { enabled: x.enabled.checked, quietDaysOnly: x.quiet.checked, autoSend: x.autoSend.checked, afterDays: Number(x.afterDays.value), max: Number(x.max.value), text: x.text.value } });
       toast('Follow-up settings saved');
       viewLists();
     }) },
       h('h2', {}, 'Automatic follow-ups'),
       h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: !!f.enabled }), h('span', {}, 'On', h('em', {}, 'People messaged but silent get this, quoting your last message. Uses the number\'s approval mode, delay and daily limit.'))),
       h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'quiet', checked: f.quietDaysOnly !== false }), h('span', {}, 'Only on days with no new outreach', h('em', {}, 'New candidates get the limited daily messages first; follow-ups wait for a day this number messages no new people.'))),
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'autoSend', checked: !!f.autoSend }), h('span', {}, 'Send without approval', h('em', {}, 'Timing and the daily maximum come from the number\'s Settings (default: after 21:00, max 5 a day).'))),
       h('div', { class: 'row' },
         h('label', { class: 'field grow' }, h('span', {}, 'After (days without reply)'), h('input', { type: 'number', name: 'afterDays', min: 0.5, step: 0.5, value: f.afterDays ?? 2 })),
         h('label', { class: 'field grow' }, h('span', {}, 'At most (follow-ups per person)'), h('input', { type: 'number', name: 'max', min: 0, max: 5, value: f.max ?? 1 }))),
       h('label', { class: 'field' }, h('span', {}, 'Follow-up message'), h('textarea', { name: 'text', rows: 3, value: f.text || '', placeholder: 'Namaste {first_name} ji, kya aap abhi bhi interested hain? Reply karein ya call karein. - Zenith Suites HR' })),
       h('button', { class: 'btn primary', type: 'submit' }, 'Save follow-ups'));
-    const table = h('table', { class: 'list' },
-      h('thead', {}, h('tr', {}, ['#', 'Name', 'Phone', 'Status', 'Last sent', 'Reply', 'Outcome / notes'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, members.map((m) => {
-        const outcome = h('input', { type: 'text', value: m.outcome || '', placeholder: 'interested, trial booked…', style: 'width:150px;padding:4px 6px;font-size:12.5px', onchange: guard(async (e) => {
-          await api(`/api/lists/${sel.id}/members/${m.phone}`, { method: 'PATCH', body: { outcome: e.target.value } });
-          toast('Saved');
-        }) });
-        return h('tr', {},
-          h('td', {}, m.row_ref || ''), h('td', {}, m.name || ''), h('td', { class: 'mono' }, m.phone),
-          h('td', {}, h('span', { class: 'tag', style: m.status === 'replied' ? 'background:var(--accent-soft)' : m.status === 'failed' ? 'background:var(--bad-soft)' : '' }, STATUS_LABEL[m.status] || m.status),
-            m.followups_sent ? h('div', { class: 'muted', style: 'font-size:11px' }, `${m.followups_sent} follow-up(s)`) : null,
-            m.error ? h('div', { style: 'color:var(--bad);font-size:11px' }, m.error) : null),
-          h('td', { style: 'white-space:nowrap' }, fmtD(m.last_sent_at)),
-          h('td', { style: 'max-width:260px' }, m.last_reply_at ? [h('div', { style: 'font-size:11px', class: 'muted' }, fmtD(m.last_reply_at)), m.last_reply_text || ''] : '–'),
-          h('td', {}, outcome, m.notes ? h('div', { class: 'muted', style: 'font-size:11px' }, m.notes) : null));
-      })));
+    // ---- funnel strip + upcoming visits
+    const STAGE_LABEL = { interested: 'Interested', date_given: 'Date given', visited: 'Visited', trial: 'Trial', selected: 'Selected', joined: 'Joined', no_show: 'No-show', not_interested: 'Not interested', rejected: 'Rejected' };
+    const stageCount = {};
+    for (const m of members) if (m.stage) stageCount[m.stage] = (stageCount[m.stage] || 0) + 1;
+    const funnel = h('div', { class: 'funnel' }, Object.keys(STAGE_LABEL).filter((k) => stageCount[k]).map((k) =>
+      h('button', { class: 'tag' + (state.stageFilter === k ? ' on' : ''), onclick: () => { state.stageFilter = state.stageFilter === k ? '' : k; viewLists(); } }, `${STAGE_LABEL[k]} ${stageCount[k]}`)));
+    const visits = members.filter((m) => m.stage === 'date_given' && m.visit_at).sort((a, b) => new Date(a.visit_at) - new Date(b.visit_at));
+    const shown = state.stageFilter ? members.filter((m) => m.stage === state.stageFilter) : members;
+    const toLocalInput = (t) => { if (!t) return ''; const d = new Date(t); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+    const save = guard(async (m, body) => { await api(`/api/lists/${sel.id}/members/${m.phone}`, { method: 'PATCH', body }); toast('Saved'); viewLists(); });
+    const people = h('div', { class: 'people' }, shown.length ? shown.map((m) => {
+      const closed = ['rejected', 'not_interested', 'joined'].includes(m.stage);
+      return h('div', { class: 'person' + (closed ? ' closed' : '') },
+        h('div', { class: 'p-head' },
+          h('div', { class: 'grow' }, h('b', {}, m.row_ref ? `${m.row_ref}. ` : '', m.name || '–'), h('a', { class: 'mono muted', href: `#inbox`, onclick: () => { state.inbox.account = sel.account_id; state.inbox.q = m.phone; }, style: 'margin-left:6px;font-size:12px' }, '+' + m.phone)),
+          h('span', { class: 'tag', style: m.status === 'replied' ? 'background:var(--accent-soft)' : m.status === 'failed' ? 'background:var(--bad-soft)' : '' }, STATUS_LABEL[m.status] || m.status)),
+        h('div', { class: 'p-meta muted' }, `Sent ${fmtD(m.last_sent_at)}`, m.followups_sent ? ` · ${m.followups_sent} follow-up(s)` : '', m.error ? h('span', { style: 'color:var(--bad)' }, ' · ' + m.error) : null),
+        m.last_reply_at ? h('div', { class: 'p-reply' }, h('span', { class: 'muted' }, fmtD(m.last_reply_at) + ': '), m.last_reply_text || '') : null,
+        h('div', { class: 'p-edit' },
+          h('select', { 'aria-label': 'Stage', onchange: (e) => save(m, { stage: e.target.value }) },
+            h('option', { value: '' }, 'Stage…'), Object.entries(STAGE_LABEL).map(([k, l]) => h('option', { value: k, selected: m.stage === k }, l))),
+          h('input', { type: 'datetime-local', 'aria-label': 'Visit date', title: 'When they will come', value: toLocalInput(m.visit_at), onchange: (e) => save(m, { visitAt: e.target.value ? new Date(e.target.value).toISOString() : '' }) }),
+          h('input', { type: 'text', 'aria-label': 'Outcome', placeholder: 'Reason / outcome', value: m.outcome || '', onchange: (e) => save(m, { outcome: e.target.value }) })),
+        m.notes ? h('div', { class: 'muted', style: 'font-size:12px' }, m.notes) : null);
+    }) : h('p', { class: 'muted' }, 'Nobody here.'));
+    const p = { remindHoursBefore: 18, askDateAfterHours: 4, enabled: true, ...(sel.pipeline || {}) };
+    const pipeForm = h('form', { class: 'card', onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const x = e.target;
+      await api(`/api/lists/${sel.id}/pipeline`, { method: 'PATCH', body: { enabled: x.enabled.checked, autoSend: x.autoSend.checked, remindHoursBefore: Number(x.hours.value), askDateAfterHours: Number(x.askAfter.value), askDateText: x.askText.value || undefined, reminderText: x.remText.value || undefined } });
+      toast('Pipeline settings saved');
+      viewLists();
+    }) },
+      h('h2', {}, 'Pipeline automation'),
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: p.enabled !== false }), h('span', {}, 'On', h('em', {}, 'Interested without a date → ask for one. Date given → reminder before the visit + a Board task for you. Date passed → "Did they come?" task.'))),
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'autoSend', checked: !!p.autoSend }), h('span', {}, 'Send these without approval')),
+      h('div', { class: 'row' },
+        h('label', { class: 'field grow' }, h('span', {}, 'Remind (hours before visit)'), h('input', { type: 'number', name: 'hours', min: 1, value: p.remindHoursBefore })),
+        h('label', { class: 'field grow' }, h('span', {}, 'Ask for a date after (hours)'), h('input', { type: 'number', name: 'askAfter', min: 1, value: p.askDateAfterHours }))),
+      h('label', { class: 'field' }, h('span', {}, 'Ask-for-date message'), h('textarea', { name: 'askText', rows: 2, value: p.askDateText || '', placeholder: 'Default: Namaste {first_name} ji, aap kis din aa sakte hain? …' })),
+      h('label', { class: 'field' }, h('span', {}, 'Visit reminder ({visit_date} = their date)'), h('textarea', { name: 'remText', rows: 2, value: p.reminderText || '', placeholder: 'Default: Namaste {first_name} ji, yaad dila rahe hain: aap {visit_date} ko …' })),
+      h('button', { class: 'btn primary', type: 'submit' }, 'Save pipeline'));
     shell([
       h('h1', {}, 'Lists'),
-      h('p', { class: 'sub' }, 'Status comes from the real WhatsApp messages of the list\'s number — including ones sent from the phone or an old macro.'),
+      h('p', { class: 'sub' }, 'Status comes from the real WhatsApp messages of the list\'s number. Stage and visit date are the funnel — set them here or ask the AI.'),
       picker,
-      h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, sel.name), sendBtn,
-        h('a', { class: 'btn', href: `/api/lists/${sel.id}/export`, target: '_blank' }, 'Export (JSON)')),
+      h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, sel.name), sendBtn),
+      visits.length ? h('div', { class: 'card', style: 'margin:12px 0' }, h('b', {}, '📅 Visits'), visits.map((m) => h('div', { style: 'font-size:13px;margin-top:4px' }, `${new Date(m.visit_at).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })} — ${m.name || m.phone}`, new Date(m.visit_at) < new Date() ? h('span', { style: 'color:var(--bad)' }, ' · passed, update stage') : ''))) : null,
+      Object.keys(stageCount).length ? funnel : null,
       tabs,
-      h('div', { style: 'overflow-x:auto' }, table),
-      h('div', { class: 'settings-grid', style: 'margin-top:16px' }, fuForm),
+      people,
+      h('div', { class: 'settings-grid', style: 'margin-top:16px' }, pipeForm, fuForm),
       importForm,
     ]);
   }
@@ -845,13 +873,23 @@
       h('p', { class: 'sub' }, 'Messages written by AI or campaigns wait here when a number is in approval mode. Edit, approve or reject.'),
       numberPick,
       tabs,
-      h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(380px,1fr))' }, items.length ? items : [h('p', { class: 'muted' }, 'Nothing here.')]),
+      h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr))' }, items.length ? items : [h('p', { class: 'muted' }, 'Nothing here.')]),
     ]);
   }
 
   // ---------- settings ----------
   async function viewSettings() {
     await loadAccounts();
+    const pb = await api('/api/playbook').catch(() => ({ text: '' }));
+    const playbookCard = h('form', { class: 'card', style: 'margin-top:24px', onsubmit: guard(async (e) => {
+      e.preventDefault();
+      await api('/api/playbook', { method: 'PUT', body: { text: e.target.text.value } });
+      toast('Playbook saved — every AI using the hub now follows it');
+    }) },
+      h('h2', {}, 'Playbook (your rules for the AI)'),
+      h('p', { class: 'muted', style: 'margin-top:0' }, 'Sent to every AI that connects to the hub (Claude Code, regular Claude, others). Write your rules in plain words.'),
+      h('textarea', { name: 'text', rows: 14, value: pb.text || '' }),
+      h('div', { style: 'margin-top:8px' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save playbook')));
     if (!state.accounts.length) return shell([h('h1', {}, 'Settings'), h('p', { class: 'sub' }, 'Add a number first.')]);
     const id = state.settingsFor && state.accounts.find((a) => a.id === state.settingsFor) ? state.settingsFor : state.accounts[0].id;
     state.settingsFor = id;
@@ -870,6 +908,8 @@
         typing: fd.typing.checked,
         anytime: fd.anytime.checked,
         dailyCap: +fd.dailyCap.value,
+        followupStart: fd.followupStart.value,
+        followupDailyMax: +fd.followupDailyMax.value,
         sendStart: fd.sendStart.value,
         sendEnd: fd.sendEnd.value,
         sendDays: [...fd.querySelectorAll('input[name=day]:checked')].map((i) => +i.value),
@@ -902,6 +942,10 @@
           ),
           h('p', { class: 'muted', style: 'margin:-6px 0 12px;font-size:12px' }, 'Gap between two automated messages, picked at random in this range. Minimum 5 seconds.'),
           sw('typing', 'Show "typing…" before each message'),
+          h('div', { class: 'row' },
+            f('followupStart', 'Follow-ups not before', h('input', { type: 'time', name: 'followupStart', value: s.followupStart })),
+            f('followupDailyMax', 'Follow-ups per day (max)', h('input', { type: 'number', name: 'followupDailyMax', min: 0, value: s.followupDailyMax }))),
+          h('p', { class: 'muted', style: 'margin:-6px 0 12px;font-size:12px' }, 'Follow-ups to people who never replied go out only on days with no first messages to new people, after this time.'),
           sw('anytime', 'Send at any time', 'Day and night, every day. Turn off to use the time window below.'),
           f('dailyCap', 'Daily limit (automated messages)', h('input', { type: 'number', name: 'dailyCap', min: 0, value: s.dailyCap }), 'Messages you send yourself or from Apps Script are not counted.'),
           h('div', { class: 'row', style: s.anytime ? 'opacity:.5' : '' },
@@ -934,6 +978,7 @@
       h('div', { class: 'row', style: 'margin-bottom:16px' }, h('select', { style: 'max-width:320px', 'aria-label': 'Number', onchange: (e) => { state.settingsFor = e.target.value; viewSettings(); } },
         state.accounts.map((x) => h('option', { value: x.id, selected: x.id === id }, x.label)))),
       form,
+      playbookCard,
       h('div', { class: 'card', style: 'margin-top:24px;border-color:var(--bad-soft)' },
         h('h2', {}, 'Delete this number from the hub'),
         h('p', { class: 'muted' }, 'Unlinks it and deletes all stored chats, contacts and messages for it. Cannot be undone.'),
@@ -957,8 +1002,10 @@
       h('p', { class: 'sub' }, 'Replace YOUR_API_KEY with the key you log in with. Account ids: ' + (state.accounts.map((a) => a.id).join(', ') || 'none yet') + '.'),
       h('h2', {}, 'Claude Code (MCP)'),
       code(`claude mcp add --transport http --scope user whatsapp ${base}/mcp/YOUR_API_KEY`),
-      h('h2', {}, 'claude.ai / Claude Desktop'),
-      h('p', { class: 'muted' }, 'Settings → Connectors → Add custom connector → URL:'),
+      h('h2', {}, 'Install this dashboard as an app'),
+      h('p', { class: 'muted' }, 'PC (Chrome/Edge): click the install icon at the right end of the address bar, or menu ⋮ → Cast, save and share → Install page as app. Phone: Chrome menu ⋮ → Add to Home screen (iPhone Safari: Share → Add to Home Screen). It opens in its own window with its own icon.'),
+      h('h2', {}, 'claude.ai / Claude Desktop / Claude mobile'),
+      h('p', { class: 'muted' }, 'claude.ai → Settings → Connectors → Add custom connector → name "WhatsApp Hub", URL below. It then works in Claude on the web, desktop and phone. The hub sends its playbook (your rules) to Claude automatically.'),
       code(`${base}/mcp/YOUR_API_KEY`),
       h('h2', {}, 'Google Apps Script — send a message'),
       code(`function sendWhatsApp(account, phone, text, fileUrl) {

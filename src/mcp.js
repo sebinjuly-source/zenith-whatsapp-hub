@@ -19,6 +19,7 @@ import * as templates from './templates.js';
 import * as rules from './rules.js';
 import { findPerson } from './people.js';
 import * as lists from './lists.js';
+import { getPlaybook, savePlaybook } from './playbook.js';
 import { logEvent } from './db.js';
 import { HISTORY_MODES } from './describe.js';
 import { normalizeSettings } from './settings.js';
@@ -87,8 +88,11 @@ const msgLine = (m, maxLen) => {
   return `[${fmtTime(m.ts)}] ${who}: ${body}${q}`;
 };
 
-function buildServer() {
-  const server = new McpServer({ name: 'zenith-whatsapp-hub', version: '0.1.0' });
+function buildServer(playbook = '') {
+  const server = new McpServer(
+    { name: 'zenith-whatsapp-hub', version: '0.1.0' },
+    { instructions: `Zenith WhatsApp Hub: several WhatsApp numbers (list_accounts), chats, candidate lists with a funnel, tasks, templates and rules. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+  );
   const tool = (name, description, inputSchema, fn) => server.registerTool(name, { description, inputSchema }, safe(fn));
 
   tool('list_accounts', 'List the WhatsApp numbers in the hub: id, purpose, phone, connection status, AI mode (approve/auto), and how much history is stored. Start here.', {}, async () => {
@@ -496,13 +500,18 @@ function buildServer() {
   tool('list_members', 'People on a list, one line each: phone | name | status | outcome | last sent | last reply (+ their last message) | follow-ups | error. Filter by status to stay short.', {
     list: listArg,
     status: z.string().optional().describe('Comma list of: new, queued, sent, replied, failed, opted_out'),
+    stage: z.string().optional().describe('Comma list of funnel stages, e.g. interested,date_given'),
     outcome: z.string().optional(),
   }, async (a) => {
     const l = await lists.getList(a.list);
     await lists.refreshList(l.id);
-    const rows = await lists.listMembers(l.id, { status: a.status, outcome: a.outcome });
+    let rows = await lists.listMembers(l.id, { status: a.status, outcome: a.outcome });
+    if (a.stage) {
+      const want = a.stage.split(',').map((x) => x.trim());
+      rows = rows.filter((m) => want.includes(m.stage || ''));
+    }
     return rows.length
-      ? rows.map((m) => [m.phone, trim(m.name, 25), m.status, m.outcome ? `outcome:${m.outcome}` : null, `sent ${d(m.last_sent_at)}`,
+      ? rows.map((m) => [m.phone, trim(m.name, 25), m.status, m.stage ? `stage:${m.stage}` : null, m.visit_at ? `visit:${d(m.visit_at)}` : null, m.outcome ? `outcome:${trim(m.outcome, 50)}` : null, `sent ${d(m.last_sent_at)}`,
           m.last_reply_at ? `reply ${d(m.last_reply_at)}: "${trim(m.last_reply_text, 80)}"` : null, m.followups_sent ? `follow-ups:${m.followups_sent}` : null,
           m.error ? `error:${trim(m.error, 60)}` : null, m.notes ? `notes:${trim(m.notes, 60)}` : null].filter(Boolean).join(' | ')).join('\n')
       : 'Nobody matches.';
@@ -532,20 +541,63 @@ function buildServer() {
     list: listArg, enabled: z.boolean(), after_days: z.number().optional(), max: z.number().int().optional(),
     text: z.string().optional().describe('Follow-up message; may use {first_name}, {name}'), template: z.string().optional(),
     quiet_days_only: z.boolean().optional().describe('Default true: follow-ups only on days this number sends no first messages to new people'),
+    auto_send: z.boolean().optional().describe('Send follow-ups without approval (owner allowed). Timing/daily max come from the number settings (default after 21:00, max 5/day).'),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    const u = await lists.setFollowup(l.id, { enabled: a.enabled, afterDays: a.after_days, max: a.max, text: a.text, template: a.template, quietDaysOnly: a.quiet_days_only });
+    const u = await lists.setFollowup(l.id, { enabled: a.enabled, afterDays: a.after_days, max: a.max, text: a.text, template: a.template, quietDaysOnly: a.quiet_days_only, autoSend: a.auto_send });
     await ai(l.account_id, `Follow-ups for "${l.name}": ${u.followup.enabled ? 'on' : 'off'}`);
     return `Follow-ups for "${l.name}": ${u.followup.enabled ? `on — after ${u.followup.afterDays} day(s) without reply, up to ${u.followup.max}` : 'off'}.`;
   });
 
-  tool('update_list_member', 'Record the outcome for a person on a list and/or notes. Outcomes starting with rejected / not interested / hired / joined / do not contact close the person: no more sends or follow-ups from the list. Owner rule: anyone asking for money (fuel, travel, advance) before joining → "rejected – asked for money before joining".', {
-    list: listArg, phone: z.string(), outcome: z.string().optional(), notes: z.string().optional(),
+  tool('update_list_member', 'Move a person through the funnel: stage (interested, date_given, visited, trial, selected, joined, no_show, not_interested, rejected), the date/time they will come (visit_at → automatic reminder before it and a board task), outcome (short reason) and notes. Stages joined / not_interested / rejected close the person (no more sends or follow-ups). Owner rule: anyone asking for money before joining → stage rejected.', {
+    list: listArg, phone: z.string(),
+    stage: z.enum(['interested', 'date_given', 'visited', 'trial', 'selected', 'joined', 'no_show', 'not_interested', 'rejected', '']).optional().describe('Funnel stage ("" clears it)'),
+    visit_at: z.string().optional().describe('When they will come (ISO or "YYYY-MM-DD HH:MM", your timezone if no offset); sets stage date_given; "" clears'),
+    outcome: z.string().optional().describe('Short reason/summary, e.g. "rejected – asked for money before joining"'),
+    notes: z.string().optional(),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    const m = await lists.updateMember(l.id, a.phone, { outcome: a.outcome, notes: a.notes });
-    await ai(l.account_id, `List "${l.name}": ${m.name || m.phone} → ${m.outcome || 'no outcome'}`);
-    return `${m.name || m.phone}: outcome ${m.outcome || '-'}${m.notes ? ', notes saved' : ''}.`;
+    // "YYYY-MM-DD" alone → 10:00; no timezone given → India time
+    let visitAt = a.visit_at === undefined ? undefined : a.visit_at === '' ? null : a.visit_at.trim();
+    if (visitAt && /^\d{4}-\d{2}-\d{2}$/.test(visitAt)) visitAt += ' 10:00';
+    if (visitAt && !/[zZ]|[+-]\d\d:?\d\d$/.test(visitAt)) visitAt = visitAt.replace(' ', 'T') + '+05:30';
+    const m = await lists.updateMember(l.id, a.phone, { outcome: a.outcome, notes: a.notes, stage: a.stage, visitAt });
+    await ai(l.account_id, `List "${l.name}": ${m.name || m.phone} → ${m.stage || '-'}${m.visit_at ? ' (visit ' + d(m.visit_at) + ')' : ''}${a.outcome ? ' – ' + a.outcome : ''}`);
+    const parts = [m.stage && `stage ${m.stage}`, m.visit_at && `visit ${d(m.visit_at)}`, m.outcome && `outcome ${m.outcome}`, m.notes && 'notes saved'].filter(Boolean);
+    return `${m.name || m.phone}: ${parts.join(', ') || 'updated'}.`;
+  });
+
+  tool('pipeline', 'Funnel overview across lists: people per stage (plus not contacted / contacted / replied without a stage) and upcoming visits with dates. Start here for "where do candidates stand?".', {
+    account: z.string().optional(),
+  }, async (a) => {
+    const acc = a.account ? (await manager.resolve(a.account)).id : null;
+    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1)', [acc])) await lists.refreshList(l.id);
+    const { counts, visits } = await lists.pipelineSummary(acc);
+    const byList = {};
+    for (const c of counts) (byList[c.name] ||= []).push(`${c.stage}: ${c.n}`);
+    const out = Object.entries(byList).map(([n, s]) => `${n} — ${s.join(', ')}`);
+    out.push(visits.length ? 'Upcoming/overdue visits:\n' + visits.map((v) => `  ${d(v.visit_at)} | ${v.name || v.phone} (+${v.phone}) | ${v.list}`).join('\n') : 'No visits scheduled.');
+    return out.join('\n');
+  });
+
+  tool('set_pipeline', 'Pipeline automation for a list: ask interested people for a date, remind people before their visit date, and add owner tasks. Texts may use {first_name}, {visit_date}.', {
+    list: listArg, enabled: z.boolean().optional(), auto_send: z.boolean().optional().describe('Send these without approval'),
+    remind_hours_before: z.number().optional(), ask_date_after_hours: z.number().optional(),
+    reminder_text: z.string().optional(), ask_date_text: z.string().optional(),
+  }, async (a) => {
+    const l = await lists.getList(a.list);
+    const u = await lists.setPipeline(l.id, { enabled: a.enabled, autoSend: a.auto_send, remindHoursBefore: a.remind_hours_before, askDateAfterHours: a.ask_date_after_hours, reminderText: a.reminder_text, askDateText: a.ask_date_text });
+    await ai(l.account_id, `Pipeline settings for "${l.name}" updated`);
+    const p = u.pipeline;
+    return `Pipeline for "${l.name}": ${p.enabled ? 'on' : 'off'}, ${p.autoSend ? 'sends automatically' : 'drafts for approval'}, reminder ${p.remindHoursBefore}h before visits, ask for a date after ${p.askDateAfterHours}h.`;
+  });
+
+  tool('get_playbook', "The owner's standing rules (hiring policy, priorities, tone). Read before acting on candidates or guests.", {}, async () => (await getPlaybook()).text);
+
+  tool('save_playbook', "Replace the owner's playbook text. Only when the owner asks to change their rules.", { text: z.string() }, async (a) => {
+    await savePlaybook(a.text);
+    await ai(null, 'Updated the playbook');
+    return 'Playbook saved.';
   });
 
   tool('save_media', 'Download and keep a file from a message (e.g. a candidate\'s resume). Use the media id shown by get_messages.', {
@@ -649,7 +701,7 @@ export function mountMcp(app) {
     const key = req.params.key || req.get('x-api-key') || req.query.key;
     if (key !== config.apiKey) return res.status(401).json({ error: 'Unauthorized' });
     if (req.method !== 'POST') return res.status(405).set('Allow', 'POST').json({ error: 'Method not allowed' });
-    const server = buildServer();
+    const server = buildServer((await getPlaybook().catch(() => ({ text: '' }))).text);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => {
       transport.close();

@@ -17,6 +17,7 @@ import { manager } from './wa/manager.js';
 import * as outbox from './outbox.js';
 import { createTask, refreshTask, fillTemplate } from './tasks.js';
 import { getTemplate } from './templates.js';
+import { afterTime } from './settings.js';
 
 export const STATUSES = ['new', 'queued', 'sent', 'replied', 'failed', 'opted_out'];
 
@@ -34,9 +35,21 @@ export function decodeMessage(text) {
 
 const DEFAULT_FOLLOWUP = { enabled: false, afterDays: 2, max: 1, text: '', template: '', quietDaysOnly: true };
 
+/** Funnel stages (set by you or the AI). Closed ones are never messaged again from the list. */
+export const STAGES = ['interested', 'date_given', 'visited', 'trial', 'selected', 'joined', 'no_show', 'not_interested', 'rejected'];
+export const CLOSED_STAGES = ['joined', 'not_interested', 'rejected'];
+const DEFAULT_PIPELINE = {
+  enabled: true,
+  autoSend: false, // false = reminders/questions wait for approval like other AI messages
+  remindHoursBefore: 18,
+  askDateAfterHours: 4,
+  askDateText: 'Namaste {first_name} ji, aap kis din aa sakte hain? Date aur time bata dijiye. - Zenith Suites HR',
+  reminderText: 'Namaste {first_name} ji, yaad dila rahe hain: aap {visit_date} ko Zenith Suites (Amrutha Halli) aa rahe hain. Koi problem ho to call karein: 9353315601. - Zenith Suites HR',
+};
+
 /** Outcomes that close a person: never messaged again from the list (no sends, no follow-ups). */
 export const CLOSED_OUTCOME = /^\s*(rejected|not[\s-]?interested|hired|joined|do[\s-]?not[\s-]?contact)/i;
-const CLOSED_SQL = `COALESCE(m.outcome, '') !~* '^\\s*(rejected|not[\\s-]?interested|hired|joined|do[\\s-]?not[\\s-]?contact)'`;
+const CLOSED_SQL = `COALESCE(m.stage, '') NOT IN ('joined','not_interested','rejected') AND COALESCE(m.outcome, '') !~* '^\\s*(rejected|not[\\s-]?interested|hired|joined|do[\\s-]?not[\\s-]?contact)'`;
 
 export async function getList(ref, account) {
   const isId = /^\d+$/.test(String(ref));
@@ -168,16 +181,126 @@ export async function listMembers(listId, { status, outcome, limit = 500 } = {})
   );
 }
 
-export async function updateMember(listId, phoneOrJid, { outcome, notes }) {
+export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, visitAt }) {
   const jid = toJid(phoneOrJid);
+  if (stage !== undefined && stage !== null && stage !== '' && !STAGES.includes(stage)) {
+    throw new Error(`Stage must be one of: ${STAGES.join(', ')}`);
+  }
+  let visit = visitAt === undefined ? undefined : visitAt ? new Date(visitAt) : null;
+  if (visit && isNaN(visit)) throw new Error('Could not read the visit date');
+  if (visit && stage === undefined) stage = 'date_given'; // giving a date moves them to "date given"
   const [m] = await query(
-    `UPDATE list_members SET outcome = CASE WHEN $3::text IS NULL THEN outcome WHEN $3 = '' THEN NULL ELSE $3 END,
-       notes = COALESCE($4, notes), updated_at = now()
+    `UPDATE list_members SET
+       outcome = CASE WHEN $3::text IS NULL THEN outcome WHEN $3 = '' THEN NULL ELSE $3 END,
+       notes = COALESCE($4, notes),
+       stage = CASE WHEN $5::text IS NULL THEN stage WHEN $5 = '' THEN NULL ELSE $5 END,
+       stage_at = CASE WHEN $5::text IS NULL THEN stage_at ELSE now() END,
+       visit_at = CASE WHEN $6::text = 'keep' THEN visit_at WHEN $6 = 'clear' THEN NULL ELSE $7::timestamptz END,
+       reminded_at = CASE WHEN $6::text = 'keep' THEN reminded_at ELSE NULL END,
+       checked_at = CASE WHEN $6::text = 'keep' THEN checked_at ELSE NULL END,
+       updated_at = now()
      WHERE list_id = $1 AND jid = $2 RETURNING *`,
-    [listId, jid, outcome === undefined ? null : outcome, notes ?? null],
+    [listId, jid, outcome === undefined ? null : outcome, notes ?? null, stage === undefined ? null : stage,
+      visit === undefined ? 'keep' : visit === null ? 'clear' : 'set', visit ? visit.toISOString() : null],
   );
   if (!m) throw new Error('Not on this list');
   return m;
+}
+
+export async function setPipeline(listId, settings) {
+  const [l] = await query('SELECT pipeline FROM lists WHERE id = $1', [listId]);
+  if (!l) throw new Error('List not found');
+  const p = { ...DEFAULT_PIPELINE, ...(l.pipeline || {}), ...Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== undefined)) };
+  p.remindHoursBefore = Math.max(1, Number(p.remindHoursBefore) || 18);
+  p.askDateAfterHours = Math.max(1, Number(p.askDateAfterHours) || 4);
+  p.enabled = p.enabled !== false;
+  p.autoSend = !!p.autoSend;
+  const [u] = await query('UPDATE lists SET pipeline = $2, updated_at = now() WHERE id = $1 RETURNING *', [listId, JSON.stringify(p)]);
+  return u;
+}
+
+const fmtVisit = (t) => new Date(t).toLocaleString('en-IN', { timeZone: process.env.TZ_NAME || 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+
+/**
+ * Warm-lead automation (runs with follow-ups every 10 min, on the server holding the number):
+ *  - stage "interested", no date, quiet for askDateAfterHours → ask for a date (once)
+ *  - stage "date_given" → reminder message remindHoursBefore the visit (once) + a board task for you
+ *  - visit time passed by 3 h and stage still "date_given" → board task "Did X come?" (once)
+ * These come before bulk sends and follow-ups (priority 5).
+ */
+export async function runPipeline() {
+  const lists = await query(`SELECT * FROM lists`);
+  for (const list of lists) {
+    const session = manager.sessions.get(list.account_id);
+    if (session?.status !== 'open') continue;
+    const p = { ...DEFAULT_PIPELINE, ...(list.pipeline || {}) };
+    if (!p.enabled) continue;
+    try {
+      const approve = !p.autoSend && session.settings.aiMode === 'approve';
+      const send = async (m, text, note) => {
+        const first = (m.name || '').trim().split(/\s+/)[0];
+        const body = fillTemplate(text, { ...m.fields, name: m.name, first_name: first, phone: m.phone, visit_date: m.visit_at ? fmtVisit(m.visit_at) : '' });
+        await query(
+          `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, list_id) VALUES ($1,$2,$3,'campaign',$4,5,$5,$6)`,
+          [list.account_id, m.jid, JSON.stringify({ text: body }), approve ? 'draft' : 'queued', note, list.id],
+        );
+      };
+      const pending = (note) => `NOT EXISTS (SELECT 1 FROM outbox o WHERE o.list_id = m.list_id AND o.to_jid = m.jid AND o.note = '${note}' AND o.status IN ('draft','queued','sending'))`;
+      // 1. interested but no date yet → ask for one
+      const ask = await query(
+        `SELECT m.* FROM list_members m WHERE m.list_id = $1 AND m.stage = 'interested' AND m.visit_at IS NULL AND m.asked_date_at IS NULL
+           AND COALESCE(m.last_reply_at, m.stage_at, m.updated_at) <= now() - ($2 || ' hours')::interval AND ${pending('ask-date')}`,
+        [list.id, String(p.askDateAfterHours)],
+      );
+      for (const m of ask) {
+        await send(m, p.askDateText, 'ask-date');
+        await query('UPDATE list_members SET asked_date_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
+      }
+      // 2. date given → reminder before the visit + task for you
+      const remind = await query(
+        `SELECT m.* FROM list_members m WHERE m.list_id = $1 AND m.stage = 'date_given' AND m.visit_at IS NOT NULL AND m.reminded_at IS NULL
+           AND m.visit_at > now() AND m.visit_at <= now() + ($2 || ' hours')::interval`,
+        [list.id, String(p.remindHoursBefore)],
+      );
+      for (const m of remind) {
+        await send(m, p.reminderText, 'visit-reminder');
+        await createTask({ account: list.account_id, title: `Visit: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminder sent to +${m.phone}. Update the stage after the visit.`, dueAt: m.visit_at, createdBy: 'rule' });
+        await query('UPDATE list_members SET reminded_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
+      }
+      // 3. visit time passed, stage not updated → ask you
+      const check = await query(
+        `SELECT m.* FROM list_members m WHERE m.list_id = $1 AND m.stage = 'date_given' AND m.visit_at <= now() - interval '3 hours' AND m.checked_at IS NULL`,
+        [list.id],
+      );
+      for (const m of check) {
+        await createTask({ account: list.account_id, title: `Did ${m.name || m.phone} come? (${fmtVisit(m.visit_at)})`, details: `${list.name}: set the stage to visited / trial / no_show.`, createdBy: 'rule' });
+        await query('UPDATE list_members SET checked_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
+      }
+      if (ask.length + remind.length) outbox.wakeAccount(list.account_id);
+      if (ask.length + remind.length + check.length) {
+        await logEvent(list.account_id, 'info', `Pipeline "${list.name}": ${ask.length} asked for a date, ${remind.length} visit reminders, ${check.length} visit checks`);
+      }
+    } catch (err) {
+      await logEvent(list.account_id, 'warn', `Pipeline "${list.name}" failed: ${err.message}`);
+    }
+  }
+}
+
+/** Funnel overview: people per stage and upcoming visits. */
+export async function pipelineSummary(account) {
+  const counts = await query(
+    `SELECT l.id, l.name, COALESCE(m.stage, CASE WHEN m.status = 'replied' THEN 'replied (no stage)' WHEN m.status IN ('sent','queued') THEN 'contacted' ELSE 'not contacted' END) AS stage, count(*)::int AS n
+     FROM lists l JOIN list_members m ON m.list_id = l.id WHERE ($1::text IS NULL OR l.account_id = $1)
+     GROUP BY 1,2,3 ORDER BY 1 DESC, 4 DESC`,
+    [account || null],
+  );
+  const visits = await query(
+    `SELECT l.name AS list, m.* FROM lists l JOIN list_members m ON m.list_id = l.id
+     WHERE ($1::text IS NULL OR l.account_id = $1) AND m.stage = 'date_given' AND m.visit_at IS NOT NULL
+     ORDER BY m.visit_at LIMIT 50`,
+    [account || null],
+  );
+  return { counts, visits };
 }
 
 export async function setFollowup(listId, settings) {
@@ -188,6 +311,7 @@ export async function setFollowup(listId, settings) {
   f.max = Math.max(0, Math.min(5, parseInt(f.max, 10) || 0));
   f.enabled = !!f.enabled;
   f.quietDaysOnly = f.quietDaysOnly !== false;
+  f.autoSend = !!f.autoSend;
   if (f.enabled && !String(f.text || '').trim() && !f.template) throw new Error('Follow-ups need a message or a template');
   const [u] = await query('UPDATE lists SET followup = $2, updated_at = now() WHERE id = $1 RETURNING *', [listId, JSON.stringify(f)]);
   return u;
@@ -212,8 +336,8 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
   const plan = [];
   const skipped = [];
   for (const m of members) {
-    if (CLOSED_OUTCOME.test(m.outcome || '')) {
-      skipped.push({ to: m.phone, reason: `outcome: ${m.outcome}` });
+    if (CLOSED_STAGES.includes(m.stage) || CLOSED_OUTCOME.test(m.outcome || '')) {
+      skipped.push({ to: m.phone, reason: `closed: ${m.stage || m.outcome}` });
       continue;
     }
     const first = (m.name || '').trim().split(/\s+/)[0];
@@ -250,18 +374,30 @@ export async function runFollowups() {
     try {
       await refreshList(list.id);
       const f = list.followup;
-      // New candidates first: no follow-ups on a day this number messages (or is about to message) new people.
+      // New candidates first: no follow-ups on a day this number messages (or is about to message) new people,
+      // not before the number's follow-up time (default 21:00), and at most followupDailyMax a day.
       if (f.quietDaysOnly !== false && (await outbox.newOutreachToday(list.account_id))) continue;
+      const st = session.settings;
+      if (!afterTime(st.followupStart)) continue;
+      const already = (await query(
+        `SELECT count(*)::int AS n FROM outbox WHERE account_id = $1 AND note = 'follow-up' AND status IN ('draft','queued','sending','sent')
+           AND created_at >= (date_trunc('day', now() AT TIME ZONE $2) AT TIME ZONE $2)`,
+        [list.account_id, process.env.TZ_NAME || 'Asia/Kolkata'],
+      ))[0].n;
+      const room = st.followupDailyMax - already;
+      if (room <= 0) continue;
       const due = await query(
         `SELECT m.* FROM list_members m WHERE m.list_id = $1 AND m.status = 'sent' AND m.followups_sent < $2
            AND m.last_sent_at <= now() - ($3 || ' days')::interval
            AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.list_id = m.list_id AND o.to_jid = m.jid AND o.status IN ('draft','queued','sending'))
-           AND ${CLOSED_SQL}`,
-        [list.id, f.max, String(f.afterDays)],
+           AND ${CLOSED_SQL}
+         ORDER BY CASE WHEN m.row_ref ~ '^[0-9]+$' THEN m.row_ref::int END NULLS LAST, m.last_sent_at
+         LIMIT $4`,
+        [list.id, f.max, String(f.afterDays), room],
       );
       if (!due.length) continue;
       const tpl = f.template ? await getTemplate(list.account_id, f.template) : null;
-      const approve = session.settings.aiMode === 'approve';
+      const approve = !f.autoSend && session.settings.aiMode === 'approve';
       const task = await createTask({ account: list.account_id, title: `${list.name}: follow up ${due.length}`, details: `No reply after ${f.afterDays} day(s)`, kind: 'bulk', createdBy: 'rule' });
       const rows = [];
       for (const m of due) {

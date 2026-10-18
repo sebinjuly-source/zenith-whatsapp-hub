@@ -16,9 +16,13 @@ async function main() {
   await manager.init();
   await startOutbox();
   // Automatic follow-ups (and fresh list statuses) every 10 minutes
-  const { runFollowups } = await import('./lists.js');
-  setInterval(() => runFollowups().catch((err) => logger.error({ err: err.message }, 'follow-ups failed')), 10 * 60 * 1000).unref();
-  setTimeout(() => runFollowups().catch(() => {}), 60 * 1000).unref();
+  const { runFollowups, runPipeline } = await import('./lists.js');
+  const tick = async () => {
+    await runPipeline().catch((err) => logger.error({ err: err.message }, 'pipeline failed')); // warm leads first
+    await runFollowups().catch((err) => logger.error({ err: err.message }, 'follow-ups failed'));
+  };
+  setInterval(tick, 10 * 60 * 1000).unref();
+  setTimeout(tick, 60 * 1000).unref();
   // WhatsApp alerts to ALERT_PHONE when a number is logged out / disconnected for 15+ min
   startAlerts(manager, (from, to, text) => enqueueAlert({ account: from, to, payload: { text }, source: 'api', note: 'connection alert' }));
 

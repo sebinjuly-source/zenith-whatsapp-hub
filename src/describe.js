@@ -11,7 +11,7 @@ export function describeSettingsChange(before = {}, after = {}) {
     aiMode: 'AI sending', delayMinSec: 'Delay min (s)', delayMaxSec: 'Delay max (s)', typing: 'Typing indicator',
     dailyCap: 'Daily limit', anytime: 'Send any time', sendStart: 'Send from', sendEnd: 'Send until', sendDays: 'Send days', storeGroups: 'Store groups',
     autosaveImages: 'Auto-save images', autosaveDocuments: 'Auto-save documents', autosaveKnownOnly: 'Auto-save only known',
-    autosaveMaxMb: 'Auto-save max MB', optOutWords: 'Opt-out words', webhookUrl: 'Notify URL', historyMode: 'History on link',
+    autosaveMaxMb: 'Auto-save max MB', optOutWords: 'Opt-out words', webhookUrl: 'Notify URL', historyMode: 'History on link', followupStart: 'Follow-ups not before', followupDailyMax: 'Follow-ups per day',
   };
   const fmt = (v) => (Array.isArray(v) ? v.join(',') : v === '' ? '(none)' : String(v));
   return Object.keys(label)

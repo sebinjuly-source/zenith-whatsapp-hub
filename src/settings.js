@@ -22,6 +22,9 @@ export const DEFAULT_SETTINGS = {
   sendStart: '10:00',
   sendEnd: '19:00',
   sendDays: [1, 2, 3, 4, 5, 6], // 0 = Sunday
+  // Follow-ups to people who never replied: not before this time, and at most this many a day.
+  followupStart: '21:00',
+  followupDailyMax: 5,
   // History & storage
   // What to import when the number is linked: 'full' (everything the phone has), 'recent' (the phone's
   // default — roughly the last few months), 'none' (only new messages from now on). Only used at link time.
@@ -60,6 +63,8 @@ export function normalizeSettings(input = {}) {
       ? [...new Set(s.sendDays.map(Number).filter((d) => d >= 0 && d <= 6))].sort()
       : DEFAULT_SETTINGS.sendDays,
     historyMode: ['full', 'recent', 'none'].includes(s.historyMode) ? s.historyMode : 'full',
+    followupStart: isTime(s.followupStart) ? s.followupStart : DEFAULT_SETTINGS.followupStart,
+    followupDailyMax: clampInt(s.followupDailyMax, 0, 100, DEFAULT_SETTINGS.followupDailyMax),
     storeGroups: !!s.storeGroups,
     autosaveImages: !!s.autosaveImages,
     autosaveDocuments: !!s.autosaveDocuments,
@@ -105,6 +110,11 @@ export function localNow(now = new Date()) {
 }
 
 const toMin = (hhmm) => parseInt(hhmm.slice(0, 2), 10) * 60 + parseInt(hhmm.slice(3), 10);
+
+/** Is it at/after HH:MM today (your timezone)? */
+export function afterTime(hhmm, now = new Date()) {
+  return localNow(now).minutes >= toMin(hhmm);
+}
 
 export function insideSendingWindow(settings, now = new Date()) {
   if (settings.anytime) return true;

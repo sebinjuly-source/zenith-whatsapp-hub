@@ -37,6 +37,10 @@ Only one server may run a given number at a time (a second one gets "Running els
 - **One person across numbers** — contact panel "Also on", MCP find_person.
 - **Rules** — per number: when (person/group, new/known sender, message types, words) → tag, status, save file, board task, auto-reply template (once per person per day), remind later.
 - **Lists + automatic follow-ups** — import a batch (Lists page, MCP import_list, REST /api/lists/import, or the Google Sheet script). Each person's status (not messaged / sent / replied / failed / opted out) is worked out from the real WhatsApp messages since the list's start date. "Message not-messaged + failed" sends each person their own prepared message. Follow-ups: silent for N days → a follow-up quoting your last message, up to N times, checked every 10 min.
+- **Pipeline** — per person: stage (interested → date_given → visited/trial → selected → joined; or no_show / not_interested / rejected) and visit date. Automatic: ask interested people for a date, reminder before the visit + owner task, "did they come?" task. Warm leads go before bulk sends and follow-ups. Closed stages are never messaged again.
+- **Follow-up timing** — per number: not before followupStart (default 21:00), at most followupDailyMax (default 5) a day, only on days with no first messages to new people.
+- **Playbook** — your rules for the AI, stored in the hub (Settings page), sent to every MCP client as server instructions and via get_playbook.
+- **App** — installable (PWA) on PC and phone. On this PC: Desktop shortcut "WhatsApp Hub" (cloud) and "WhatsApp Hub (local – full history linking)" (scripts/start-local.cmd).
 - **Google Sheets (optional)** — apps-script/ListSync.gs: paste into the sheet's Apps Script, set the API key and column names, run setup(). It pushes rows to the hub and writes status columns back every 15 min.
 - **Alerts** — set ALERT_PHONE to get a WhatsApp when a number is logged out or offline for 15+ min.
 - **Idempotency** — idempotencyKey / Idempotency-Key header: a retried request never sends twice.

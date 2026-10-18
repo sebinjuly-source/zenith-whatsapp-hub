@@ -10,7 +10,7 @@ import config from './config.js';
 import { manager } from './wa/manager.js';
 import { loadOutgoing } from './media.js';
 import { toJid } from './store.js';
-import { MIN_DELAY_SEC, randomDelayMs, insideSendingWindow } from './settings.js';
+import { MIN_DELAY_SEC, randomDelayMs, insideSendingWindow, afterTime } from './settings.js';
 import { createTask, refreshTask, fillTemplate, planRecipients } from './tasks.js';
 import { hasAuthState } from './wa/auth-state.js';
 import { getTemplate, contactFields, fieldsIn } from './templates.js';
@@ -207,6 +207,16 @@ export async function newOutreachToday(accountId) {
   return !!r;
 }
 
+/** Follow-ups sent (or being sent) today by this number. */
+export async function followupsToday(accountId) {
+  const [r] = await query(
+    `SELECT count(*)::int AS n FROM outbox WHERE account_id = $1 AND note = 'follow-up' AND status IN ('sent','sending')
+       AND sent_at >= (date_trunc('day', now() AT TIME ZONE $2) AT TIME ZONE $2)`,
+    [accountId, config.tz],
+  );
+  return r.n;
+}
+
 async function automatedSentToday(accountId) {
   const [r] = await query(
     `SELECT count(*)::int AS n FROM outbox
@@ -302,7 +312,8 @@ function startWorker(accountId) {
     const gapOver = Date.now() >= nextAutomatedAt;
     const automatedAllowed = gapOver && insideSendingWindow(s) && (await automatedSentToday(accountId)) < s.dailyCap;
     // Follow-ups only go out on days with no new outreach (new candidates get the limited capacity first).
-    const followupsAllowed = automatedAllowed && !(await newOutreachToday(accountId));
+    const followupsAllowed = automatedAllowed && afterTime(s.followupStart) && !(await newOutreachToday(accountId))
+      && (await followupsToday(accountId)) < s.followupDailyMax;
     // Claim one row atomically, so two servers can never pick the same message.
     const [row] = await query(
       `UPDATE outbox SET status = 'sending', sent_at = now() WHERE id = (

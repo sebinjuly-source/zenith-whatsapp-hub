@@ -20,6 +20,7 @@ import * as templates from './templates.js';
 import * as rules from './rules.js';
 import { findPerson } from './people.js';
 import * as lists from './lists.js';
+import { getPlaybook, savePlaybook } from './playbook.js';
 import { logEvent } from './db.js';
 import { normalizeSettings } from './settings.js';
 import { describeSettingsChange, HISTORY_MODES } from './describe.js';
@@ -248,7 +249,7 @@ export function buildApp() {
   api.patch('/lists/:id/members/:phone', wrap(async (req, res) => {
     const l = await lists.getList(req.params.id);
     const m = await lists.updateMember(l.id, req.params.phone, req.body || {});
-    await act(req, l.account_id, `List "${l.name}": ${m.name || m.phone}${req.body?.outcome !== undefined ? ' → ' + (req.body.outcome || 'no outcome') : ''}${req.body?.notes ? ' (note)' : ''}`);
+    await act(req, l.account_id, `List "${l.name}": ${m.name || m.phone}${req.body?.stage !== undefined ? ' → ' + (m.stage || 'no stage') : ''}${m.visit_at && req.body?.visitAt ? ' (visit ' + new Date(m.visit_at).toLocaleString('en-GB', { timeZone: config.tz }) + ')' : ''}${req.body?.outcome !== undefined ? ' – ' + (req.body.outcome || 'no outcome') : ''}${req.body?.notes ? ' (note)' : ''}`);
     res.json(m);
   }));
   api.patch('/lists/:id/followup', wrap(async (req, res) => {
@@ -263,6 +264,19 @@ export function buildApp() {
     const r = await lists.sendToList(l.id, { ...(req.body || {}), createdBy: 'you' });
     await act(req, l.account_id, `List "${l.name}": sending to ${r.queued} (${(req.body?.statuses || ['new', 'failed']).join(', ')})`);
     res.json(r);
+  }));
+  api.patch('/lists/:id/pipeline', wrap(async (req, res) => {
+    const l = await lists.getList(req.params.id);
+    const u = await lists.setPipeline(l.id, req.body || {});
+    await act(req, l.account_id, `Pipeline settings for "${l.name}" updated`);
+    res.json(u);
+  }));
+  api.get('/pipeline', wrap(async (req, res) => res.json(await lists.pipelineSummary(req.query.account))));
+  api.get('/playbook', wrap(async (req, res) => res.json(await getPlaybook())));
+  api.put('/playbook', wrap(async (req, res) => {
+    const p = await savePlaybook(req.body?.text);
+    await act(req, null, 'Updated the playbook');
+    res.json(p);
   }));
   // Rows with status columns, e.g. for the Google Sheets script to write back
   api.get('/lists/:id/export', wrap(async (req, res) => res.json(await lists.exportRows((await lists.getList(req.params.id)).id))));

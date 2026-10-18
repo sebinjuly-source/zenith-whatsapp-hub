@@ -231,6 +231,16 @@ CREATE TABLE IF NOT EXISTS list_members (
   PRIMARY KEY (list_id, jid)
 );
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS list_id BIGINT;
+-- Funnel (like sales): stage set by you/AI + the date they said they'll come
+ALTER TABLE list_members ADD COLUMN IF NOT EXISTS stage TEXT;
+ALTER TABLE list_members ADD COLUMN IF NOT EXISTS visit_at TIMESTAMPTZ;
+ALTER TABLE list_members ADD COLUMN IF NOT EXISTS stage_at TIMESTAMPTZ;
+ALTER TABLE list_members ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMPTZ;
+ALTER TABLE list_members ADD COLUMN IF NOT EXISTS checked_at TIMESTAMPTZ;
+ALTER TABLE list_members ADD COLUMN IF NOT EXISTS asked_date_at TIMESTAMPTZ;
+ALTER TABLE lists ADD COLUMN IF NOT EXISTS pipeline JSONB NOT NULL DEFAULT '{}';
+-- Hub-wide settings, e.g. the playbook (your rules for the AI)
+CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS outbox_list ON outbox (list_id, to_jid);
 
 CREATE TABLE IF NOT EXISTS events (

@@ -669,6 +669,7 @@ test('lists: import, status from real messages, send to new+failed only, follow-
 
   // follow-ups: only #1 qualifies (messaged 3 days ago, no reply); #2 replied; #3/#4 just messaged
   assert.match(await mcp('set_followup', { list: 'Chef Batch T', enabled: true, after_days: 2, max: 1, text: 'Namaste {first_name} ji, kya aap interested hain?', quiet_days_only: false }), /on — after 2 day/);
+  await manager.update('hiring', { settings: { followupStart: '00:00' } }); // test runs at any time of day
   await listsMod.runFollowups();
   const fu = await query(`SELECT to_jid, payload, status FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
   assert.deepEqual(fu.map((x) => x.to_jid), [P(1)]);
@@ -706,6 +707,7 @@ test('priorities: rejected people are never messaged; follow-ups wait for days w
   // owner rule: asked for money before joining → rejected → never messaged again
   await mcp('update_list_member', { list: 'Prio', phone: '9600000002', outcome: 'rejected – asked for money before joining' });
   await mcp('set_followup', { list: 'Prio', enabled: true, after_days: 2, max: 1, text: 'follow up {first_name}' });
+  await manager.update('hire2', { settings: { followupStart: '00:00' } }); // test runs at any time of day
   const l = await listsMod.getList('Prio');
 
   // a first message to a new person is waiting → no follow-ups today
@@ -734,4 +736,90 @@ test('priorities: rejected people are never messaged; follow-ups wait for days w
   assert.ok(!sent.slice(before).some((x) => x.jid === J(1)), 'follow-up not sent on a day with new outreach');
   const [held] = await query(`SELECT status FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
   assert.equal(held.status, 'queued', 'held, goes out on a quiet day');
+});
+
+test('pipeline: stages, visit dates, ask-for-date, visit reminder + owner tasks, "did they come?"', async () => {
+  const listsMod = await import('../src/lists.js');
+  await manager.create({ id: 'hire3', label: 'Hire3' });
+  fake('hire3');
+  await manager.update('hire3', { settings: { aiMode: 'auto' } });
+  await mcp('import_list', { account: 'hire3', name: 'Funnel', members: [
+    { phone: '9500000001', name: 'Ajay Kumar', message: 'hi' }, { phone: '9500000002', name: 'Bala', message: 'hi' }, { phone: '9500000003', name: 'Chetan', message: 'hi' }] });
+  const l = await listsMod.getList('Funnel');
+  // Ajay is interested (no date yet) — 5 hours ago
+  await mcp('update_list_member', { list: 'Funnel', phone: '9500000001', stage: 'interested' });
+  await query(`UPDATE list_members SET stage_at = now() - interval '5 hours', updated_at = now() - interval '5 hours' WHERE list_id = $1 AND phone = '919500000001'`, [l.id]);
+  // Bala gave a date 10 hours from now (date-only/IST parsing checked separately)
+  const soon = new Date(Date.now() + 10 * 3600 * 1000).toISOString();
+  assert.match(await mcp('update_list_member', { list: 'Funnel', phone: '9500000002', visit_at: soon }), /stage date_given, visit/);
+  // Chetan's visit was yesterday and nobody updated the stage
+  await mcp('update_list_member', { list: 'Funnel', phone: '9500000003', visit_at: new Date(Date.now() - 20 * 3600 * 1000).toISOString() });
+  await query(`UPDATE list_members SET reminded_at = now() WHERE list_id = $1 AND phone = '919500000003'`, [l.id]);
+  await listsMod.runPipeline();
+  const rows = await query(`SELECT to_jid, note, priority, status, payload FROM outbox WHERE list_id = $1 ORDER BY to_jid`, [l.id]);
+  assert.deepEqual(rows.map((r) => [r.to_jid.slice(0, 12), r.note]), [['919500000001', 'ask-date'], ['919500000002', 'visit-reminder']]);
+  assert.match(rows[0].payload.text, /Ajay ji, aap kis din aa sakte hain/);
+  assert.match(rows[1].payload.text, /Bala ji, yaad dila rahe hain: aap .+ ko Zenith Suites/);
+  assert.ok(rows.every((r) => r.priority === 5), 'warm leads before bulk (0) and follow-ups (-1)');
+  const t = (await call('GET', '/api/tasks?account=hire3')).data.map((x) => x.title);
+  assert.ok(t.some((x) => /^Visit: Bala/.test(x)), 'visit task for the owner');
+  assert.ok(t.some((x) => /^Did Chetan come\?/.test(x)), '"did they come" task');
+  // nothing repeats on the next run
+  await listsMod.runPipeline();
+  assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE list_id = $1`, [l.id]))[0].n, 2);
+  // pipeline overview for the AI
+  const pv = await mcp('pipeline', { account: 'hire3' });
+  assert.match(pv, /Funnel — .*interested: 1/);
+  assert.match(pv, /Upcoming\/overdue visits:[\s\S]*Bala/);
+  // closing stages stop everything
+  await mcp('update_list_member', { list: 'Funnel', phone: '9500000001', stage: 'rejected', outcome: 'rejected – asked for money before joining' });
+  const r = await mcp('send_to_list', { list: 'Funnel', statuses: ['new', 'failed', 'sent', 'replied'] });
+  assert.ok(!/919500000001/.test(r) || /closed: rejected/.test(r));
+  // date only → 10:00 India time
+  const m = await mcp('update_list_member', { list: 'Funnel', phone: '9500000003', visit_at: '2031-01-15' });
+  assert.match(m, /visit 15\/01\/2031 10:00/);
+});
+
+test('follow-ups: only after the follow-up time, at most N a day, can skip approval', async () => {
+  const listsMod = await import('../src/lists.js');
+  const settingsMod = await import('../src/settings.js');
+  await manager.create({ id: 'hire4', label: 'Hire4' });
+  fake('hire4');
+  const now = Math.floor(Date.now() / 1000);
+  const members = [];
+  for (let i = 1; i <= 8; i++) {
+    const jid = `91940000000${i}@s.whatsapp.net`;
+    await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hire4',$1,$2,true,$3,'text','offer')`, [jid, 'F' + i, now - 4 * 86400]);
+    members.push({ phone: `940000000${i}`, name: `Cand ${i}`, message: 'hi' });
+  }
+  await mcp('import_list', { account: 'hire4', name: 'FU', since: new Date((now - 10 * 86400) * 1000).toISOString(), members });
+  await mcp('set_followup', { list: 'FU', enabled: true, after_days: 2, max: 1, text: 'follow up {first_name}', auto_send: true });
+  const l = await listsMod.getList('FU');
+  const nowLocal = settingsMod.localNow().minutes;
+  // follow-up time still ahead → nothing
+  const later = `${String(Math.min(23, Math.floor(nowLocal / 60) + 1)).padStart(2, '0')}:59`;
+  await manager.update('hire4', { settings: { followupStart: later, followupDailyMax: 5 } });
+  if (nowLocal < 23 * 60) {
+    await listsMod.runFollowups();
+    assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE list_id = $1`, [l.id]))[0].n, 0, 'before the follow-up time: none');
+  }
+  // time reached → at most 5, queued directly (auto_send), best-ranked first
+  await manager.update('hire4', { settings: { followupStart: '00:00' } });
+  await listsMod.runFollowups();
+  const fu = await query(`SELECT to_jid, status FROM outbox WHERE list_id = $1 ORDER BY id`, [l.id]);
+  assert.equal(fu.length, 5, 'max 5 a day');
+  assert.ok(fu.every((x) => x.status === 'queued' || x.status === 'sending' || x.status === 'sent'), 'auto-send: no approval needed');
+  await listsMod.runFollowups();
+  assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE list_id = $1`, [l.id]))[0].n, 5, 'the other 3 wait for another day');
+});
+
+test('playbook: stored in the hub, editable, and given to every AI client', async () => {
+  const r = await fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) });
+  const init = await r.json();
+  assert.match(init.result.instructions, /Never give money/);
+  assert.match(await mcp('get_playbook'), /date_given/);
+  await call('PUT', '/api/playbook', { text: 'RULE: always be polite.' });
+  assert.equal(await mcp('get_playbook'), 'RULE: always be polite.');
+  assert.match(await mcp('recent_activity', { who: 'script' }), /Updated the playbook/);
 });
