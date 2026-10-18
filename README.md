@@ -29,6 +29,16 @@ npm test
 
 Only one server may run a given number at a time (a second one gets "Running elsewhere").
 
+## Everyday features
+
+- **Templates** — saved messages with {name}/{first_name}/{phone} (from the contact) and any other {field}; optional file. Inbox "Template…" picker, bulk sends, MCP.
+- **Reminders** — "Remind me" hides a chat until a date; it comes back on top as *Reminder due*. "Done" closes it. A new message from them reopens it.
+- **Reply to a message** — "↪ reply" in the inbox quotes it; REST replyTo, MCP reply_to_message_id.
+- **One person across numbers** — contact panel "Also on", MCP find_person.
+- **Rules** — per number: when (person/group, new/known sender, message types, words) → tag, status, save file, board task, auto-reply template (once per person per day), remind later.
+- **Alerts** — set ALERT_PHONE to get a WhatsApp when a number is logged out or offline for 15+ min.
+- **Idempotency** — idempotencyKey / Idempotency-Key header: a retried request never sends twice.
+
 ## Reliability notes
 
 - WhatsApp's encryption keys live in memory (like a file-based bot) and are saved to Postgres in the background (~0.3 s), so sending never waits on the database.
