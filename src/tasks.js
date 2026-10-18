@@ -31,12 +31,12 @@ export async function refreshTask(taskId) {
   );
 }
 
-export async function createTask({ account, title, details, kind = 'todo', dueAt, createdBy = 'you', idemKey = null }) {
+export async function createTask({ account, title, details, kind = 'todo', dueAt, createdBy = 'you', idemKey = null, role = null }) {
   if (!title?.trim()) throw new Error('A task needs a title');
   const [row] = await query(
-    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, idem_key)
-     VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7) RETURNING *`,
-    [account, title.trim(), details || null, kind, dueAt || null, createdBy, idemKey ? String(idemKey) : null],
+    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, idem_key, role)
+     VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8) RETURNING *`,
+    [account, title.trim(), details || null, kind, dueAt || null, createdBy, idemKey ? String(idemKey) : null, role],
   );
   return row;
 }
@@ -61,9 +61,13 @@ export async function cancelTask(id) {
   return updateTask(id, { status: 'cancelled' });
 }
 
-export async function listTasks({ account, past = false, limit = 200 } = {}) {
+export async function listTasks({ account, past = false, limit = 200, role } = {}) {
   const p = [];
   const where = [];
+  if (role) {
+    p.push(role);
+    where.push(`lower(t.role) = lower($${p.length})`);
+  }
   if (account) {
     p.push(account);
     where.push(`t.account_id = $${p.length}`);

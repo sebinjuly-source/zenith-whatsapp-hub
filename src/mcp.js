@@ -24,7 +24,7 @@ import { logEvent } from './db.js';
 import { HISTORY_MODES } from './describe.js';
 import { normalizeSettings } from './settings.js';
 
-const ai = (accountId, text) => logEvent(accountId, 'info', text, 'ai');
+const ai = (accountId, text, role = null) => logEvent(accountId, 'info', text, 'ai', role);
 
 const fmtTime = (ts) =>
   ts
@@ -384,6 +384,7 @@ function buildServer(playbook = '') {
     'What the owner (dashboard), the AI, scripts (API key, e.g. Apps Script) and the system did recently: numbers linked and which history option was chosen, settings changes, approvals, tasks, bulk sends, opt-outs, failures. Check this before assuming how something was set up.',
     {
       account: z.string().optional(),
+      role: z.string().optional().describe('Only entries for this job role (Chef, Front office, …)'),
       who: z.enum(['you', 'ai', 'script', 'system', 'people']).optional().describe('"people" = the owner, the AI and scripts (default); "you" = the owner in the dashboard; "script" = API-key callers such as Apps Script'),
       limit: z.number().int().min(1).max(200).optional(),
     },
@@ -397,9 +398,13 @@ function buildServer(playbook = '') {
       const who = a.who || 'people';
       p.push(who === 'people' ? ['you', 'ai', 'script'] : [who]);
       conds.push(`actor = ANY($${p.length})`);
+      if (a.role) {
+        p.push(a.role);
+        conds.push(`lower(role) = lower($${p.length})`);
+      }
       const rows = await query(`SELECT * FROM events WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT $1`, p);
       return rows.length
-        ? rows.map((e) => `[${fmtTime(Math.floor(new Date(e.created_at).getTime() / 1000))}] ${e.actor === 'you' ? 'owner' : e.actor} | ${e.account_id || '-'} | ${trim(e.text, 200)}`).join('\n')
+        ? rows.map((e) => `[${fmtTime(Math.floor(new Date(e.created_at).getTime() / 1000))}] ${e.actor === 'you' ? 'owner' : e.actor} | ${e.account_id || '-'}${e.role ? ' | ' + e.role : ''} | ${trim(e.text, 200)}`).join('\n')
         : 'No recorded actions yet.';
     },
   );
@@ -486,14 +491,14 @@ function buildServer(playbook = '') {
   const listArg = z.string().describe('List id or name, e.g. "Chef candidates – Batch 5"');
   const d = (t) => (t ? fmtTime(Math.floor(new Date(t).getTime() / 1000)) : '-');
 
-  tool('list_lists', 'Contact lists (e.g. candidate batches) with counts per status: new (not messaged), queued, sent (no reply), replied, failed, opted_out — plus follow-up settings.', {
-    account: z.string().optional(),
+  tool('list_lists', 'Contact lists (candidate batches), grouped by job role, with counts per status: new (not messaged), queued, sent (no reply), replied, failed, opted_out — plus follow-up settings.', {
+    account: z.string().optional(), role: z.string().optional().describe('Job role, e.g. Chef, Front office, Housekeeping'),
   }, async (a) => {
     const acc = a.account ? (await manager.resolve(a.account)).id : null;
     for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1)', [acc])) await lists.refreshList(l.id);
-    const rows = await lists.listLists(acc);
+    const rows = await lists.listLists(acc, a.role);
     return rows.length
-      ? rows.map((l) => `#${l.id} | ${l.name} | ${l.account_id} | ${l.total} people: ${l.new} new, ${l.queued} queued, ${l.sent} sent/no reply, ${l.replied} replied, ${l.failed} failed, ${l.opted_out} opted out | follow-up: ${l.followup?.enabled ? `after ${l.followup.afterDays}d, max ${l.followup.max}` : 'off'}`).join('\n')
+      ? rows.map((l) => `#${l.id} | ${l.role || '-'} | ${l.name} | ${l.account_id} | ${l.total} people: ${l.new} new, ${l.queued} queued, ${l.sent} sent/no reply, ${l.replied} replied, ${l.failed} failed, ${l.opted_out} opted out | follow-up: ${l.followup?.enabled ? `after ${l.followup.afterDays}d, max ${l.followup.max}` : 'off'}`).join('\n')
       : 'No lists yet.';
   });
 
@@ -518,12 +523,15 @@ function buildServer(playbook = '') {
   });
 
   tool('import_list', 'Create or extend a contact list (e.g. candidates from WorkIndia). Existing phones are updated, not duplicated. "since" = ignore messages before this date when working out who was already messaged.', {
-    account: accountArg, name: z.string(), since: z.string().optional(), source: z.string().optional(),
+    account: accountArg, name: z.string().describe('e.g. "Chef candidates – Batch 6"'),
+    role: z.string().optional().describe('Job role: Chef, Front office, Housekeeping, … (guessed from the name if omitted). Keeps each role\'s lists, tasks and log separate.'),
+    since: z.string().optional(), source: z.string().optional(),
+    skip_known: z.boolean().optional().describe('Default true: people already on an earlier list of the same role are not added again'),
     members: z.array(z.object({ phone: z.string(), name: z.string().optional(), message: z.string().optional().describe('Personal first message for this person') }).passthrough()).min(1),
   }, async (a) => {
-    const r = await lists.importList({ account: a.account, name: a.name, since: a.since, source: a.source, members: a.members });
-    await ai(r.list.account_id, `Imported ${r.imported} people into list "${r.list.name}"`);
-    return `List #${r.list.id} "${r.list.name}": ${r.imported} people imported/updated${r.skipped.length ? `, skipped ${r.skipped.length}: ${r.skipped.map((x) => x.row + ' (' + x.reason + ')').join('; ')}` : ''}.`;
+    const r = await lists.importList({ account: a.account, name: a.name, role: a.role, since: a.since, source: a.source, members: a.members, skipKnown: a.skip_known !== false });
+    await ai(r.list.account_id, `Imported ${r.imported} people into list "${r.list.name}"${r.skipped.length ? `, ${r.skipped.length} skipped` : ''}`, r.list.role);
+    return `List #${r.list.id} "${r.list.name}" (role ${r.list.role}): ${r.imported} people imported/updated${r.skipped.length ? `, skipped ${r.skipped.length}: ${r.skipped.map((x) => x.row + ' (' + x.reason + ')').join('; ')}` : ''}.`;
   });
 
   tool('send_to_list', 'Message the people on a list with the given statuses (default new + failed). Each gets their own prepared message from the list, unless text/template is given. Follows the number\'s approval mode, delay, daily cap and hours. Use only_phones to pick specific people.', {
@@ -532,7 +540,7 @@ function buildServer(playbook = '') {
   }, async (a) => {
     const l = await lists.getList(a.list);
     const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, onlyPhones: a.only_phones, createdBy: 'ai', source: 'mcp' });
-    await ai(l.account_id, `List "${l.name}": ${r.queued} messages ${r.mode === 'approve' ? 'drafted' : 'queued'}`);
+    await ai(l.account_id, `List "${l.name}": ${r.queued} messages ${r.mode === 'approve' ? 'drafted' : 'queued'}`, l.role);
     const skipped = r.skipped.length ? ` Skipped: ${r.skipped.map((x) => x.to + ' (' + x.reason + ')').join('; ')}` : '';
     return r.task ? `Task #${r.task.id}: ${r.queued} messages ${r.mode === 'approve' ? 'saved as drafts — waiting for approval on the board' : 'queued'}.${skipped}` : `Nothing to send.${skipped}`;
   });
@@ -545,7 +553,7 @@ function buildServer(playbook = '') {
   }, async (a) => {
     const l = await lists.getList(a.list);
     const u = await lists.setFollowup(l.id, { enabled: a.enabled, afterDays: a.after_days, max: a.max, text: a.text, template: a.template, quietDaysOnly: a.quiet_days_only, autoSend: a.auto_send });
-    await ai(l.account_id, `Follow-ups for "${l.name}": ${u.followup.enabled ? 'on' : 'off'}`);
+    await ai(l.account_id, `Follow-ups for "${l.name}": ${u.followup.enabled ? 'on' : 'off'}`, l.role);
     return `Follow-ups for "${l.name}": ${u.followup.enabled ? `on — after ${u.followup.afterDays} day(s) without reply, up to ${u.followup.max}` : 'off'}.`;
   });
 
@@ -562,17 +570,17 @@ function buildServer(playbook = '') {
     if (visitAt && /^\d{4}-\d{2}-\d{2}$/.test(visitAt)) visitAt += ' 10:00';
     if (visitAt && !/[zZ]|[+-]\d\d:?\d\d$/.test(visitAt)) visitAt = visitAt.replace(' ', 'T') + '+05:30';
     const m = await lists.updateMember(l.id, a.phone, { outcome: a.outcome, notes: a.notes, stage: a.stage, visitAt });
-    await ai(l.account_id, `List "${l.name}": ${m.name || m.phone} → ${m.stage || '-'}${m.visit_at ? ' (visit ' + d(m.visit_at) + ')' : ''}${a.outcome ? ' – ' + a.outcome : ''}`);
+    await ai(l.account_id, `${m.name || m.phone} → ${m.stage || '-'}${m.visit_at ? ' (visit ' + d(m.visit_at) + ')' : ''}${a.outcome ? ' – ' + a.outcome : ''} — ${l.name}`, l.role);
     const parts = [m.stage && `stage ${m.stage}`, m.visit_at && `visit ${d(m.visit_at)}`, m.outcome && `outcome ${m.outcome}`, m.notes && 'notes saved'].filter(Boolean);
     return `${m.name || m.phone}: ${parts.join(', ') || 'updated'}.`;
   });
 
-  tool('pipeline', 'Funnel overview across lists: people per stage (plus not contacted / contacted / replied without a stage) and upcoming visits with dates. Start here for "where do candidates stand?".', {
-    account: z.string().optional(),
+  tool('pipeline', 'Funnel overview per job role and list: people per stage (plus not contacted / contacted / replied without a stage) and upcoming visits with dates. Start here for "where do candidates stand?".', {
+    account: z.string().optional(), role: z.string().optional(),
   }, async (a) => {
     const acc = a.account ? (await manager.resolve(a.account)).id : null;
     for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1)', [acc])) await lists.refreshList(l.id);
-    const { counts, visits } = await lists.pipelineSummary(acc);
+    const { counts, visits } = await lists.pipelineSummary(acc, a.role);
     const byList = {};
     for (const c of counts) (byList[c.name] ||= []).push(`${c.stage}: ${c.n}`);
     const out = Object.entries(byList).map(([n, s]) => `${n} — ${s.join(', ')}`);
@@ -587,9 +595,18 @@ function buildServer(playbook = '') {
   }, async (a) => {
     const l = await lists.getList(a.list);
     const u = await lists.setPipeline(l.id, { enabled: a.enabled, autoSend: a.auto_send, remindHoursBefore: a.remind_hours_before, askDateAfterHours: a.ask_date_after_hours, reminderText: a.reminder_text, askDateText: a.ask_date_text });
-    await ai(l.account_id, `Pipeline settings for "${l.name}" updated`);
+    await ai(l.account_id, `Pipeline settings for "${l.name}" updated`, l.role);
     const p = u.pipeline;
     return `Pipeline for "${l.name}": ${p.enabled ? 'on' : 'off'}, ${p.autoSend ? 'sends automatically' : 'drafts for approval'}, reminder ${p.remindHoursBefore}h before visits, ask for a date after ${p.askDateAfterHours}h.`;
+  });
+
+  tool('known_candidates', 'Everyone already on any list for a job role (all earlier batches): name | phone | location | list | status/stage. Use it to de-duplicate a new WorkIndia batch BEFORE unlocking or messaging (match on name + location, or phone).', {
+    role: z.string().describe('Job role, e.g. Chef'), account: z.string().optional(),
+  }, async (a) => {
+    const rows = await lists.knownPeople(a.role, a.account ? (await manager.resolve(a.account)).id : null);
+    return rows.length
+      ? `${rows.length} people already on ${a.role} lists:\n` + rows.map((r) => [trim(r.name, 30), r.phone, trim(r.location, 30), r.list, r.stage || r.status].join(' | ')).join('\n')
+      : `Nobody on ${a.role} lists yet.`;
   });
 
   tool('get_playbook', "The owner's standing rules (hiring policy, priorities, tone). Read before acting on candidates or guests.", {}, async () => (await getPlaybook()).text);
@@ -631,10 +648,10 @@ function buildServer(playbook = '') {
       t.details ? `— ${trim(t.details, 160)}` : null,
     ].filter(Boolean).join(' | ');
 
-  tool('list_tasks', 'Show the task board: what each number is doing or will do (bulk sends with progress, follow-ups, to-dos). Past tasks only if past=true.', {
-    account: z.string().optional(), past: z.boolean().optional(),
+  tool('list_tasks', 'Show the task board: what each number is doing or will do (bulk sends with progress, follow-ups, visits, to-dos). Filter by job role. Past tasks only if past=true.', {
+    account: z.string().optional(), past: z.boolean().optional(), role: z.string().optional(),
   }, async (a) => {
-    const rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past });
+    const rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role });
     return rows.length ? rows.map(taskLine).join('\n') : 'No tasks.';
   });
 

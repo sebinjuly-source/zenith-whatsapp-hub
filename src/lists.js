@@ -66,16 +66,53 @@ export async function getList(ref, account) {
  * Create or extend a list. members: [{ phone, name, message?, ...anything else → fields }].
  * Existing members (same phone) are updated, not duplicated. `since` = messages before this date don't count.
  */
-export async function importList({ account, name, since, source, members, followup }) {
+/** Guess the job role from a list name when none is given: "Chef candidates – Batch 6" → "Chef". */
+export function roleFromName(name) {
+  const n = String(name || '').toLowerCase();
+  if (/chef|cook|kitchen/.test(n)) return 'Chef';
+  if (/front\s*office|reception|front desk/.test(n)) return 'Front office';
+  if (/housekeep|room\s*attendant|cleaner/.test(n)) return 'Housekeeping';
+  if (/waiter|steward|server|f\s*&\s*b|service staff/.test(n)) return 'Service';
+  if (/driver/.test(n)) return 'Driver';
+  if (/security|guard/.test(n)) return 'Security';
+  return null;
+}
+
+/**
+ * Everyone already on a list of this role (any batch): for de-duplicating a new WorkIndia batch BEFORE
+ * unlocking/messaging. Compact rows: name, phone, location, list, status, stage.
+ */
+export async function knownPeople(role, account) {
+  return query(
+    `SELECT m.name, m.phone, m.fields->>'Location' AS location, m.fields->>'Age' AS age, l.name AS list, m.status, m.stage
+     FROM list_members m JOIN lists l ON l.id = m.list_id
+     WHERE lower(l.role) = lower($1) AND ($2::text IS NULL OR l.account_id = $2)
+     ORDER BY l.id, m.added_at`,
+    [role, account || null],
+  );
+}
+
+export async function importList({ account, name, role, since, source, members, followup, skipKnown = true }) {
   const s = await manager.resolve(account);
   if (!name?.trim()) throw new Error('A list needs a name');
+  role = (role || roleFromName(name) || 'General').trim();
   const [list] = await query(
-    `INSERT INTO lists (account_id, name, source, since, followup) VALUES ($1,$2,$3,COALESCE($4::timestamptz, now()),$5)
+    `INSERT INTO lists (account_id, name, source, since, followup, role) VALUES ($1,$2,$3,COALESCE($4::timestamptz, now()),$5,$6)
      ON CONFLICT (account_id, name) DO UPDATE SET source = COALESCE(EXCLUDED.source, lists.source),
-       since = COALESCE($4::timestamptz, lists.since), updated_at = now()
+       since = COALESCE($4::timestamptz, lists.since), role = COALESCE(lists.role, EXCLUDED.role), updated_at = now()
      RETURNING *`,
-    [s.id, name.trim(), source || null, since || null, JSON.stringify({ ...DEFAULT_FOLLOWUP, ...(followup || {}) })],
+    [s.id, name.trim(), source || null, since || null, JSON.stringify({ ...DEFAULT_FOLLOWUP, ...(followup || {}) }), role],
   );
+  // People already on ANOTHER list of the same role are not added again (never re-message a past batch).
+  const known = new Map();
+  if (skipKnown) {
+    const rows = await query(
+      `SELECT m.jid, l.name AS list, m.status, m.stage FROM list_members m JOIN lists l ON l.id = m.list_id
+       WHERE lower(l.role) = lower($1) AND l.account_id = $2 AND l.id <> $3`,
+      [list.role, s.id, list.id],
+    );
+    for (const r of rows) known.set(r.jid, r);
+  }
   const rows = [];
   const bad = [];
   const seen = new Set();
@@ -89,6 +126,11 @@ export async function importList({ account, name, since, source, members, follow
     const jid = toJid(raw);
     if (seen.has(jid)) continue;
     seen.add(jid);
+    const k = known.get(jid);
+    if (k) {
+      bad.push({ row: m.name || raw, reason: `already in "${k.list}" (${k.stage || k.status})` });
+      continue;
+    }
     const { phone, to, name: nm, message, row, ...fields } = m;
     rows.push([list.id, jid, jid.split('@')[0], nm || fields.Name || null, JSON.stringify(fields), decodeMessage(message) || null, row != null ? String(row) : null]);
   }
@@ -141,7 +183,7 @@ export async function refreshList(listId) {
   );
 }
 
-export async function listLists(account) {
+export async function listLists(account, role) {
   return query(
     `SELECT l.*, a.label AS account_label,
        count(m.*)::int AS total,
@@ -153,9 +195,9 @@ export async function listLists(account) {
        count(*) FILTER (WHERE m.status = 'opted_out')::int AS opted_out,
        count(*) FILTER (WHERE m.outcome IS NOT NULL)::int AS with_outcome
      FROM lists l JOIN accounts a ON a.id = l.account_id LEFT JOIN list_members m ON m.list_id = l.id
-     WHERE ($1::text IS NULL OR l.account_id = $1)
-     GROUP BY l.id, a.label ORDER BY l.id DESC`,
-    [account || null],
+     WHERE ($1::text IS NULL OR l.account_id = $1) AND ($2::text IS NULL OR lower(l.role) = lower($2))
+     GROUP BY l.id, a.label ORDER BY l.role NULLS LAST, l.id DESC`,
+    [account || null, role || null],
   );
 }
 
@@ -264,7 +306,7 @@ export async function runPipeline() {
       );
       for (const m of remind) {
         await send(m, p.reminderText, 'visit-reminder');
-        await createTask({ account: list.account_id, title: `Visit: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminder sent to +${m.phone}. Update the stage after the visit.`, dueAt: m.visit_at, createdBy: 'rule' });
+        await createTask({ account: list.account_id, title: `Visit: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminder sent to +${m.phone}. Update the stage after the visit.`, dueAt: m.visit_at, createdBy: 'rule', role: list.role });
         await query('UPDATE list_members SET reminded_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
       }
       // 3. visit time passed, stage not updated → ask you
@@ -273,32 +315,32 @@ export async function runPipeline() {
         [list.id],
       );
       for (const m of check) {
-        await createTask({ account: list.account_id, title: `Did ${m.name || m.phone} come? (${fmtVisit(m.visit_at)})`, details: `${list.name}: set the stage to visited / trial / no_show.`, createdBy: 'rule' });
+        await createTask({ account: list.account_id, title: `Did ${m.name || m.phone} come? (${fmtVisit(m.visit_at)})`, details: `${list.name}: set the stage to visited / trial / no_show.`, createdBy: 'rule', role: list.role });
         await query('UPDATE list_members SET checked_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
       }
       if (ask.length + remind.length) outbox.wakeAccount(list.account_id);
       if (ask.length + remind.length + check.length) {
-        await logEvent(list.account_id, 'info', `Pipeline "${list.name}": ${ask.length} asked for a date, ${remind.length} visit reminders, ${check.length} visit checks`);
+        await logEvent(list.account_id, 'info', `Pipeline "${list.name}": ${ask.length} asked for a date, ${remind.length} visit reminders, ${check.length} visit checks`, 'system', list.role);
       }
     } catch (err) {
-      await logEvent(list.account_id, 'warn', `Pipeline "${list.name}" failed: ${err.message}`);
+      await logEvent(list.account_id, 'warn', `Pipeline "${list.name}" failed: ${err.message}`, 'system', list.role);
     }
   }
 }
 
 /** Funnel overview: people per stage and upcoming visits. */
-export async function pipelineSummary(account) {
+export async function pipelineSummary(account, role) {
   const counts = await query(
-    `SELECT l.id, l.name, COALESCE(m.stage, CASE WHEN m.status = 'replied' THEN 'replied (no stage)' WHEN m.status IN ('sent','queued') THEN 'contacted' ELSE 'not contacted' END) AS stage, count(*)::int AS n
-     FROM lists l JOIN list_members m ON m.list_id = l.id WHERE ($1::text IS NULL OR l.account_id = $1)
+    `SELECT l.id, l.role || ' · ' || l.name AS name, COALESCE(m.stage, CASE WHEN m.status = 'replied' THEN 'replied (no stage)' WHEN m.status IN ('sent','queued') THEN 'contacted' ELSE 'not contacted' END) AS stage, count(*)::int AS n
+     FROM lists l JOIN list_members m ON m.list_id = l.id WHERE ($1::text IS NULL OR l.account_id = $1) AND ($2::text IS NULL OR lower(l.role) = lower($2))
      GROUP BY 1,2,3 ORDER BY 1 DESC, 4 DESC`,
-    [account || null],
+    [account || null, role || null],
   );
   const visits = await query(
     `SELECT l.name AS list, m.* FROM lists l JOIN list_members m ON m.list_id = l.id
-     WHERE ($1::text IS NULL OR l.account_id = $1) AND m.stage = 'date_given' AND m.visit_at IS NOT NULL
+     WHERE ($1::text IS NULL OR l.account_id = $1) AND ($2::text IS NULL OR lower(l.role) = lower($2)) AND m.stage = 'date_given' AND m.visit_at IS NOT NULL
      ORDER BY m.visit_at LIMIT 50`,
-    [account || null],
+    [account || null, role || null],
   );
   return { counts, visits };
 }
@@ -352,7 +394,7 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
     plan.push({ m, body, attachment: tpl?.attachment || undefined });
   }
   if (!plan.length) return { task: null, queued: 0, skipped };
-  const task = await createTask({ account: list.account_id, title: `${list.name}: message ${plan.length}`, details: `Statuses: ${statuses.join(', ')}`, kind: 'bulk', createdBy });
+  const task = await createTask({ account: list.account_id, title: `${list.name}: message ${plan.length}`, details: `Statuses: ${statuses.join(', ')}`, kind: 'bulk', createdBy, role: list.role });
   const approve = ['mcp', 'campaign'].includes(source) && session.settings.aiMode === 'approve';
   await insertMany('outbox', ['account_id', 'to_jid', 'payload', 'source', 'status', 'priority', 'note', 'task_id', 'list_id'],
     plan.map((x) => [list.account_id, x.m.jid, JSON.stringify({ text: x.body, attachment: x.attachment }), source, approve ? 'draft' : 'queued', 0, list.name, task.id, list.id]));
@@ -400,7 +442,7 @@ export async function runFollowups() {
       if (!due.length) continue;
       const tpl = f.template ? await getTemplate(list.account_id, f.template) : null;
       const approve = !f.autoSend && session.settings.aiMode === 'approve';
-      const task = await createTask({ account: list.account_id, title: `${list.name}: follow up ${due.length}`, details: `No reply after ${f.afterDays} day(s)`, kind: 'bulk', createdBy: 'rule' });
+      const task = await createTask({ account: list.account_id, title: `${list.name}: follow up ${due.length}`, details: `No reply after ${f.afterDays} day(s)`, kind: 'bulk', createdBy: 'rule', role: list.role });
       const rows = [];
       for (const m of due) {
         const first = (m.name || '').trim().split(/\s+/)[0];
@@ -415,9 +457,9 @@ export async function runFollowups() {
       await refreshTask(task.id);
       await refreshList(list.id);
       outbox.wakeAccount(list.account_id);
-      await logEvent(list.account_id, 'info', `Follow-ups for "${list.name}": ${rows.length} ${approve ? 'drafted for approval' : 'queued'}`);
+      await logEvent(list.account_id, 'info', `Follow-ups for "${list.name}": ${rows.length} ${approve ? 'drafted for approval' : 'queued'}`, 'system', list.role);
     } catch (err) {
-      await logEvent(list.account_id, 'warn', `Follow-ups for "${list.name}" failed: ${err.message}`);
+      await logEvent(list.account_id, 'warn', `Follow-ups for "${list.name}" failed: ${err.message}`, 'system', list.role);
     }
   }
 }

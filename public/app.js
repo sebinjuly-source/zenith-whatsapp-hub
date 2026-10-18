@@ -511,9 +511,10 @@
     const b = (state.board ||= { account: (accs.find((a) => a.isDefault) || accs[0]).id, past: false });
     if (!accs.find((a) => a.id === b.account)) b.account = accs[0].id;
     const [active, past] = await Promise.all([
-      api(`/api/tasks?account=${encodeURIComponent(b.account)}`),
-      b.past ? api(`/api/tasks?account=${encodeURIComponent(b.account)}&past=1`) : Promise.resolve([]),
+      api(`/api/tasks?account=${encodeURIComponent(b.account)}${b.role ? '&role=' + encodeURIComponent(b.role) : ''}`),
+      b.past ? api(`/api/tasks?account=${encodeURIComponent(b.account)}&past=1${b.role ? '&role=' + encodeURIComponent(b.role) : ''}`) : Promise.resolve([]),
     ]);
+    const boardRoles = await roleChips(b.role, (r) => { b.role = r; viewBoard(); });
     const cols = [
       ['upcoming', 'Upcoming'],
       ['in_progress', 'In progress'],
@@ -603,8 +604,9 @@
         h('button', { class: 'btn small', onclick: () => { b.past = !b.past; viewBoard(); } }, b.past ? 'Hide past' : 'Show past'),
       ),
       h('p', { class: 'sub' }, 'What each number is doing and what\'s coming up. Bulk sends and follow-ups move between columns by themselves.'),
-      h('div', { class: 'seg', style: 'max-width:640px;margin-bottom:16px' },
+      h('div', { class: 'seg', style: 'max-width:640px;margin-bottom:10px' },
         accs.map((a) => h('button', { class: a.id === b.account ? 'on' : '', onclick: () => { b.account = a.id; viewBoard(); } }, a.label))),
+      boardRoles,
       h('div', { class: 'board' },
         cols.map(([k, label]) => {
           const items = byCol(k);
@@ -617,17 +619,26 @@
     ]);
   }
 
+  // ---------- role chips (Chef / Front office / Housekeeping …) ----------
+  async function roleChips(current, onPick) {
+    const roles = await api('/api/roles').catch(() => []);
+    if (!roles.length) return null;
+    return h('div', { class: 'funnel', style: 'margin-bottom:10px' }, [['', 'All roles'], ...roles.map((r) => [r, r])].map(([k, l]) =>
+      h('button', { class: 'tag' + ((current || '') === k ? ' on' : ''), onclick: () => onPick(k) }, l)));
+  }
+
   // ---------- lists ----------
   const STATUS_LABEL = { new: 'Not messaged', queued: 'Queued', sent: 'Sent · no reply', replied: 'Replied', failed: 'Failed', opted_out: 'Opted out' };
   async function viewLists() {
     await loadAccounts();
-    const all = await api('/api/lists');
+    const all = await api(`/api/lists${state.listRole ? '?role=' + encodeURIComponent(state.listRole) : ''}`);
+    const rolePick = await roleChips(state.listRole, (r) => { state.listRole = r; state.listId = null; viewLists(); });
     const sel = (state.listId && all.find((l) => l.id === state.listId)) || all[0];
     state.listId = sel?.id;
     const fmtD = (t) => (t ? new Date(t).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '–');
     const picker = h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(min(260px,100%),1fr));margin-bottom:16px' },
       all.map((l) => h('div', { class: 'card', style: `cursor:pointer;${l.id === sel?.id ? 'border-color:var(--accent)' : ''}`, onclick: () => { state.listId = l.id; state.listFilter = ''; viewLists(); } },
-        h('b', {}, l.name), h('div', { class: 'muted', style: 'font-size:12px' }, l.account_label, ' · ', l.total, ' people'),
+        h('b', {}, l.name), h('div', { class: 'muted', style: 'font-size:12px' }, l.role || 'No role', ' · ', l.account_label, ' · ', l.total, ' people'),
         h('div', { style: 'margin-top:6px' }, ['new', 'sent', 'replied', 'failed'].map((k) => h('span', { class: 'tag' }, `${STATUS_LABEL[k]}: ${l[k]}`)),
           l.followup?.enabled ? h('span', { class: 'tag' }, `follow-up after ${l.followup.afterDays}d`) : null))));
     const importForm = h('details', { class: 'card', style: 'margin-top:16px' }, h('summary', {}, 'Import a list (paste rows)'),
@@ -638,12 +649,13 @@
           const [phone, name, ...msg] = l.split('\t').length > 1 ? l.split('\t') : l.split(',');
           return { phone: phone.trim(), name: (name || '').trim() || undefined, message: msg.join(',').trim() || undefined };
         });
-        const r = await api('/api/lists/import', { body: { account: f.account.value, name: f.name.value, since: f.since.value || undefined, members } });
+        const r = await api('/api/lists/import', { body: { account: f.account.value, name: f.name.value, role: f.role.value || undefined, since: f.since.value || undefined, members } });
         toast(`Imported ${r.imported}${r.skipped.length ? `, skipped ${r.skipped.length}` : ''}`);
         state.listId = r.list.id;
         viewLists();
       }) },
         h('label', { class: 'field' }, h('span', {}, 'List name'), h('input', { type: 'text', name: 'name', required: true, placeholder: 'Chef candidates – Batch 6' })),
+        h('label', { class: 'field' }, h('span', {}, 'Job role'), h('input', { type: 'text', name: 'role', placeholder: 'Chef, Front office, Housekeeping… (guessed from the name if empty)' }), h('em', {}, 'Each role keeps its own lists, tasks and log. People already on an earlier list of the same role are skipped.')),
         h('label', { class: 'field' }, h('span', {}, 'Number'), h('select', { name: 'account' }, state.accounts.map((a) => h('option', { value: a.id }, a.label)))),
         h('label', { class: 'field' }, h('span', {}, 'Count messages from (optional)'), h('input', { type: 'date', name: 'since' }), h('em', {}, 'Messages to these people before this date are ignored when deciding who was already messaged. Empty = from today.')),
         h('label', { class: 'field' }, h('span', {}, 'People — one per line: phone, name, personal message (optional). Tab-separated also works (paste from a sheet).'), h('textarea', { name: 'rows', rows: 6, required: true })),
@@ -723,6 +735,7 @@
     shell([
       h('h1', {}, 'Lists'),
       h('p', { class: 'sub' }, 'Status comes from the real WhatsApp messages of the list\'s number. Stage and visit date are the funnel — set them here or ask the AI.'),
+      rolePick,
       picker,
       h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, sel.name), sendBtn),
       visits.length ? h('div', { class: 'card', style: 'margin:12px 0' }, h('b', {}, '📅 Visits'), visits.map((m) => h('div', { style: 'font-size:13px;margin-top:4px' }, `${new Date(m.visit_at).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })} — ${m.name || m.phone}`, new Date(m.visit_at) < new Date() ? h('span', { style: 'color:var(--bad)' }, ' · passed, update stage') : ''))) : null,
@@ -1037,9 +1050,11 @@
 
   // ---------- activity ----------
   async function viewActivity() {
-    const rows = await api('/api/events?limit=200');
+    const rows = await api(`/api/events?limit=200${state.actRole ? '&role=' + encodeURIComponent(state.actRole) : ''}`);
+    const actRoles = await roleChips(state.actRole, (r) => { state.actRole = r; viewActivity(); });
     shell([
       h('h1', {}, 'Activity'),
+      actRoles,
       h('p', { class: 'sub' }, 'What you (dashboard), the AI (MCP), scripts (API key, e.g. Apps Script) and the system did: linking (and the history option chosen), settings changes, approvals, tasks, opt-outs, failures. The AI reads this too.'),
       h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'Number'), h('th', {}, 'What'))),

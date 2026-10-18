@@ -239,6 +239,9 @@ ALTER TABLE list_members ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMPTZ;
 ALTER TABLE list_members ADD COLUMN IF NOT EXISTS checked_at TIMESTAMPTZ;
 ALTER TABLE list_members ADD COLUMN IF NOT EXISTS asked_date_at TIMESTAMPTZ;
 ALTER TABLE lists ADD COLUMN IF NOT EXISTS pipeline JSONB NOT NULL DEFAULT '{}';
+-- Job role (Chef, Front office, Housekeeping…) keeps each kind of outreach separate: lists, tasks, log
+ALTER TABLE lists ADD COLUMN IF NOT EXISTS role TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS role TEXT;
 -- Hub-wide settings, e.g. the playbook (your rules for the AI)
 CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS outbox_list ON outbox (list_id, to_jid);
@@ -252,6 +255,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 -- who did it: 'you' (dashboard/REST), 'ai' (MCP), 'system'
 ALTER TABLE events ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT 'system';
+ALTER TABLE events ADD COLUMN IF NOT EXISTS role TEXT;
 `;
 
 function makePgDriver() {
@@ -343,10 +347,10 @@ export async function insertMany(table, columns, rows, suffix = '', chunk = 200)
   }
 }
 
-export async function logEvent(accountId, level, text, actor = 'system') {
-  logger[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info']({ accountId, actor }, text);
+export async function logEvent(accountId, level, text, actor = 'system', role = null) {
+  logger[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info']({ accountId, actor, role }, text);
   try {
-    await query('INSERT INTO events (account_id, level, text, actor) VALUES ($1,$2,$3,$4)', [accountId, level, text, actor]);
+    await query('INSERT INTO events (account_id, level, text, actor, role) VALUES ($1,$2,$3,$4,$5)', [accountId, level, text, actor, role]);
     // keep the log small
     if (Math.random() < 0.02) {
       // system noise is kept 30 days; your and the AI's actions 1 year

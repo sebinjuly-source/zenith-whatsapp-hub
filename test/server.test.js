@@ -832,3 +832,32 @@ test('changing one follow-up setting keeps the saved message', async () => {
   assert.equal(l.followup.text, 'saved text');
   assert.equal(l.followup.autoSend, true);
 });
+
+test('job roles: lists, tasks and log kept separate per role; earlier batches never re-added', async () => {
+  await manager.create({ id: 'hire5', label: 'Hire5' });
+  fake('hire5');
+  const b1 = await mcp('import_list', { account: 'hire5', name: 'Chef candidates – Batch A', members: [{ phone: '9200000001', name: 'Old Chef', Location: 'Hebbal' }, { phone: '9200000002', name: 'Other Chef' }] });
+  assert.match(b1, /\(role Chef\): 2 people/);
+  // next batch overlaps with one earlier chef → skipped with the reason
+  const b2 = await mcp('import_list', { account: 'hire5', name: 'Chef candidates – Batch B', members: [{ phone: '9200000001', name: 'Old Chef again' }, { phone: '9200000003', name: 'New Chef' }] });
+  assert.match(b2, /1 people imported/);
+  assert.match(b2, /already in "Chef candidates – Batch A"/);
+  // a different role does not clash with chefs
+  const fo = await mcp('import_list', { account: 'hire5', name: 'Front office – Batch 1', members: [{ phone: '9200000001', name: 'Same person, other job' }] });
+  assert.match(fo, /\(role Front office\): 1 people/);
+  // known candidates for de-duplication before unlocking
+  const known = await mcp('known_candidates', { role: 'Chef', account: 'hire5' });
+  assert.match(known, /^3 people already on Chef lists/);
+  assert.match(known, /Old Chef \| 919200000001 \| Hebbal \| Chef candidates – Batch A/);
+  assert.ok(!/Same person, other job/.test(known));
+  // filters
+  assert.ok(!/Front office/.test(await mcp('list_lists', { account: 'hire5', role: 'Chef' })));
+  await mcp('send_to_list', { list: 'Front office – Batch 1', text: 'Hi {first_name}' });
+  const foTasks = await mcp('list_tasks', { account: 'hire5', role: 'Front office' });
+  assert.match(foTasks, /Front office – Batch 1: message 1/);
+  assert.ok(!/Chef/.test(foTasks));
+  const act = await mcp('recent_activity', { account: 'hire5', role: 'Chef' });
+  assert.match(act, /\| Chef \| Imported/);
+  assert.ok(!/Front office – Batch 1/.test(act), 'chef log does not show front office entries');
+  assert.deepEqual((await call('GET', '/api/roles')).data.filter((r) => ['Chef', 'Front office'].includes(r)), ['Chef', 'Front office']);
+});

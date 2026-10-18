@@ -31,7 +31,7 @@ import { describeSettingsChange, HISTORY_MODES } from './describe.js';
  * anything using the API key (Apps Script, scripts) = "script". MCP logs its own actions as "ai".
  */
 const actorOf = (req) => (req.get('x-api-key') || req.query.key ? 'script' : 'you');
-const act = (req, accountId, text) => logEvent(accountId, 'info', text, actorOf(req));
+const act = (req, accountId, text, role = null) => logEvent(accountId, 'info', text, actorOf(req), role);
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 // Changes on every deploy (Render sets RENDER_GIT_COMMIT); open dashboards reload when it changes.
@@ -234,12 +234,12 @@ export function buildApp() {
   // ---- Contact lists (candidate batches) + follow-ups
   api.get('/lists', wrap(async (req, res) => {
     for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1)', [req.query.account || null])) await lists.refreshList(l.id);
-    res.json(await lists.listLists(req.query.account));
+    res.json(await lists.listLists(req.query.account, req.query.role));
   }));
   // Create/extend a list: { account, name, since?, source?, members: [{ phone, name, message?, ...fields }], followup? }
   api.post('/lists/import', wrap(async (req, res) => {
     const r = await lists.importList(req.body || {});
-    await act(req, r.list.account_id, `Imported ${r.imported} people into list "${r.list.name}"${r.skipped.length ? ` (${r.skipped.length} skipped)` : ''}`);
+    await act(req, r.list.account_id, `Imported ${r.imported} people into list "${r.list.name}"${r.skipped.length ? ` (${r.skipped.length} skipped)` : ''}`, r.list.role);
     res.json(r);
   }));
   api.get('/lists/:id/members', wrap(async (req, res) => {
@@ -250,29 +250,32 @@ export function buildApp() {
   api.patch('/lists/:id/members/:phone', wrap(async (req, res) => {
     const l = await lists.getList(req.params.id);
     const m = await lists.updateMember(l.id, req.params.phone, req.body || {});
-    await act(req, l.account_id, `List "${l.name}": ${m.name || m.phone}${req.body?.stage !== undefined ? ' → ' + (m.stage || 'no stage') : ''}${m.visit_at && req.body?.visitAt ? ' (visit ' + new Date(m.visit_at).toLocaleString('en-GB', { timeZone: config.tz }) + ')' : ''}${req.body?.outcome !== undefined ? ' – ' + (req.body.outcome || 'no outcome') : ''}${req.body?.notes ? ' (note)' : ''}`);
+    await act(req, l.account_id, `${m.name || m.phone}${req.body?.stage !== undefined ? ' → ' + (m.stage || 'no stage') : ''}${m.visit_at && req.body?.visitAt ? ' (visit ' + new Date(m.visit_at).toLocaleString('en-GB', { timeZone: config.tz }) + ')' : ''}${req.body?.outcome !== undefined ? ' – ' + (req.body.outcome || 'no outcome') : ''}${req.body?.notes ? ' (note)' : ''} — ${l.name}`, l.role);
     res.json(m);
   }));
   api.patch('/lists/:id/followup', wrap(async (req, res) => {
     const l = await lists.getList(req.params.id);
     const u = await lists.setFollowup(l.id, req.body || {});
     const f = u.followup;
-    await act(req, l.account_id, `Follow-ups for "${l.name}": ${f.enabled ? `on — after ${f.afterDays} day(s), up to ${f.max}` : 'off'}`);
+    await act(req, l.account_id, `Follow-ups for "${l.name}": ${f.enabled ? `on — after ${f.afterDays} day(s), up to ${f.max}` : 'off'}`, l.role);
     res.json(u);
   }));
   api.post('/lists/:id/send', wrap(async (req, res) => {
     const l = await lists.getList(req.params.id);
     const r = await lists.sendToList(l.id, { ...(req.body || {}), createdBy: 'you' });
-    await act(req, l.account_id, `List "${l.name}": sending to ${r.queued} (${(req.body?.statuses || ['new', 'failed']).join(', ')})`);
+    await act(req, l.account_id, `List "${l.name}": sending to ${r.queued} (${(req.body?.statuses || ['new', 'failed']).join(', ')})`, l.role);
     res.json(r);
   }));
   api.patch('/lists/:id/pipeline', wrap(async (req, res) => {
     const l = await lists.getList(req.params.id);
     const u = await lists.setPipeline(l.id, req.body || {});
-    await act(req, l.account_id, `Pipeline settings for "${l.name}" updated`);
+    await act(req, l.account_id, `Pipeline settings for "${l.name}" updated`, l.role);
     res.json(u);
   }));
-  api.get('/pipeline', wrap(async (req, res) => res.json(await lists.pipelineSummary(req.query.account))));
+  api.get('/pipeline', wrap(async (req, res) => res.json(await lists.pipelineSummary(req.query.account, req.query.role))));
+  api.get('/roles', wrap(async (req, res) => res.json((await query(`SELECT DISTINCT role FROM lists WHERE role IS NOT NULL ORDER BY role`)).map((r) => r.role))));
+  // Everyone already contacted for a role (all batches) — to de-duplicate a new batch before unlocking
+  api.get('/known', wrap(async (req, res) => res.json(await lists.knownPeople(req.query.role, req.query.account))));
   api.get('/alerts', wrap(async (req, res) => res.json({ phones: await notify.alertPhones() })));
   api.put('/alerts', wrap(async (req, res) => {
     const phones = await notify.setAlertPhones(req.body?.phones);
@@ -324,7 +327,7 @@ export function buildApp() {
   }))));
 
   // ---- Task board
-  api.get('/tasks', wrap(async (req, res) => res.json(await tasks.listTasks({ account: req.query.account, past: req.query.past === '1' }))));
+  api.get('/tasks', wrap(async (req, res) => res.json(await tasks.listTasks({ account: req.query.account, past: req.query.past === '1', role: req.query.role }))));
   api.post('/tasks', wrap(async (req, res) => {
     const { account, title, details, dueAt } = req.body || {};
     const s = await manager.resolve(account);
@@ -391,6 +394,10 @@ export function buildApp() {
     if (req.query.actor) {
       p.push(req.query.actor.split(','));
       conds.push(`actor = ANY($${p.length})`);
+    }
+    if (req.query.role) {
+      p.push(req.query.role);
+      conds.push(`lower(role) = lower($${p.length})`);
     }
     const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
     res.json(await query(`SELECT * FROM events ${where} ORDER BY id DESC LIMIT $1`, p));
