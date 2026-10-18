@@ -506,3 +506,105 @@ test('alerts: owner gets a WhatsApp from another number when one is logged out',
   assert.equal(alerts.length, 1, 'not repeated within 6 hours');
   delete process.env.ALERT_PHONE;
 });
+
+test('templates: save, fill {first_name}/{role}, warn about missing fields, use in bulk send', async () => {
+  const t = (await call('POST', '/api/templates', { name: 'Chef invite', body: 'Hi {first_name}, we have a {role} opening. Interested?' })).data;
+  assert.ok(t.id);
+  await query(`INSERT INTO contacts (account_id, jid, phone, name) VALUES ('hotel','919788888881@s.whatsapp.net','919788888881','Ravi Kumar') ON CONFLICT DO NOTHING`);
+  const missing = await mcp('send_message', { account: 'hotel', to: '919788888881', template: 'Chef invite' });
+  assert.match(missing, /needs values for: role/);
+  await manager.update('hotel', { settings: { aiMode: 'auto' } });
+  const before = sent.length;
+  const ok = await mcp('send_message', { account: 'hotel', to: '919788888881', template: 'chef invite', vars: { role: 'Chef' } });
+  assert.match(ok, /Queued/);
+  await until(() => sent.length > before);
+  assert.equal(sent.at(-1).content.text, 'Hi Ravi, we have a Chef opening. Interested?');
+  const r = (await call('POST', '/api/bulk', { account: 'hotel', title: 'Tpl bulk', template: 'Chef invite', recipients: [{ to: '9788888882', name: 'Anita Rao', role: 'Sous chef' }], skipIfContactedDays: 0 })).data;
+  assert.equal(r.queued, 1);
+  await until(() => sent.some((s) => s.content.text === 'Hi Anita, we have a Sous chef opening. Interested?'));
+  assert.match(await mcp('list_templates', {}), /Chef invite .*fields: first_name,role/);
+  await manager.update('hotel', { settings: { aiMode: 'approve' } });
+});
+
+test('reply-to: the quoted message is passed to WhatsApp', async () => {
+  const s = manager.get('hotel');
+  const seen = [];
+  const orig = s.send;
+  s.send = async (jid, content, o) => {
+    seen.push(o);
+    return orig(jid, content, o);
+  };
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hotel','919788888883@s.whatsapp.net','Q1',false,extract(epoch from now())::bigint,'text','Is the room available on Friday?')`);
+  const r = await call('POST', '/api/send', { account: 'hotel', to: '919788888883', text: 'Yes, it is!', replyTo: 'Q1' });
+  assert.equal(r.data.status, 'sent');
+  const q = seen.at(-1).quoted;
+  assert.equal(q.key.id, 'Q1');
+  assert.equal(q.key.fromMe, false);
+  assert.equal(q.message.conversation, 'Is the room available on Friday?');
+  s.send = orig;
+});
+
+test('chat states: remind me (snooze) hides a chat until its date, done, and an incoming message reopens it', async () => {
+  const jid = '919788888884@s.whatsapp.net';
+  await query(`INSERT INTO chats (account_id, jid, last_ts, last_preview, last_from_me) VALUES ('hotel',$1,extract(epoch from now())::bigint,'hi',false)`, [jid]);
+  const later = new Date(Date.now() + 3 * 86400000).toISOString();
+  await call('PATCH', `/api/accounts/hotel/chats/${jid}/state`, { state: 'snoozed', until: later, note: 'ask about trial day' });
+  const open = (await call('GET', '/api/accounts/hotel/chats?state=open&limit=200')).data;
+  assert.ok(!open.some((c) => c.jid === jid), 'snoozed chat is not in the open list');
+  assert.ok((await call('GET', '/api/accounts/hotel/chats?state=snoozed')).data.some((c) => c.jid === jid));
+  // date reached → back in open, flagged due, on top
+  await query(`UPDATE chats SET snoozed_until = now() - interval '1 minute' WHERE account_id = 'hotel' AND jid = $1`, [jid]);
+  const open2 = (await call('GET', '/api/accounts/hotel/chats?state=open&limit=200')).data;
+  assert.equal(open2[0].jid, jid, 'due reminder is listed first');
+  assert.equal(open2[0].due, true);
+  assert.match(await mcp('list_chats', { account: 'hotel', state: 'due' }), /REMINDER DUE: ask about trial day/);
+  // done, then they write again → open
+  assert.match(await mcp('set_chat_state', { account: 'hotel', chat: '919788888884', state: 'done' }), /marked done/);
+  await manager.get('hotel').afterIncoming({ chatJid: jid, body: 'hello again', type: 'text', id: 'X9' });
+  const [c] = await query(`SELECT state FROM chats WHERE account_id = 'hotel' AND jid = $1`, [jid]);
+  assert.equal(c.state, 'open');
+  assert.match(await mcp('set_chat_state', { account: 'hotel', chat: '919788888884', state: 'snoozed', in_days: 2, note: 'follow up' }), /Reminder set/);
+});
+
+test('one person across numbers: find_person shows each number separately', async () => {
+  const jid = '919788888885@s.whatsapp.net';
+  await query(`INSERT INTO contacts (account_id, jid, phone, name, tags) VALUES ('hotel',$1,'919788888885','Meena','{guest}'), ('hiring',$1,'919788888885','Meena R','{candidate}')`, [jid]);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hotel',$1,'P1',false,1760000000,'text','room?'), ('hiring',$1,'P2',false,1760001000,'text','job?')`, [jid]);
+  const out = await mcp('find_person', { query: '9788888885' });
+  assert.match(out, /hotel \(Hotel\).*Meena.*tags:guest/);
+  assert.match(out, /hiring \(Hiring\).*Meena R.*tags:candidate/);
+  assert.equal((await call('GET', '/api/people?q=Meena')).data.length, 2);
+});
+
+test('rules: a PDF from someone new on the hiring number gets tagged, saved, a task and one auto-reply', async () => {
+  await call('POST', '/api/templates', { account: 'hiring', name: 'Resume received', body: 'Thanks {first_name}, we got your resume and will get back to you.' });
+  const rule = (await call('POST', '/api/rules', {
+    account: 'hiring', name: 'Resumes',
+    conditions: { chat: 'direct', types: ['document'], sender: 'new' },
+    actions: { addTags: 'candidate', leadStatus: 'new', saveMedia: true, createTask: 'Review resume from {name}', replyTemplate: 'Resume received' },
+  })).data;
+  assert.ok(rule.id);
+  const h = manager.get('hiring');
+  const saved = [];
+  h.saveMedia = async (chat, id) => saved.push(id);
+  const jid = '919788888886@s.whatsapp.net';
+  await query(`INSERT INTO contacts (account_id, jid, phone, notify) VALUES ('hiring',$1,'919788888886','Suresh Babu')`, [jid]);
+  const before = sent.length;
+  const msg = { chatJid: jid, senderJid: jid, id: 'DOC1', type: 'document', body: 'resume.pdf', media: { fileName: 'resume.pdf' } };
+  await h.afterIncoming(msg);
+  const [c] = await query(`SELECT tags, lead_status FROM contacts WHERE account_id = 'hiring' AND jid = $1`, [jid]);
+  assert.deepEqual(c.tags, ['candidate']);
+  assert.equal(c.lead_status, 'new');
+  assert.deepEqual(saved, ['DOC1']);
+  const tasksNow = (await call('GET', '/api/tasks?account=hiring')).data;
+  assert.ok(tasksNow.some((t) => t.title === 'Review resume from Suresh Babu' && t.created_by === 'rule'));
+  await until(() => sent.length > before);
+  assert.equal(sent.at(-1).content.text, 'Thanks Suresh, we got your resume and will get back to you.');
+  // second PDF the same day: no second auto-reply (and a text message doesn't match at all)
+  await h.afterIncoming({ ...msg, id: 'DOC2' });
+  await h.afterIncoming({ chatJid: jid, senderJid: jid, id: 'TXT1', type: 'text', body: 'hello' });
+  await sleep(200);
+  assert.equal(sent.filter((s) => s.jid === jid).length, 1, 'auto-reply once per person per day');
+  assert.match(await mcp('list_rules', { account: 'hiring' }), /Resumes .*ran 2x/);
+  assert.match(await mcp('recent_activity', { account: 'hiring', who: 'system' }), /Rule "Resumes" on 919788888886: tagged candidate/);
+});

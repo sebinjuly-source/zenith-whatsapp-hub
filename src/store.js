@@ -256,6 +256,27 @@ async function refreshChatLast(accountId, chatJid) {
   );
 }
 
+/** Set a chat's state: 'open' | 'snoozed' (needs until) | 'done'. */
+export async function setChatState(accountId, jid, state, { until, note } = {}) {
+  if (!['open', 'snoozed', 'done'].includes(state)) throw new Error('State must be open, snoozed or done');
+  if (state === 'snoozed' && !until) throw new Error('A reminder needs a date');
+  const rows = await query(
+    `UPDATE chats SET state = $3, snoozed_until = $4, snooze_note = $5, updated_at = now()
+     WHERE account_id = $1 AND jid = $2 RETURNING jid, state, snoozed_until, snooze_note`,
+    [accountId, jid, state, state === 'snoozed' ? until : null, state === 'snoozed' ? note || null : null],
+  );
+  if (!rows[0]) throw new Error('Chat not found');
+  return rows[0];
+}
+
+/** A new message from the other side brings a snoozed/done chat back to open (like Chatwoot). */
+export async function reopenOnIncoming(accountId, jid) {
+  await query(
+    `UPDATE chats SET state = 'open', snoozed_until = NULL, snooze_note = NULL WHERE account_id = $1 AND jid = $2 AND state <> 'open'`,
+    [accountId, jid],
+  );
+}
+
 export async function applyEdit(accountId, id, body) {
   await query('UPDATE messages SET body = $3, edited = TRUE WHERE account_id = $1 AND id = $2', [accountId, id, body]);
 }
@@ -299,9 +320,14 @@ export async function hasChattedWith(accountId, jid) {
 // ---------------------------------------------------------------------------
 const DISPLAY = `COALESCE(NULLIF(ch.name, ''), ct.name, ct.notify, ct.verified_name, ct.phone, ch.jid)`;
 
-export async function listChats(accountId, { q, kind, tag, limit = 30, offset = 0, waitingOnMe, sinceTs, beforeTs } = {}) {
+export async function listChats(accountId, { q, kind, tag, limit = 30, offset = 0, waitingOnMe, sinceTs, beforeTs, state } = {}) {
   const where = ['ch.account_id = $1'];
   const p = [accountId];
+  // open = open, plus reminders whose date has come; snoozed = waiting for a date; due = reminder date reached
+  if (state === 'open') where.push("(ch.state = 'open' OR (ch.state = 'snoozed' AND ch.snoozed_until <= now()))");
+  if (state === 'snoozed') where.push("ch.state = 'snoozed' AND ch.snoozed_until > now()");
+  if (state === 'due') where.push("ch.state = 'snoozed' AND ch.snoozed_until <= now()");
+  if (state === 'done') where.push("ch.state = 'done'");
   if (q) {
     p.push(`%${q}%`);
     where.push(`(${DISPLAY} ILIKE $${p.length} OR ch.jid ILIKE $${p.length})`);
@@ -324,10 +350,13 @@ export async function listChats(accountId, { q, kind, tag, limit = 30, offset = 
   p.push(Math.min(limit, 200), offset);
   return query(
     `SELECT ch.jid, ${DISPLAY} AS name, ch.is_group, ch.unread, ch.last_ts, ch.last_preview, ch.last_from_me,
-            ch.participants, ct.phone, ct.tags, ct.lead_status, ct.summary, ct.is_blocked, ct.is_business
+            ch.participants, ct.phone, ct.tags, ct.lead_status, ct.summary, ct.is_blocked, ct.is_business,
+            ch.state, ch.snoozed_until, ch.snooze_note,
+            (ch.state = 'snoozed' AND ch.snoozed_until <= now()) AS due
      FROM chats ch LEFT JOIN contacts ct ON ct.account_id = ch.account_id AND ct.jid = ch.jid
      WHERE ${where.join(' AND ')}
-     ORDER BY ch.last_ts DESC NULLS LAST LIMIT $${p.length - 1} OFFSET $${p.length}`,
+     ORDER BY (ch.state = 'snoozed' AND ch.snoozed_until <= now()) DESC, ch.last_ts DESC NULLS LAST
+     LIMIT $${p.length - 1} OFFSET $${p.length}`,
     p,
   );
 }

@@ -13,8 +13,11 @@ import { toJid } from './store.js';
 import { MIN_DELAY_SEC, randomDelayMs, insideSendingWindow } from './settings.js';
 import { createTask, refreshTask, fillTemplate, planRecipients } from './tasks.js';
 import { hasAuthState } from './wa/auth-state.js';
+import { getTemplate, contactFields, fieldsIn } from './templates.js';
 
-const AUTOMATED = ['mcp', 'campaign'];
+// Automated = random delay, daily cap, typing. Drafts (approval) only for AI and bulk; your rules are pre-approved.
+const AUTOMATED = ['mcp', 'campaign', 'rule'];
+const NEEDS_APPROVAL = ['mcp', 'campaign'];
 const PRIORITY_YOU = 10; // your own / API sends go before queued bulk messages
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const done = new EventEmitter();
@@ -43,7 +46,7 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
   }
   await assertCanSend(session);
   const automated = AUTOMATED.includes(source);
-  const status = automated && session.settings.aiMode === 'approve' ? 'draft' : 'queued';
+  const status = NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued';
   const [row] = await query(
     `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id, idem_key)
      VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz, now()),$9,$10)
@@ -64,9 +67,15 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
  * Send one message (template with {name} etc.) to many people as one task on the board.
  * recipients: [{ to, name?, ...extra fields usable as {field} }] or plain numbers.
  */
-export async function bulkSend({ account, title, details, recipients, text, attachment, scheduledAt, source = 'campaign',
+export async function bulkSend({ account, title, details, recipients, text, attachment, template, scheduledAt, source = 'campaign',
   createdBy = 'you', skipIfContactedDays = 30, allowRepeat = false, taskId, idemKey = null }) {
   const session = await manager.resolve(account);
+  if (template) {
+    const t = await getTemplate(session.id, template);
+    if (!t) throw new Error(`No template called "${template}"`);
+    text = text || t.body || undefined;
+    attachment = attachment || t.attachment || undefined;
+  }
   if (!text && !attachment) throw new Error('Give the message text (can use {name}) and/or an attachment');
   if (idemKey) {
     const [t] = await query('SELECT * FROM tasks WHERE account_id = $1 AND idem_key = $2', [session.id, String(idemKey)]);
@@ -80,14 +89,15 @@ export async function bulkSend({ account, title, details, recipients, text, atta
     : await createTask({ account: session.id, title: title || `Message ${ok.length} people`, details, kind: 'bulk', createdBy, idemKey });
   let n = 0;
   for (const r of ok) {
-    const vars = { ...r.vars, name: r.vars.name || r.vars.Name };
+    const name = r.vars.name || r.vars.Name;
+    const vars = { ...r.vars, name, first_name: r.vars.first_name || (name ? String(name).trim().split(/\s+/)[0] : undefined), phone: r.jid.split('@')[0] };
     const body = text ? fillTemplate(r.vars.text || text, vars) : undefined;
     const att = attachment ? { ...attachment, caption: attachment.caption ? fillTemplate(attachment.caption, vars) : undefined } : undefined;
     await query(
       `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id)
        VALUES ($1,$2,$3,$4,$5,0,$6,COALESCE($7::timestamptz, now()),$8)`,
       [session.id, r.jid, JSON.stringify({ text: body, attachment: att }), source,
-        AUTOMATED.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued',
+        NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued',
         title || null, scheduledAt || null, task.id],
     );
     n++;
@@ -192,6 +202,29 @@ async function automatedSentToday(accountId) {
   return r.n;
 }
 
+/** Rebuild enough of a stored message for WhatsApp to show it as the quoted message of a reply. */
+async function quotedMessage(accountId, chatJid, messageId) {
+  const [m] = await query('SELECT id, from_me, sender_jid, body, type FROM messages WHERE account_id = $1 AND chat_jid = $2 AND id = $3', [accountId, chatJid, messageId]);
+  if (!m) return undefined; // message unknown: send without the quote rather than fail
+  const key = { remoteJid: chatJid, id: m.id, fromMe: m.from_me };
+  if (chatJid.endsWith('@g.us') && !m.from_me && m.sender_jid) key.participant = m.sender_jid;
+  return { key, message: { conversation: m.body || `[${m.type}]` } };
+}
+
+/**
+ * Turn a saved template into a payload for one person: fills {name}, {first_name}, {phone} from the contact,
+ * plus any `vars` given. Returns { payload, missing } (missing = fields left empty).
+ */
+export async function renderTemplate(accountId, jid, templateRef, vars = {}) {
+  const t = await getTemplate(accountId, templateRef);
+  if (!t) throw new Error(`No template called "${templateRef}"`);
+  const known = { ...(await contactFields(accountId, jid)), ...Object.fromEntries(Object.entries(vars).filter(([, v]) => v != null && v !== '')) };
+  const missing = fieldsIn(t.body).filter((f) => !known[f] && f !== 'name');
+  const payload = { text: t.body ? fillTemplate(t.body, known) : undefined };
+  if (t.attachment?.url) payload.attachment = { ...t.attachment, caption: t.attachment.caption ? fillTemplate(t.attachment.caption, known) : undefined };
+  return { payload, missing, template: t };
+}
+
 async function buildContent(payload) {
   if (!payload.attachment) return { text: payload.text };
   const a = payload.attachment;
@@ -273,7 +306,8 @@ function startWorker(accountId) {
       const textLen = (row.payload.text || '').length;
       // "typing…" is for AI/bulk messages; your own and Apps Script sends go out straight away
       const typingMs = automated && s.typing ? Math.min(6000, Math.max(1500, textLen * 40)) : 0;
-      const sent = await session.send(row.to_jid, content, { typingMs });
+      const quoted = row.payload.replyTo ? await quotedMessage(session.id, row.to_jid, row.payload.replyTo) : undefined;
+      const sent = await session.send(row.to_jid, content, { typingMs, quoted });
       [result] = await query(
         `UPDATE outbox SET status = 'sent', sent_at = now(), message_id = $2, error = NULL WHERE id = $1 RETURNING *`,
         [row.id, sent?.key?.id || null],

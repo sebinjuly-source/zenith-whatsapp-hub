@@ -15,6 +15,9 @@ import * as store from './store.js';
 import * as outbox from './outbox.js';
 import { toTs } from './util.js';
 import * as tasks from './tasks.js';
+import * as templates from './templates.js';
+import * as rules from './rules.js';
+import { findPerson } from './people.js';
 import { logEvent } from './db.js';
 import { HISTORY_MODES } from './describe.js';
 import { normalizeSettings } from './settings.js';
@@ -68,6 +71,8 @@ const chatLine = (r) =>
     r.lead_status ? `status:${r.lead_status}` : null,
     r.is_blocked ? 'BLOCKED' : null,
     r.summary ? `summary:${trim(r.summary, 120)}` : null,
+    r.state === 'snoozed' ? (r.due ? `REMINDER DUE${r.snooze_note ? ': ' + trim(r.snooze_note, 60) : ''}` : `remind ${fmtTime(Math.floor(new Date(r.snoozed_until).getTime() / 1000))}`) : null,
+    r.state === 'done' ? 'done' : null,
   ]
     .filter(Boolean)
     .join(' | ');
@@ -112,6 +117,7 @@ function buildServer() {
       kind: z.enum(['direct', 'group', 'all']).optional(),
       tag: z.string().optional(),
       waiting_on_me: z.boolean().optional().describe('Only chats where the other side spoke last'),
+      state: z.enum(['open', 'snoozed', 'due', 'done']).optional().describe('open (incl. due reminders), snoozed (reminder pending), due (reminder date reached), done'),
       active_since: z.string().optional().describe('Last message on/after this date (YYYY-MM-DD)'),
       inactive_since: z.string().optional().describe('Last message before this date (YYYY-MM-DD) — good for finding stale leads'),
       limit: z.number().int().min(1).max(100).optional(),
@@ -120,7 +126,7 @@ function buildServer() {
     async (a) => {
       const s = await manager.resolve(a.account);
       const rows = await store.listChats(s.id, {
-        q: a.query, kind: a.kind === 'all' ? undefined : a.kind, tag: a.tag, waitingOnMe: a.waiting_on_me,
+        q: a.query, kind: a.kind === 'all' ? undefined : a.kind, tag: a.tag, waitingOnMe: a.waiting_on_me, state: a.state,
         sinceTs: toTs(a.active_since), beforeTs: toTs(a.inactive_since), limit: a.limit || 20, offset: a.offset || 0,
       });
       return rows.length ? rows.map(chatLine).join('\n') : 'No chats match.';
@@ -302,13 +308,24 @@ function buildServer() {
       send_as: z.enum(['document', 'image', 'video', 'audio']).optional(),
       note: z.string().optional().describe('Why this message is being sent (shown to the owner on the draft)'),
       task_id: z.number().int().optional().describe('Attach to a task on the board (e.g. a follow-up task)'),
+      template: z.string().optional().describe('Use a saved template (name or id) instead of text; {name}/{first_name}/{phone} are filled from the contact'),
+      vars: z.record(z.string(), z.string()).optional().describe('Values for other {fields} in the template, e.g. {"role":"Chef"}'),
+      reply_to_message_id: z.string().optional().describe('Quote this message (id from get_messages) in the reply'),
       idempotency_key: z.string().optional().describe('Optional unique key; retrying with the same key never sends twice'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
       const jid = await resolveChat(s.id, a.to);
-      const attachment = a.attachment_url ? { url: a.attachment_url, fileName: a.file_name, as: a.send_as } : undefined;
-      const row = await outbox.enqueue({ account: s.id, to: jid, payload: { text: a.text, attachment }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key });
+      let attachment = a.attachment_url ? { url: a.attachment_url, fileName: a.file_name, as: a.send_as } : undefined;
+      let text = a.text;
+      if (a.template) {
+        const r = await outbox.renderTemplate(s.id, jid, a.template, a.vars || {});
+        if (r.missing.length) return `Template "${r.template.name}" needs values for: ${r.missing.join(', ')} — pass them in vars.`;
+        text = text || r.payload.text;
+        attachment = attachment || r.payload.attachment;
+      }
+      const payload = { text, attachment, ...(a.reply_to_message_id ? { replyTo: a.reply_to_message_id } : {}) };
+      const row = await outbox.enqueue({ account: s.id, to: jid, payload, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key });
       if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
       await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} message #${row.id} to ${jid.split('@')[0]}${a.note ? ` — ${a.note}` : ''}`);
       return row.status === 'draft'
@@ -382,6 +399,85 @@ function buildServer() {
     },
   );
 
+  tool('list_templates', 'Saved message templates (name, which number, text with {fields}, attached file). Use them via send_message/bulk_send template=.', {
+    account: z.string().optional(),
+  }, async (a) => {
+    const rows = await templates.listTemplates(a.account ? (await manager.resolve(a.account)).id : undefined);
+    return rows.length
+      ? rows.map((t) => `#${t.id} | ${t.name} | ${t.account_id || 'all numbers'} | fields: ${templates.fieldsIn(t.body).join(',') || '-'}${t.attachment?.url ? ' | file' : ''} | ${trim(t.body, 160)}`).join('\n')
+      : 'No templates yet.';
+  });
+
+  tool('save_template', 'Create or update a saved message template. Use {name}, {first_name}, {phone} (filled from the contact) and any other {field}.', {
+    id: z.number().int().optional().describe('Give to update an existing template'),
+    account: z.string().optional().describe('Number it belongs to; omit for all numbers'),
+    name: z.string(), body: z.string(),
+    attachment_url: z.string().optional(), file_name: z.string().optional(),
+  }, async (a) => {
+    const t = await templates.saveTemplate({
+      id: a.id, account: a.account ? (await manager.resolve(a.account)).id : null, name: a.name, body: a.body,
+      attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : null,
+    });
+    await ai(t.account_id, `Saved template "${t.name}"`);
+    return `Template #${t.id} "${t.name}" saved.`;
+  });
+
+  tool('set_chat_state', 'Organise a chat: snoozed = "remind me" (it leaves the open list and comes back as REMINDER DUE on the date), done = finished, open = back to normal. A new message from them reopens it automatically.', {
+    account: accountArg, chat: chatArg,
+    state: z.enum(['open', 'snoozed', 'done']),
+    until: z.string().optional().describe('For snoozed: date/time (YYYY-MM-DD or ISO)'),
+    in_days: z.number().optional().describe('For snoozed: alternatively, number of days from now'),
+    note: z.string().optional().describe('For snoozed: what to do when it comes back'),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    const jid = await resolveChat(s.id, a.chat);
+    let until;
+    if (a.state === 'snoozed') {
+      until = a.until ? new Date(a.until).toISOString() : a.in_days ? new Date(Date.now() + a.in_days * 86400000).toISOString() : null;
+      if (!until) return 'For a reminder give until or in_days.';
+    }
+    await store.setChatState(s.id, jid, a.state, { until, note: a.note });
+    await ai(s.id, `Chat ${jid.split('@')[0]} → ${a.state === 'snoozed' ? `remind on ${fmtTime(Math.floor(new Date(until).getTime() / 1000))}${a.note ? ' (' + a.note + ')' : ''}` : a.state}`);
+    return a.state === 'snoozed' ? `Reminder set for ${fmtTime(Math.floor(new Date(until).getTime() / 1000))}.` : `Chat marked ${a.state}.`;
+  });
+
+  tool('find_person', 'Look up one person across ALL numbers (e.g. a guest who also messaged the hiring number): name, tags, status, notes and last contact per number.', {
+    query: z.string().describe('Phone number or name'),
+  }, async (a) => {
+    const rows = await findPerson(a.query);
+    return rows.length
+      ? rows.map((r) => `${r.account_id} (${r.account_label}) | ${r.jid} | ${trim(r.name, 40)} | ${r.messages} msgs, first ${fmtTime(r.first_ts)}, last ${fmtTime(r.last_ts)} (${r.last_from_me ? 'me' : 'them'}) | tags:${(r.tags || []).join(',') || '-'} | status:${r.lead_status || '-'}${r.is_blocked ? ' | BLOCKED' : ''}${r.summary ? ' | ' + trim(r.summary, 100) : ''}`).join('\n')
+      : 'Not found on any number.';
+  });
+
+  tool('list_rules', 'Automatic rules for incoming messages on each number (conditions → actions) and how often they ran.', { account: z.string().optional() }, async (a) => {
+    const rows = await rules.listRules(a.account ? (await manager.resolve(a.account)).id : undefined);
+    return rows.length
+      ? rows.map((r) => `#${r.id} | ${r.account_id} | ${r.enabled ? 'on' : 'off'} | ${r.name} | if ${JSON.stringify(r.conditions)} then ${JSON.stringify(r.actions)} | ran ${r.runs}x`).join('\n')
+      : 'No rules yet.';
+  });
+
+  tool('save_rule', 'Create or update an automatic rule for incoming messages on one number. Only create rules the owner asked for.', {
+    id: z.number().int().optional(), account: accountArg, name: z.string(), enabled: z.boolean().optional(),
+    chat: z.enum(['direct', 'group', 'any']).optional(),
+    types: z.array(z.string()).optional().describe('Message types, e.g. ["document","image"]; empty = any'),
+    words: z.array(z.string()).optional().describe('Match if the text or file name contains any of these'),
+    sender: z.enum(['any', 'new', 'known']).optional().describe('new = never messaged by this number before'),
+    add_tags: z.array(z.string()).optional(), lead_status: z.string().optional(), save_media: z.boolean().optional(),
+    create_task: z.string().optional().describe('Task title, may use {name}'),
+    reply_template: z.string().optional().describe('Template to auto-reply with (once per person per day)'),
+    snooze_days: z.number().int().optional(),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    const r = await rules.saveRule({
+      id: a.id, account: s.id, name: a.name, enabled: a.enabled ?? true,
+      conditions: { chat: a.chat, types: a.types, words: a.words, sender: a.sender },
+      actions: { addTags: a.add_tags, leadStatus: a.lead_status, saveMedia: a.save_media, createTask: a.create_task, replyTemplate: a.reply_template, snoozeDays: a.snooze_days },
+    });
+    await ai(s.id, `Saved rule "${r.name}"`);
+    return `Rule #${r.id} "${r.name}" saved (${r.enabled ? 'on' : 'off'}).`;
+  });
+
   tool('save_media', 'Download and keep a file from a message (e.g. a candidate\'s resume). Use the media id shown by get_messages.', {
     account: accountArg, chat: chatArg, message_id: z.string(),
   }, async (a) => {
@@ -443,7 +539,8 @@ function buildServer() {
     {
       account: accountArg,
       title: z.string().describe('Short card title, e.g. "Chef candidates – WorkIndia 16 Oct"'),
-      text: z.string().describe('Message, may contain {name} etc.'),
+      text: z.string().optional().describe('Message, may contain {name}, {first_name} and any recipient field. Or use template.'),
+      template: z.string().optional().describe('Saved template name/id to use instead of text'),
       recipients: z.array(z.object({ to: z.string(), name: z.string().optional() }).passthrough()).min(1),
       details: z.string().optional(),
       attachment_url: z.string().optional(),
@@ -454,7 +551,7 @@ function buildServer() {
     },
     async (a) => {
       const r = await outbox.bulkSend({
-        account: a.account, title: a.title, details: a.details, text: a.text, recipients: a.recipients,
+        account: a.account, title: a.title, details: a.details, text: a.text, template: a.template, recipients: a.recipients,
         attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : undefined,
         scheduledAt: a.schedule_at, source: 'mcp', createdBy: 'ai',
         skipIfContactedDays: a.skip_if_contacted_days ?? 30, allowRepeat: a.skip_if_contacted_days === 0, idemKey: a.idempotency_key,

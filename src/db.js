@@ -168,6 +168,35 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_pending ON jobs (account_id, status);
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
+-- Saved message templates (account_id NULL = shared by all numbers)
+CREATE TABLE IF NOT EXISTS templates (
+  id BIGSERIAL PRIMARY KEY,
+  account_id TEXT,
+  name TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  attachment JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Automatic rules for incoming messages
+CREATE TABLE IF NOT EXISTS rules (
+  id BIGSERIAL PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  conditions JSONB NOT NULL DEFAULT '{}',
+  actions JSONB NOT NULL DEFAULT '{}',
+  runs INT NOT NULL DEFAULT 0,
+  last_run_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Chat state: open / snoozed (remind me on a date) / done. A new incoming message reopens the chat.
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'open';
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS snooze_note TEXT;
+
 CREATE TABLE IF NOT EXISTS events (
   id BIGSERIAL PRIMARY KEY,
   account_id TEXT,

@@ -71,6 +71,8 @@
           link('accounts', 'Numbers'),
           link('inbox', 'Inbox'),
           link('outbox', 'Drafts & outbox', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null),
+          link('templates', 'Templates'),
+          link('rules', 'Rules'),
           link('settings', 'Settings'),
           link('connect', 'Connect AI & apps'),
           link('activity', 'Activity'),
@@ -285,6 +287,9 @@
     const wrap = h('div', { class: 'inbox' + (ib.chat ? ' has-chat' : '') });
     const seg = (k, label) => h('button', { type: 'button', class: ib.kind === k ? 'on' : '', onclick: () => { ib.kind = k; loadChats(); markSeg(); } }, label);
     const segEl = h('div', { class: 'seg' }, seg('all', 'All'), seg('direct', 'People'), seg('group', 'Groups'));
+    ib.state = ib.state || 'open';
+    const stSeg = (k, label) => h('button', { type: 'button', class: ib.state === k ? 'on' : '', onclick: (e) => { ib.state = k; [...e.target.parentNode.children].forEach((b) => b.classList.remove('on')); e.target.classList.add('on'); loadChats(); } }, label);
+    const stateEl = h('div', { class: 'seg' }, stSeg('open', 'Open'), stSeg('snoozed', 'Reminders'), stSeg('done', 'Done'), stSeg('', 'Everything'));
     const markSeg = () => [...segEl.children].forEach((b, i) => b.classList.toggle('on', ['all', 'direct', 'group'][i] === ib.kind));
     let qTimer;
     const side = h('aside', { class: 'side' },
@@ -292,6 +297,7 @@
         h('select', { 'aria-label': 'Number', onchange: (e) => { ib.account = e.target.value; ib.chat = null; viewInbox(); } },
           accs.map((a) => h('option', { value: a.id, selected: a.id === ib.account }, `${a.label}${a.phone ? ' (+' + a.phone + ')' : ''}`))),
         h('input', { type: 'text', placeholder: 'Search name or number', value: ib.q, 'aria-label': 'Search chats', oninput: (e) => { ib.q = e.target.value; clearTimeout(qTimer); qTimer = setTimeout(loadChats, 250); } }),
+        stateEl,
         segEl,
         h('label', { class: 'switch', style: 'margin:0' }, h('input', { type: 'checkbox', checked: ib.waiting, onchange: (e) => { ib.waiting = e.target.checked; loadChats(); } }), h('span', {}, 'Only chats waiting on my reply')),
       ),
@@ -305,6 +311,7 @@
       if (ib.q) p.set('q', ib.q);
       if (ib.kind !== 'all') p.set('kind', ib.kind);
       if (ib.waiting) p.set('waiting', '1');
+      if (ib.state) p.set('state', ib.state);
       const chats = await api(`/api/accounts/${ib.account}/chats?${p}`);
       list.replaceChildren(
         ...(chats.length
@@ -312,6 +319,8 @@
               h('div', { class: 'chatitem' + (c.jid === ib.chat ? ' on' : ''), role: 'listitem', tabindex: 0, onclick: () => openChat(c), onkeydown: (e) => e.key === 'Enter' && openChat(c) },
                 h('div', { class: 'top' }, h('span', { class: 'name' }, c.is_group ? '👥 ' : '', c.name || c.jid), h('span', { class: 'time' }, fmtShort(c.last_ts))),
                 h('div', { class: 'prev' }, c.last_from_me ? 'You: ' : '', c.last_preview || ''),
+                c.due ? h('div', {}, h('span', { class: 'tag', style: 'background:var(--warn-soft);color:var(--ink)' }, '⏰ Reminder due', c.snooze_note ? ': ' + c.snooze_note : '')) : null,
+                c.state === 'snoozed' && !c.due ? h('div', {}, h('span', { class: 'tag' }, '⏰ ' + new Date(c.snoozed_until).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }), c.snooze_note ? ' · ' + c.snooze_note : '')) : null,
                 c.tags?.length || c.is_blocked ? h('div', {}, c.is_blocked ? h('span', { class: 'tag' }, 'blocked') : null, (c.tags || []).map((t) => h('span', { class: 'tag' }, t))) : null,
               ))
           : [h('div', { class: 'empty' }, 'No chats yet. History appears here as it syncs.')]),
@@ -330,6 +339,29 @@
         h('button', { class: 'btn small', onclick: () => { ib.chat = null; wrap.classList.remove('has-chat'); }, 'aria-label': 'Back to chats' }, '←'),
         h('div', { class: 'who' }, h('b', {}, c.name || c.jid), h('span', { class: 'muted mono' }, c.jid)),
         !c.is_group ? h('button', { class: 'btn small', onclick: () => { contactPanel.hidden = !contactPanel.hidden; if (!contactPanel.hidden) loadContact(); } }, 'Contact') : null,
+        c.state === 'open' || !c.state || c.due
+          ? h('button', { class: 'btn small', title: 'Hide this chat until a date, then show it as a reminder', onclick: guard(async () => {
+              const when = prompt('Remind me on (YYYY-MM-DD, optionally HH:MM) or in how many days (e.g. 3):', '1');
+              if (!when) return;
+              const until = /^\d+$/.test(when.trim()) ? new Date(Date.now() + Number(when) * 86400000) : new Date(when.replace(' ', 'T'));
+              if (isNaN(until)) return toast('Could not read that date');
+              const note = prompt('What to do then? (optional)', '') || undefined;
+              await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/state`, { method: 'PATCH', body: { state: 'snoozed', until: until.toISOString(), note } });
+              toast('Reminder set'); ib.chat = null; viewInbox();
+            }) }, 'Remind me')
+          : null,
+        c.state !== 'done'
+          ? h('button', { class: 'btn small', onclick: guard(async () => {
+              await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/state`, { method: 'PATCH', body: { state: 'done' } });
+              toast('Marked done — it comes back if they write again'); ib.chat = null; viewInbox();
+            }) }, 'Done')
+          : null,
+        c.state && c.state !== 'open' && !c.due
+          ? h('button', { class: 'btn small', onclick: guard(async () => {
+              await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/state`, { method: 'PATCH', body: { state: 'open' } });
+              toast('Reopened'); viewInbox();
+            }) }, 'Reopen')
+          : null,
         h('button', { class: 'btn small', title: 'Ask the phone for older messages', onclick: guard(async () => {
           const r = await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/older`, { body: { count: 50 } });
           toast(r.note);
@@ -338,6 +370,28 @@
       const fileIn = h('input', { type: 'file', hidden: true });
       const ta = h('textarea', { rows: 1, placeholder: 'Type a message', 'aria-label': 'Message' });
       const fileLabel = h('span', { class: 'muted' });
+      let replyTo = null;
+      const replyBar = h('div', { class: 'muted', style: 'font-size:12px;display:none' });
+      const setReply = (m) => {
+        replyTo = m ? m.id : null;
+        replyBar.style.display = m ? 'block' : 'none';
+        fill(replyBar, m ? ['↪ Replying to: ', (m.body || '[' + m.type + ']').slice(0, 80), ' ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); setReply(null); } }, 'cancel')] : []);
+        if (m) ta.focus();
+      };
+      const tplSel = h('select', { 'aria-label': 'Insert a template', style: 'width:auto;max-width:150px', onchange: guard(async (e) => {
+        const t = (state.templates || []).find((x) => String(x.id) === e.target.value);
+        e.target.value = '';
+        if (!t) return;
+        const ct = (await api(`/api/accounts/${ib.account}/contacts/${encodeURIComponent(c.jid)}`)) || {};
+        const name = (ct.name || ct.notify || '').trim();
+        ta.value = t.body.replace(/\{name\}/g, name || 'there').replace(/\{first_name\}/g, name.split(/\s+/)[0] || 'there').replace(/\{phone\}/g, c.jid.split('@')[0]);
+        if (t.attachment?.url) toast('This template has a file — send it from the Board or via the AI, or attach it here');
+        ta.focus();
+      }) }, h('option', { value: '' }, 'Template…'));
+      api(`/api/templates?account=${encodeURIComponent(ib.account)}`).then((ts) => {
+        state.templates = ts;
+        tplSel.append(...ts.map((t) => h('option', { value: t.id }, t.name)));
+      }).catch(() => {});
       fileIn.onchange = () => { fileLabel.textContent = fileIn.files[0]?.name || ''; };
       const composer = h('form', { class: 'composer', onsubmit: guard(async (e) => {
         e.preventDefault();
@@ -351,8 +405,9 @@
         }
         sendBtn.disabled = true;
         try {
-          await api('/api/send', { body: { account: ib.account, to: c.jid, text: text || undefined, attachment, source: 'dashboard' } });
+          await api('/api/send', { body: { account: ib.account, to: c.jid, text: text || undefined, attachment, replyTo: replyTo || undefined, source: 'dashboard' } });
           ta.value = '';
+          setReply(null);
           fileIn.value = '';
           fileLabel.textContent = '';
           setTimeout(() => loadMsgs(), 800);
@@ -361,7 +416,8 @@
         }
       }) },
         h('button', { type: 'button', class: 'btn', onclick: () => fileIn.click(), 'aria-label': 'Attach file' }, '📎'), fileIn,
-        h('div', { class: 'grow' }, ta, fileLabel),
+        tplSel,
+        h('div', { class: 'grow' }, replyBar, ta, fileLabel),
       );
       const sendBtn = h('button', { class: 'btn primary', type: 'submit' }, 'Send');
       composer.append(sendBtn);
@@ -373,9 +429,15 @@
         const tags = h('input', { type: 'text', value: (ct.tags || []).join(', '), placeholder: 'candidate, guest, lead-hot' });
         const status = h('input', { type: 'text', value: ct.lead_status || '', placeholder: 'new / contacted / interested / booked…' });
         const notes = h('textarea', { rows: 2, value: ct.notes || '' });
+        const people = await api(`/api/people?q=${encodeURIComponent(c.jid.split('@')[0])}`).catch(() => []);
+        const others = people.filter((p) => p.account_id !== ib.account);
+        const otherNumbers = others.length
+          ? h('div', {}, h('b', {}, 'Also on: '), others.map((p) => h('span', { class: 'tag' }, `${p.account_label}: ${p.messages} msgs, last ${fmt(p.last_ts) || '–'}${(p.tags || []).length ? ' · ' + p.tags.join(',') : ''}`)))
+          : null;
         fill(contactPanel,
           h('div', { class: 'muted' }, `Saved name: ${ct.name || '–'} · WhatsApp name: ${ct.notify || '–'} · ${nice(ct.message_count)} messages since ${fmt(ct.first_ts) || '–'}${ct.is_blocked ? ' · BLOCKED' : ''}`),
           ct.summary ? h('div', {}, h('b', {}, 'AI summary: '), ct.summary) : null,
+          otherNumbers,
           h('div', { class: 'row' }, h('label', { class: 'grow' }, 'Tags', tags), h('label', { class: 'grow' }, 'Status', status)),
           h('label', {}, 'Notes', notes),
           h('div', {}, h('button', { class: 'btn small primary', onclick: guard(async () => {
@@ -416,7 +478,9 @@
             m.quoted_body ? h('div', { class: 'q' }, m.quoted_body) : null,
             m.deleted ? 'This message was deleted' : m.type === 'contact' ? null : m.body || (m.has_media ? null : `[${m.type}]`),
             vcards, mediaLink,
-            h('div', { class: 't' }, fmt(m.ts), m.edited ? ' · edited' : '', m.from_me && m.status >= 4 ? ' · read' : m.from_me && m.status === 3 ? ' · delivered' : ''),
+            h('div', { class: 't' }, fmt(m.ts), m.edited ? ' · edited' : '',
+              m.from_me && m.status === 0 ? h('span', { style: 'color:var(--bad)' }, ' · not delivered') : m.from_me && m.status >= 4 ? ' · read' : m.from_me && m.status === 3 ? ' · delivered' : '',
+              m.deleted ? '' : h('a', { href: '#', style: 'margin-left:8px', title: 'Reply to this message', onclick: (e) => { e.preventDefault(); setReply(m); } }, '↪ reply')),
           ));
         }
         if (earlier) {
@@ -470,7 +534,7 @@
         ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'].filter((s) => s !== t.status).map((s) => h('option', { value: s }, s.replace('_', ' '))),
       );
       return h('div', { class: 'card taskcard' },
-        h('div', { class: 'row' }, h('b', { class: 'grow' }, t.title), h('span', { class: 'tag' }, t.created_by === 'ai' ? 'AI' : 'You')),
+        h('div', { class: 'row' }, h('b', { class: 'grow' }, t.title), h('span', { class: 'tag' }, { ai: 'AI', rule: 'Rule' }[t.created_by] || 'You')),
         t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, t.details) : null,
         t.total
           ? h('div', { style: 'margin:8px 0' },
@@ -505,6 +569,8 @@
       h('label', { class: 'field' }, h('span', {}, 'Due'), h('input', { type: 'datetime-local', name: 'due' })),
       h('button', { class: 'btn primary', type: 'submit' }, 'Add to board'),
     );
+    const tplList = await api(`/api/templates?account=${encodeURIComponent(b.account)}`).catch(() => []);
+    const bulkTpl = h('select', { name: 'tpl' }, h('option', { value: '' }, '— none: write the message below —'), tplList.map((t) => h('option', { value: t.id }, t.name)));
     const bulk = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
       const f = e.target;
@@ -512,7 +578,8 @@
         const [to, ...rest] = l.split(/[,\t;]/);
         return { to: to.trim(), name: rest.join(' ').trim() || undefined };
       });
-      const r = await api('/api/bulk', { body: { account: b.account, title: f.title.value, text: f.text.value, recipients,
+      if (!f.text.value.trim() && !f.tpl.value) return toast('Write a message or pick a template');
+      const r = await api('/api/bulk', { body: { account: b.account, title: f.title.value, text: f.text.value || undefined, template: f.tpl.value || undefined, recipients,
         scheduledAt: f.when.value ? new Date(f.when.value).toISOString() : undefined } });
       alert(r.task
         ? `${r.queued} messages ${r.mode === 'approve' ? 'saved for approval (see "Waiting for approval")' : 'queued'}.` + (r.skipped.length ? `\n\nSkipped ${r.skipped.length}:\n` + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n') : '')
@@ -521,7 +588,8 @@
     }) },
       h('h2', {}, 'Bulk send'),
       h('label', { class: 'field' }, h('span', {}, 'Task title'), h('input', { type: 'text', name: 'title', required: true, placeholder: 'Chef candidates – WorkIndia' })),
-      h('label', { class: 'field' }, h('span', {}, 'Message'), h('textarea', { name: 'text', rows: 4, required: true, placeholder: 'Hi {name}, we have an opening for a Chef at Zenith Suites, Bengaluru. Interested?' }),
+      h('label', { class: 'field' }, h('span', {}, 'Use a saved template (optional)'), bulkTpl),
+      h('label', { class: 'field' }, h('span', {}, 'Message'), h('textarea', { name: 'text', rows: 4, placeholder: 'Hi {name}, we have an opening for a Chef at Zenith Suites, Bengaluru. Interested?' }),
         h('em', {}, '{name} is replaced by each person\'s name ("there" if missing).')),
       h('label', { class: 'field' }, h('span', {}, 'People — one per line: number, name'), h('textarea', { name: 'list', rows: 5, required: true, placeholder: '9876543210, Ravi Kumar\n919812345678, Anita' }),
         h('em', {}, 'Skips duplicates, opted-out contacts and anyone messaged in the last 30 days. Uses this number\'s delay, daily limit and hours.')),
@@ -545,6 +613,108 @@
         }),
       ),
       h('div', { class: 'settings-grid', style: 'margin-top:24px' }, newTask, bulk),
+    ]);
+  }
+
+  // ---------- templates ----------
+  async function viewTemplates() {
+    await loadAccounts();
+    const rows = await api('/api/templates');
+    const label = (id) => (id ? state.accounts.find((a) => a.id === id)?.label || id : 'All numbers');
+    const form = (t = {}) => h('form', { class: 'card', onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const body = { account: f.account.value || null, name: f.name.value, body: f.body.value,
+        attachment: f.url.value.trim() ? { url: f.url.value.trim(), fileName: f.fileName.value.trim() || undefined } : null };
+      await api(t.id ? `/api/templates/${t.id}` : '/api/templates', { method: t.id ? 'PATCH' : 'POST', body });
+      toast('Template saved');
+      viewTemplates();
+    }) },
+      h('h2', {}, t.id ? `Edit "${t.name}"` : 'New template'),
+      h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { type: 'text', name: 'name', required: true, value: t.name || '', placeholder: 'Chef job invite' })),
+      h('label', { class: 'field' }, h('span', {}, 'For'), h('select', { name: 'account' }, h('option', { value: '' }, 'All numbers'), state.accounts.map((a) => h('option', { value: a.id, selected: a.id === t.account_id }, a.label)))),
+      h('label', { class: 'field' }, h('span', {}, 'Message'), h('textarea', { name: 'body', rows: 5, value: t.body || '', placeholder: 'Hi {first_name}, we have a {role} opening at Zenith Suites, Bengaluru. Interested?' }),
+        h('em', {}, '{name}, {first_name} and {phone} are filled from the contact. Any other {field} (e.g. {role}, {date}) is filled from the bulk-send list or by the AI.')),
+      h('label', { class: 'field' }, h('span', {}, 'File link (optional)'), h('input', { type: 'url', name: 'url', value: t.attachment?.url || '', placeholder: 'Google Drive or any public link to a PDF/image' })),
+      h('label', { class: 'field' }, h('span', {}, 'File name shown (optional)'), h('input', { type: 'text', name: 'fileName', value: t.attachment?.fileName || '', placeholder: 'Zenith Suites brochure.pdf' })),
+      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save template'),
+        t.id ? h('button', { class: 'btn danger', type: 'button', onclick: guard(async () => { if (!confirm(`Delete "${t.name}"?`)) return; await api(`/api/templates/${t.id}`, { method: 'DELETE' }); viewTemplates(); }) }, 'Delete') : null),
+    );
+    const editor = h('div', {}, form());
+    shell([
+      h('h1', {}, 'Templates'),
+      h('p', { class: 'sub' }, 'Saved messages you, bulk sends and the AI can reuse. Pick one in the inbox ("Template…") or in a bulk send.'),
+      h('div', { class: 'settings-grid' },
+        h('div', { class: 'card' }, h('h2', {}, `Saved (${rows.length})`),
+          rows.length ? rows.map((t) => h('div', { style: 'border-top:1px solid var(--line);padding:8px 0' },
+            h('div', { class: 'row' }, h('b', { class: 'grow' }, t.name), h('span', { class: 'tag' }, label(t.account_id)), t.attachment?.url ? h('span', { class: 'tag' }, '📎 file') : null,
+              h('button', { class: 'btn small', onclick: () => fill(editor, form(t)) }, 'Edit')),
+            h('div', { class: 'muted', style: 'white-space:pre-wrap;font-size:13px' }, t.body.slice(0, 220)))) : h('p', { class: 'muted' }, 'None yet.')),
+        editor),
+    ]);
+  }
+
+  // ---------- rules ----------
+  async function viewRules() {
+    await loadAccounts();
+    const rows = await api('/api/rules');
+    const tpls = await api('/api/templates');
+    const label = (id) => state.accounts.find((a) => a.id === id)?.label || id;
+    const describe = (r) => {
+      const c = r.conditions || {}, a = r.actions || {};
+      const when = [c.chat === 'any' ? 'any chat' : c.chat === 'group' ? 'a group' : 'a person', c.sender === 'new' ? '(someone new)' : c.sender === 'known' ? '(someone you know)' : '',
+        c.types?.length ? `sends ${c.types.join('/')}` : 'sends anything', c.words?.length ? `containing "${c.words.join('" or "')}"` : ''].filter(Boolean).join(' ');
+      const then = [a.addTags && `tag ${a.addTags.join(', ')}`, a.leadStatus && `status → ${a.leadStatus}`, a.saveMedia && 'save the file', a.createTask && `add task "${a.createTask}"`,
+        a.replyTemplate && `auto-reply "${a.replyTemplate}"`, a.snoozeDays && `remind me in ${a.snoozeDays} days`].filter(Boolean).join(', ');
+      return `When ${when} → ${then}`;
+    };
+    const form = (r = {}) => {
+      const c = r.conditions || {}, a = r.actions || {};
+      return h('form', { class: 'card', onsubmit: guard(async (e) => {
+        e.preventDefault();
+        const f = e.target;
+        const body = {
+          account: f.account.value, name: f.name.value, enabled: f.enabled.checked,
+          conditions: { chat: f.chat.value, sender: f.sender.value, types: [...f.querySelectorAll('input[name=type]:checked')].map((i) => i.value), words: f.words.value },
+          actions: { addTags: f.addTags.value, leadStatus: f.leadStatus.value, saveMedia: f.saveMedia.checked, createTask: f.createTask.value, replyTemplate: f.replyTemplate.value, snoozeDays: f.snoozeDays.value },
+        };
+        await api(r.id ? `/api/rules/${r.id}` : '/api/rules', { method: r.id ? 'PATCH' : 'POST', body });
+        toast('Rule saved');
+        viewRules();
+      }) },
+        h('h2', {}, r.id ? `Edit "${r.name}"` : 'New rule'),
+        h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { type: 'text', name: 'name', required: true, value: r.name || '', placeholder: 'Resumes from candidates' })),
+        h('label', { class: 'field' }, h('span', {}, 'Number'), h('select', { name: 'account' }, state.accounts.map((x) => h('option', { value: x.id, selected: x.id === r.account_id }, x.label)))),
+        h('h2', { style: 'margin-top:8px' }, 'When'),
+        h('div', { class: 'row' },
+          h('label', { class: 'field grow' }, h('span', {}, 'Chat'), h('select', { name: 'chat' }, [['direct', 'A person'], ['group', 'A group'], ['any', 'Any chat']].map(([v, l]) => h('option', { value: v, selected: (c.chat || 'direct') === v }, l)))),
+          h('label', { class: 'field grow' }, h('span', {}, 'Sender'), h('select', { name: 'sender' }, [['any', 'Anyone'], ['new', 'Someone new'], ['known', 'Someone I know']].map(([v, l]) => h('option', { value: v, selected: (c.sender || 'any') === v }, l))))),
+        h('div', { class: 'field' }, h('span', { style: 'display:block;font-weight:550;margin-bottom:4px' }, 'Sends (none ticked = anything)'),
+          h('div', { class: 'daypick' }, ['text', 'document', 'image', 'video', 'voice', 'contact', 'location'].map((t) => h('label', {}, h('input', { type: 'checkbox', name: 'type', value: t, checked: (c.types || []).includes(t) }), t)))),
+        h('label', { class: 'field' }, h('span', {}, 'Containing any of these words (optional, comma separated)'), h('input', { type: 'text', name: 'words', value: (c.words || []).join(', '), placeholder: 'booking, room, rate' })),
+        h('h2', { style: 'margin-top:8px' }, 'Then'),
+        h('label', { class: 'field' }, h('span', {}, 'Add tags'), h('input', { type: 'text', name: 'addTags', value: (a.addTags || []).join(', '), placeholder: 'candidate' })),
+        h('label', { class: 'field' }, h('span', {}, 'Set status'), h('input', { type: 'text', name: 'leadStatus', value: a.leadStatus || '', placeholder: 'new' })),
+        h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'saveMedia', checked: !!a.saveMedia }), h('span', {}, 'Save the file they sent')),
+        h('label', { class: 'field' }, h('span', {}, 'Add a task to the board'), h('input', { type: 'text', name: 'createTask', value: a.createTask || '', placeholder: 'Review resume from {name}' })),
+        h('label', { class: 'field' }, h('span', {}, 'Auto-reply with template (once per person per day)'), h('select', { name: 'replyTemplate' }, h('option', { value: '' }, '— no auto-reply —'), tpls.map((t) => h('option', { value: t.name, selected: t.name === a.replyTemplate }, t.name)))),
+        h('label', { class: 'field' }, h('span', {}, 'Remind me about the chat after (days, optional)'), h('input', { type: 'number', name: 'snoozeDays', min: 0, value: a.snoozeDays || '' })),
+        h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: r.enabled !== false }), h('span', {}, 'Rule is on')),
+        h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save rule'),
+          r.id ? h('button', { class: 'btn danger', type: 'button', onclick: guard(async () => { if (!confirm(`Delete rule "${r.name}"?`)) return; await api(`/api/rules/${r.id}`, { method: 'DELETE' }); viewRules(); }) }, 'Delete') : null),
+      );
+    };
+    const editor = h('div', {}, form());
+    shell([
+      h('h1', {}, 'Rules'),
+      h('p', { class: 'sub' }, 'Automatic actions when messages arrive, per number. Auto-replies use your delay settings and go out without approval (you set them up).'),
+      h('div', { class: 'settings-grid' },
+        h('div', { class: 'card' }, h('h2', {}, `Rules (${rows.length})`),
+          rows.length ? rows.map((r) => h('div', { style: 'border-top:1px solid var(--line);padding:8px 0' },
+            h('div', { class: 'row' }, h('b', { class: 'grow' }, r.name), h('span', { class: 'tag' }, label(r.account_id)), h('span', { class: 'tag' }, r.enabled ? 'on' : 'off'),
+              h('button', { class: 'btn small', onclick: () => fill(editor, form(r)) }, 'Edit')),
+            h('div', { class: 'muted', style: 'font-size:13px' }, describe(r), ` · ran ${r.runs}×`))) : h('p', { class: 'muted' }, 'No rules yet.')),
+        editor),
     ]);
   }
 
@@ -734,7 +904,7 @@
   }
 
   // ---------- routing & live updates ----------
-  const views = { board: viewBoard, accounts: viewAccounts, inbox: viewInbox, outbox: viewOutbox, settings: viewSettings, connect: viewConnect, activity: viewActivity };
+  const views = { templates: viewTemplates, rules: viewRules, board: viewBoard, accounts: viewAccounts, inbox: viewInbox, outbox: viewOutbox, settings: viewSettings, connect: viewConnect, activity: viewActivity };
   async function route() {
     state.route = location.hash.slice(1) || 'board';
     state.reloadChats = state.reloadThread = null;

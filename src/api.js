@@ -16,6 +16,9 @@ import { getMedia } from './media.js';
 import { mountMcp } from './mcp.js';
 import { toTs } from './util.js';
 import * as tasks from './tasks.js';
+import * as templates from './templates.js';
+import * as rules from './rules.js';
+import { findPerson } from './people.js';
 import { logEvent } from './db.js';
 import { normalizeSettings } from './settings.js';
 import { describeSettingsChange, HISTORY_MODES } from './describe.js';
@@ -145,9 +148,9 @@ export function buildApp() {
 
   // ---- Chats, messages, contacts
   api.get('/accounts/:id/chats', wrap(async (req, res) => {
-    const { q, kind, tag, limit, offset, waiting } = req.query;
+    const { q, kind, tag, limit, offset, waiting, state } = req.query;
     res.json(await store.listChats(req.params.id, {
-      q, kind, tag, limit: parseInt(limit, 10) || 50, offset: parseInt(offset, 10) || 0, waitingOnMe: waiting === '1',
+      q, kind, tag, state, limit: parseInt(limit, 10) || 50, offset: parseInt(offset, 10) || 0, waitingOnMe: waiting === '1',
     }));
   }));
   api.get('/accounts/:id/chats/:jid/messages', wrap(async (req, res) => {
@@ -189,11 +192,65 @@ export function buildApp() {
     }));
   }));
 
+  // ---- Templates (saved messages with {fields})
+  api.get('/templates', wrap(async (req, res) => res.json(await templates.listTemplates(req.query.account))));
+  api.post('/templates', wrap(async (req, res) => {
+    const t = await templates.saveTemplate(req.body || {});
+    await act(req, t.account_id, `Saved template "${t.name}"`);
+    res.json(t);
+  }));
+  api.patch('/templates/:id', wrap(async (req, res) => {
+    const t = await templates.saveTemplate({ ...(req.body || {}), id: req.params.id });
+    await act(req, t.account_id, `Edited template "${t.name}"`);
+    res.json(t);
+  }));
+  api.delete('/templates/:id', wrap(async (req, res) => {
+    const t = await templates.deleteTemplate(req.params.id);
+    await act(req, t.account_id, `Deleted template "${t.name}"`);
+    res.json({ ok: true });
+  }));
+
+  // ---- Rules
+  api.get('/rules', wrap(async (req, res) => res.json(await rules.listRules(req.query.account))));
+  api.post('/rules', wrap(async (req, res) => {
+    const r = await rules.saveRule(req.body || {});
+    await act(req, r.account_id, `Saved rule "${r.name}"`);
+    res.json(r);
+  }));
+  api.patch('/rules/:id', wrap(async (req, res) => {
+    const r = await rules.saveRule({ ...(req.body || {}), id: req.params.id });
+    await act(req, r.account_id, `Edited rule "${r.name}"${r.enabled ? '' : ' (off)'}`);
+    res.json(r);
+  }));
+  api.delete('/rules/:id', wrap(async (req, res) => {
+    const r = await rules.deleteRule(req.params.id);
+    await act(req, r.account_id, `Deleted rule "${r.name}"`);
+    res.json({ ok: true });
+  }));
+
+  // ---- One person across all numbers
+  api.get('/people', wrap(async (req, res) => res.json(await findPerson(req.query.q))));
+
+  // ---- Chat state: open / snoozed (remind me on a date) / done
+  api.patch('/accounts/:id/chats/:jid/state', wrap(async (req, res) => {
+    const { state, until, note } = req.body || {};
+    const r = await store.setChatState(req.params.id, req.params.jid, state, { until, note });
+    await act(req, req.params.id, `Chat ${req.params.jid.split('@')[0]} → ${state === 'snoozed' ? `remind on ${new Date(until).toLocaleString('en-GB', { timeZone: config.tz })}${note ? ' (' + note + ')' : ''}` : state}`);
+    res.json(r);
+  }));
+
   // ---- Sending
   api.post('/send', wrap(async (req, res) => {
-    const { account, to, text, attachment, wait = true } = req.body || {};
+    const { account, to, wait = true, template, vars, replyTo } = req.body || {};
+    let { text, attachment } = req.body || {};
     if (!to) throw new Error('Missing "to" (phone number or chat id)');
-    const row = await outbox.enqueue({ account, to, payload: { text, attachment }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key') });
+    if (template) {
+      const s = await manager.resolve(account);
+      const r = await outbox.renderTemplate(s.id, store.toJid(to), template, vars || {});
+      text = text || r.payload.text;
+      attachment = attachment || r.payload.attachment;
+    }
+    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key') });
     if (row.duplicate && ['sent', 'failed', 'rejected'].includes(row.status)) return res.status(row.status === 'sent' ? 200 : 502).json(row);
     if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent a message from the dashboard to ${row.to_jid.split('@')[0]}`);
     if (!wait) return res.json(row);

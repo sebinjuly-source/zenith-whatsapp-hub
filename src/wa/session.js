@@ -556,6 +556,8 @@ export class Session extends EventEmitter {
       const [c] = await query('SELECT is_blocked FROM contacts WHERE account_id = $1 AND jid = $2', [this.id, r.chatJid]);
       if (c?.is_blocked) return;
     }
+    // A message from them brings a snoozed / done chat back to the open list.
+    await store.reopenOnIncoming(this.id, r.chatJid);
     // Opt-out replies ("stop", "not interested" …) tag the contact so campaigns skip them.
     if (r.body && !isJidGroup(r.chatJid)) {
       const text = r.body.trim().toLowerCase();
@@ -576,6 +578,8 @@ export class Session extends EventEmitter {
         if (known) await this.saveMedia(r.chatJid, r.id);
       }
     }
+    // Your automatic rules (tag, save file, add task, auto-reply, remind me later)
+    await this.applyRules(r).catch((err) => this.log.warn({ err: err.message }, 'rules failed'));
     // Notify an external webhook (e.g. Apps Script) if configured.
     if (settings.webhookUrl) {
       postWebhook(settings.webhookUrl, {
@@ -583,6 +587,26 @@ export class Session extends EventEmitter {
         type: r.type, text: r.body, ts: r.ts, id: r.id,
       });
     }
+  }
+
+  async applyRules(r) {
+    const isGroup = !!isJidGroup(r.chatJid);
+    const [mine] = await query('SELECT 1 FROM messages WHERE account_id = $1 AND chat_jid = $2 AND from_me LIMIT 1', [this.id, r.chatJid]);
+    const { runRules } = await import('../rules.js');
+    const { createTask } = await import('../tasks.js');
+    const outbox = await import('../outbox.js');
+    const fields = await import('../templates.js').then((t) => t.contactFields(this.id, r.chatJid));
+    const fill = (s) => String(s).replace(/\{(\w+)\}/g, (m, k) => fields[k] || (k === 'name' ? r.chatJid.split('@')[0] : ''));
+    await runRules(this.id, r, { isGroup, isNew: !mine }, {
+      updateContact: (u) => store.updateContact(this.id, isGroup ? r.senderJid : r.chatJid, u),
+      saveMedia: () => this.saveMedia(r.chatJid, r.id),
+      createTask: (title) => createTask({ account: this.id, title: fill(title), details: `From ${fields.name || ''} +${r.chatJid.split('@')[0]}: ${(r.body || '[' + r.type + ']').slice(0, 200)}`, createdBy: 'rule' }),
+      sendTemplate: async (tpl, note) => {
+        const { payload } = await outbox.renderTemplate(this.id, r.chatJid, tpl);
+        await outbox.enqueue({ account: this.id, to: r.chatJid, payload: { ...payload, replyTo: r.id }, source: 'rule', note });
+      },
+      snooze: (days) => store.setChatState(this.id, r.chatJid, 'snoozed', { until: new Date(Date.now() + days * 86400000).toISOString(), note: 'by rule' }),
+    });
   }
 
   /** WhatsApp reported a message as failed (status ERROR). Show it instead of leaving it "sent". */
@@ -690,7 +714,7 @@ export class Session extends EventEmitter {
    * Send one message. content is a Baileys content object ({ text } | { document, mimetype, fileName, caption } | …).
    * typingMs > 0 shows "typing…" first.
    */
-  async send(jid, content, { typingMs = 0 } = {}) {
+  async send(jid, content, { typingMs = 0, quoted } = {}) {
     if (!this.sock || this.status !== 'open') throw new Error(`Number "${this.id}" is not connected`);
     if (!isJidGroup(jid)) {
       const [check] = await withTimeout(this.sock.onWhatsApp(jid), 30000, 'Number check').catch(() => [null]);
@@ -702,7 +726,7 @@ export class Session extends EventEmitter {
       await sleep(typingMs);
       await this.sock.sendPresenceUpdate('paused', jid).catch(() => {});
     }
-    const sent = await withTimeout(this.sock.sendMessage(jid, content), 120000, 'Sending (it may still go out — check the chat before resending)');
+    const sent = await withTimeout(this.sock.sendMessage(jid, content, quoted ? { quoted } : undefined), 120000, 'Sending (it may still go out — check the chat before resending)');
     if (sent?.key?.id) {
       this.sentCache.set(sent.key.id, sent.message);
       if (this.sentCache.size > 500) this.sentCache.delete(this.sentCache.keys().next().value);
