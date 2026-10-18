@@ -15,6 +15,11 @@ import * as store from './store.js';
 import * as outbox from './outbox.js';
 import { toTs } from './util.js';
 import * as tasks from './tasks.js';
+import { logEvent } from './db.js';
+import { HISTORY_MODES } from './describe.js';
+import { normalizeSettings } from './settings.js';
+
+const ai = (accountId, text) => logEvent(accountId, 'info', text, 'ai');
 
 const fmtTime = (ts) =>
   ts
@@ -86,9 +91,12 @@ function buildServer() {
     for (const a of manager.list()) {
       const st = await store.accountStats(a.id);
       const bf = await outbox.backfillStatus(a.id);
+      const mode = normalizeSettings(a.settings).historyMode;
+      const phases = a.sync?.phases || {};
+      const imported = mode === 'full' ? phases.FULL : mode === 'recent' ? phases.RECENT : phases.INITIAL_BOOTSTRAP;
       lines.push(
         `${a.id}${a.isDefault ? ' (default)' : ''} | ${a.label} | purpose: ${a.purpose || '-'} | +${a.phone || '?'} | ${a.status} | ai:${a.settings.aiMode} | ` +
-          `${st.chats} chats (${st.groups} groups), ${st.contacts} contacts, ${st.messages} msgs since ${fmtTime(st.oldest_ts)} | sync:${a.sync?.state || '-'}` +
+          `${st.chats} chats (${st.groups} groups), ${st.contacts} contacts, ${st.messages} msgs since ${fmtTime(st.oldest_ts)} | history chosen at link: ${HISTORY_MODES[mode]} (${imported === 'complete' ? 'imported' : 'importing'})` +
           (bf ? ` | deep history #${bf.id}: ${bf.status}${bf.result ? ' — ' + bf.result : ''}` : ''),
       );
     }
@@ -274,6 +282,7 @@ function buildServer() {
     async (a) => {
       const s = await manager.resolve(a.account);
       const jid = await resolveChat(s.id, a.chat);
+      await ai(s.id, `Updated contact ${jid.split('@')[0]}${a.add_tags?.length ? ' +' + a.add_tags.join(',') : ''}${a.remove_tags?.length ? ' -' + a.remove_tags.join(',') : ''}${a.lead_status ? ' status ' + a.lead_status : ''}`);
       const c = await store.updateContact(s.id, jid, {
         addTags: a.add_tags, removeTags: a.remove_tags, leadStatus: a.lead_status, notes: a.notes, summary: a.summary, markReviewed: a.mark_reviewed,
       });
@@ -299,6 +308,7 @@ function buildServer() {
       const jid = await resolveChat(s.id, a.to);
       const attachment = a.attachment_url ? { url: a.attachment_url, fileName: a.file_name, as: a.send_as } : undefined;
       const row = await outbox.enqueue({ account: s.id, to: jid, payload: { text: a.text, attachment }, source: 'mcp', note: a.note, taskId: a.task_id });
+      await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} message #${row.id} to ${jid.split('@')[0]}${a.note ? ` — ${a.note}` : ''}`);
       return row.status === 'draft'
         ? `Draft #${row.id} created for ${jid} — waiting for approval in the dashboard (account "${s.id}" is in approve mode).`
         : `Queued #${row.id} for ${jid}; it goes out after the random delay, within sending hours and the daily cap.`;
@@ -320,6 +330,7 @@ function buildServer() {
     id: z.number().int(), text: z.string().optional(),
   }, async (a) => {
     const r = await outbox.approve(a.id, { text: a.text });
+    await ai(r.account_id, `Approved draft #${r.id} (owner approved in chat)`);
     return `Draft #${r.id} approved and queued.`;
   });
 
@@ -339,7 +350,33 @@ function buildServer() {
     async (a) => {
       const s = await manager.resolve(a.account);
       const r = await outbox.requestJob(s, 'backfill', { sinceTs: toTs(a.since) || 0, includeGroups: !!a.include_groups });
+      await ai(s.id, `Started deep history import (back to ${a.since || 'the beginning'})`);
       return `Deep history backfill queued as job #${r.jobId} for ${s.id}. It starts within ~10 s on the server connected to this number; check progress with list_accounts.`;
+    },
+  );
+
+  tool(
+    'recent_activity',
+    'What the owner (you), the AI and the system did recently: numbers linked and which history option was chosen, settings changes, approvals, tasks, bulk sends, opt-outs, failures. Check this before assuming how something was set up.',
+    {
+      account: z.string().optional(),
+      who: z.enum(['you', 'ai', 'system', 'people']).optional().describe('"people" = the owner and the AI (default); or one actor'),
+      limit: z.number().int().min(1).max(200).optional(),
+    },
+    async (a) => {
+      const p = [a.limit || 30];
+      const conds = [];
+      if (a.account) {
+        p.push((await manager.resolve(a.account)).id);
+        conds.push(`account_id = $${p.length}`);
+      }
+      const who = a.who || 'people';
+      p.push(who === 'people' ? ['you', 'ai'] : [who]);
+      conds.push(`actor = ANY($${p.length})`);
+      const rows = await query(`SELECT * FROM events WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT $1`, p);
+      return rows.length
+        ? rows.map((e) => `[${fmtTime(Math.floor(new Date(e.created_at).getTime() / 1000))}] ${e.actor === 'you' ? 'owner' : e.actor} | ${e.account_id || '-'} | ${trim(e.text, 200)}`).join('\n')
+        : 'No recorded actions yet.';
     },
   );
 
@@ -386,6 +423,7 @@ function buildServer() {
   }, async (a) => {
     const s = await manager.resolve(a.account);
     const t = await tasks.createTask({ account: s.id, title: a.title, details: a.details, dueAt: a.due, createdBy: 'ai' });
+    await ai(s.id, `Created task #${t.id} "${t.title}"`);
     return `Task #${t.id} created on ${s.id}.`;
   });
 
@@ -420,12 +458,15 @@ function buildServer() {
       });
       const skipped = r.skipped.length ? `\nSkipped ${r.skipped.length}: ${r.skipped.slice(0, 30).map((x) => `${x.to} (${x.reason})`).join('; ')}` : '';
       if (!r.task) return `Nothing queued.${skipped}`;
+      await ai(r.task.account_id, `Created bulk send "${a.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);
       return `Task #${r.task.id}: ${r.queued} messages ${r.mode === 'approve' ? 'saved as drafts — waiting for the owner to approve on the board' : 'queued'}.${skipped}`;
     },
   );
 
   tool('approve_task', 'Approve all drafts of a task so they start sending. Only when the user has explicitly approved in this conversation.', { id: z.number().int() }, async (a) => {
     const r = await outbox.approveTask(a.id);
+    const [t] = await query('SELECT account_id FROM tasks WHERE id = $1', [a.id]);
+    await ai(t?.account_id, `Approved ${r.approved} messages of task #${a.id} (owner approved in chat)`);
     return `Approved ${r.approved} messages of task #${a.id}.`;
   });
 

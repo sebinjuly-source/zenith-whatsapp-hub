@@ -354,9 +354,10 @@ export class Session extends EventEmitter {
   async onHistoryStatus({ syncType, status }) {
     const name = Object.keys(SYNC_TYPE).find((k) => SYNC_TYPE[k] === syncType) || String(syncType);
     this.sync.phases = { ...(this.sync.phases || {}), [name]: status };
-    if (status === 'complete' && (name === 'FULL' || name === 'ON_DEMAND' || name === 'RECENT')) {
-      this.sync.state = name === 'FULL' ? 'done' : this.sync.state;
-    }
+    const mode = this.settings.historyMode;
+    // Finished = the last phase the chosen mode asks for (Full → FULL, Recent → RECENT, None → bootstrap).
+    const last = mode === 'full' ? 'FULL' : mode === 'recent' ? 'RECENT' : 'INITIAL_BOOTSTRAP';
+    if (status === 'complete' && name === last) this.sync.state = 'done';
     this.sync.updatedAt = new Date().toISOString();
     await this.saveSync();
     await logEvent(this.id, 'info', `History sync ${name}: ${status}`);

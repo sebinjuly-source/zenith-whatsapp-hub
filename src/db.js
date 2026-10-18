@@ -170,6 +170,8 @@ CREATE TABLE IF NOT EXISTS events (
   text TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- who did it: 'you' (dashboard/REST), 'ai' (MCP), 'system'
+ALTER TABLE events ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT 'system';
 `;
 
 function makePgDriver() {
@@ -261,13 +263,14 @@ export async function insertMany(table, columns, rows, suffix = '', chunk = 200)
   }
 }
 
-export async function logEvent(accountId, level, text) {
-  logger[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info']({ accountId }, text);
+export async function logEvent(accountId, level, text, actor = 'system') {
+  logger[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info']({ accountId, actor }, text);
   try {
-    await query('INSERT INTO events (account_id, level, text) VALUES ($1,$2,$3)', [accountId, level, text]);
+    await query('INSERT INTO events (account_id, level, text, actor) VALUES ($1,$2,$3,$4)', [accountId, level, text, actor]);
     // keep the log small
     if (Math.random() < 0.02) {
-      await query("DELETE FROM events WHERE created_at < now() - interval '30 days'");
+      // system noise is kept 30 days; your and the AI's actions 1 year
+      await query("DELETE FROM events WHERE (actor = 'system' AND created_at < now() - interval '30 days') OR created_at < now() - interval '365 days'");
     }
   } catch {
     /* logging must never break the caller */

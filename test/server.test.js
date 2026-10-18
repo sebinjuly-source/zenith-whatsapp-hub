@@ -344,3 +344,46 @@ test('deep history backfill: walks chats, pulls older messages until none are le
   assert.equal(asked.filter((j) => j.startsWith('919700000002')).length, 1);
   assert.match(await mcp('list_accounts'), /deep history #\d+: done/);
 });
+
+test('contacts: add and remove tags in one update', async () => {
+  await query(`INSERT INTO contacts (account_id, jid, phone, tags) VALUES ('hotel','919711111111@s.whatsapp.net','919711111111','{opted-out,guest}')`);
+  const r = await call('PATCH', '/api/accounts/hotel/contacts/919711111111@s.whatsapp.net', { addTags: ['staff'], removeTags: ['opted-out'] });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.data.tags, ['guest', 'staff']);
+  assert.match(await mcp('update_contact', { account: 'hotel', chat: '919711111111', add_tags: ['vip'], remove_tags: ['guest'] }), /tags=staff,vip/);
+});
+
+test('your actions are recorded with who did them, and the AI can read them', async () => {
+  await call('PATCH', '/api/accounts/hotel', { settings: { dailyCap: 25 } });
+  await manager.update('hotel', { settings: { historyMode: 'recent' } }); // as if chosen in the link dialog
+  await call('PATCH', '/api/accounts/hotel', { settings: { aiMode: 'approve' } });
+  const out = await mcp('recent_activity', { account: 'hotel' });
+  assert.match(out, /owner \| hotel \| Changed settings — Daily limit: 50 → 25/);
+  assert.match(out, /owner \| hotel \| Changed settings — AI sending: auto → approve/);
+  assert.match(out, /ai \| hotel \| /, 'AI actions from earlier tests are listed too');
+  assert.doesNotMatch(out, /\| system \|/, 'system noise hidden by default');
+  assert.match(await mcp('list_accounts'), /hotel \(default\).*history chosen at link: Recent history only/);
+  const ev = (await call('GET', '/api/events?actor=you&account=hotel')).data;
+  assert.ok(ev.length >= 2 && ev.every((e) => e.actor === 'you'));
+});
+
+test('incoming messages show the saved contact name, not just the WhatsApp profile name', async () => {
+  await query(`INSERT INTO contacts (account_id, jid, phone, name, notify) VALUES ('hotel','919722222222@s.whatsapp.net','919722222222','Seema Madam','Zenith Suites')`);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, sender_jid, sender_name, ts, type, body) VALUES ('hotel','919722222222@s.whatsapp.net','SN1',false,'919722222222@s.whatsapp.net','Zenith Suites', extract(epoch from now())::bigint, 'text','hello')`);
+  assert.match(await mcp('get_messages', { account: 'hotel', chat: '919722222222' }), /Seema Madam: hello/);
+});
+
+test('typing indicator only for AI/bulk messages, not your own sends', async () => {
+  const s = manager.get('hotel');
+  const opts = [];
+  const orig = s.send;
+  s.send = async (jid, content, o) => {
+    opts.push(o.typingMs);
+    return orig(jid, content, o);
+  };
+  await manager.update('hotel', { settings: { typing: true } });
+  const r = await call('POST', '/api/send', { account: 'hotel', to: '9733333333', text: 'reminder' });
+  assert.equal(r.data.status, 'sent');
+  assert.equal(opts.at(-1), 0);
+  s.send = orig;
+});

@@ -345,10 +345,13 @@ export async function getMessages(accountId, chatJid, { limit = 30, beforeTs, af
   }
   p.push(Math.min(limit, 500));
   const rows = await query(
-    `SELECT id, from_me, sender_jid, sender_name, ts, type, body, quoted_body, forwarded, vcards, reactions, status,
-            edited, deleted, media_saved, (media IS NOT NULL) AS has_media, media->>'fileName' AS file_name,
-            media->>'mimetype' AS mimetype
-     FROM messages WHERE ${where.join(' AND ')} ORDER BY ts DESC LIMIT $${p.length}`,
+    `SELECT m.id, m.from_me, m.sender_jid,
+            CASE WHEN m.from_me THEN 'me' ELSE COALESCE(ct.name, m.sender_name) END AS sender_name,
+            m.ts, m.type, m.body, m.quoted_body, m.forwarded, m.vcards, m.reactions, m.status,
+            m.edited, m.deleted, m.media_saved, (m.media IS NOT NULL) AS has_media, m.media->>'fileName' AS file_name,
+            m.media->>'mimetype' AS mimetype
+     FROM messages m LEFT JOIN contacts ct ON ct.account_id = m.account_id AND ct.jid = m.sender_jid
+     WHERE ${where.map((w) => 'm.' + w).join(' AND ')} ORDER BY m.ts DESC LIMIT $${p.length}`,
     p,
   );
   return rows.reverse();
@@ -419,13 +422,10 @@ export async function updateContact(accountId, jid, { addTags, removeTags, leadS
   );
   const sets = ['updated_at = now()'];
   const p = [accountId, jid];
-  if (addTags?.length) {
-    p.push(addTags);
-    sets.push(`tags = (SELECT ARRAY(SELECT DISTINCT unnest(tags || $${p.length}::text[])))`);
-  }
-  if (removeTags?.length) {
-    p.push(removeTags);
-    sets.push(`tags = (SELECT ARRAY(SELECT t FROM unnest(tags) t WHERE t <> ALL($${p.length}::text[])))`);
+  if (addTags?.length || removeTags?.length) {
+    p.push(addTags || [], removeTags || []);
+    sets.push(`tags = (SELECT COALESCE(array_agg(DISTINCT t ORDER BY t), '{}') FROM unnest(tags || $${p.length - 1}::text[]) t
+                       WHERE t <> ALL($${p.length}::text[]))`);
   }
   if (leadStatus !== undefined) {
     p.push(leadStatus || null);

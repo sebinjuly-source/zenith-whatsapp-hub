@@ -106,15 +106,21 @@
     state.draftsCount = drafts.length;
   }
 
+  const MODE_LABEL = { full: 'Full history', recent: 'Recent history', none: 'New messages only' };
   function syncView(a) {
     const s = a.sync || {};
-    if (!s.chunks) return h('span', { class: 'muted' }, a.status === 'open' ? 'Waiting for history from the phone…' : 'Starts when linked');
-    const done = s.state === 'done';
+    const mode = a.settings?.historyMode || 'full';
+    const chosen = h('div', { class: 'muted', style: 'font-size:12px' }, `Chosen when linking: ${MODE_LABEL[mode]}`);
+    if (mode === 'none') return chosen;
+    if (!s.chunks) return h('div', {}, h('span', { class: 'muted' }, a.status === 'open' ? 'Waiting for history from the phone…' : 'Starts when linked'), chosen);
+    const last = mode === 'full' ? 'FULL' : 'RECENT';
+    const done = s.state === 'done' || s.phases?.[last] === 'complete';
     const pct = done ? 100 : Math.max(3, Math.min(99, s.progress || 0));
     return h('div', {},
       h('div', { class: 'progress', role: 'progressbar', 'aria-valuenow': pct, 'aria-valuemin': 0, 'aria-valuemax': 100 }, h('i', { style: `width:${pct}%` })),
       h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' },
-        `${done ? 'Full history synced' : `Syncing (${s.lastType || '…'})`} · ${nice(s.messages)} messages · ${nice(s.chats)} chats`),
+        `${done ? `${MODE_LABEL[mode]} imported` : `Importing (${s.lastType || '…'})`} · ${nice(s.messages)} messages · ${nice(s.chats)} chats${s.backfilled ? ` · +${nice(s.backfilled)} older (deep history)` : ''}`),
+      chosen,
     );
   }
 
@@ -708,10 +714,11 @@
     const rows = await api('/api/events?limit=200');
     shell([
       h('h1', {}, 'Activity'),
-      h('p', { class: 'sub' }, 'Connections, history sync, opt-outs and send failures.'),
+      h('p', { class: 'sub' }, 'What you, the AI and the system did: linking (and the history option chosen), settings changes, approvals, tasks, opt-outs, failures. The AI reads this too.'),
       h('table', { class: 'list' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Number'), h('th', {}, 'What'))),
-        h('tbody', {}, rows.map((r) => h('tr', {}, h('td', { style: 'white-space:nowrap' }, new Date(r.created_at).toLocaleString()), h('td', {}, r.account_id || '–'),
+        h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'Number'), h('th', {}, 'What'))),
+        h('tbody', {}, rows.map((r) => h('tr', {}, h('td', { style: 'white-space:nowrap' }, new Date(r.created_at).toLocaleString()),
+          h('td', {}, r.actor === 'you' ? 'You' : r.actor === 'ai' ? 'AI' : 'System'), h('td', {}, r.account_id || '–'),
           h('td', { style: r.level === 'error' || r.level === 'warn' ? 'color:var(--bad)' : '' }, r.text)))),
       ),
     ]);

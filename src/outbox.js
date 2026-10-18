@@ -245,7 +245,8 @@ function startWorker(accountId) {
     try {
       const content = await buildContent(row.payload);
       const textLen = (row.payload.text || '').length;
-      const typingMs = s.typing ? Math.min(6000, Math.max(1500, textLen * 40)) : 0;
+      // "typing…" is for AI/bulk messages; your own and Apps Script sends go out straight away
+      const typingMs = automated && s.typing ? Math.min(6000, Math.max(1500, textLen * 40)) : 0;
       const sent = await session.send(row.to_jid, content, { typingMs });
       [result] = await query(
         `UPDATE outbox SET status = 'sent', sent_at = now(), message_id = $2, error = NULL WHERE id = $1 RETURNING *`,
