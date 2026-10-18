@@ -6,7 +6,25 @@
 import crypto from 'crypto';
 import config from './config.js';
 import logger from './logger.js';
-import { logEvent } from './db.js';
+import { logEvent, query } from './db.js';
+
+/** Phones that get connection alerts: hub setting (Settings page) plus ALERT_PHONE env. */
+export async function alertPhones() {
+  const [r] = await query(`SELECT value FROM config WHERE key = 'alerts'`).catch(() => []);
+  const fromDb = r?.value?.phones || [];
+  const fromEnv = (process.env.ALERT_PHONE || '').split(',');
+  return [...new Set([...fromDb, ...fromEnv].map((p) => String(p).replace(/D/g, '')).filter((p) => p.length >= 10)
+    .map((p) => (p.length === 10 ? '91' + p : p)))];
+}
+
+export async function setAlertPhones(phones) {
+  const list = (Array.isArray(phones) ? phones : String(phones || '').split(',')).map((p) => String(p).trim()).filter(Boolean);
+  await query(
+    `INSERT INTO config (key, value) VALUES ('alerts', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [JSON.stringify({ phones: list })],
+  );
+  return alertPhones();
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -52,8 +70,6 @@ const downSince = new Map(); // account -> time it stopped being open
  * Alerts go to ALERT_PHONE (comma-separated) from any other connected number.
  */
 export function startAlerts(manager, send) {
-  const phones = (process.env.ALERT_PHONE || '').split(',').map((p) => p.trim()).filter(Boolean);
-  if (!phones.length) return;
 
   const alert = async (account, kind, text) => {
     const k = `${account.id}|${kind}`;
@@ -62,6 +78,7 @@ export function startAlerts(manager, send) {
     lastAlert.set(k, Date.now());
     await logEvent(account.id, 'warn', `Alert: ${text}`);
     if (!from) return logger.warn({ account: account.id }, 'No other connected number to send the alert from');
+    const phones = await alertPhones();
     for (const p of phones) await send(from.id, p, `⚠️ WhatsApp Hub: ${text}`).catch((e) => logger.warn({ err: e.message }, 'alert send failed'));
   };
 

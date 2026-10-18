@@ -21,6 +21,7 @@ import * as rules from './rules.js';
 import { findPerson } from './people.js';
 import * as lists from './lists.js';
 import { getPlaybook, savePlaybook } from './playbook.js';
+import * as notify from './notify.js';
 import { logEvent } from './db.js';
 import { normalizeSettings } from './settings.js';
 import { describeSettingsChange, HISTORY_MODES } from './describe.js';
@@ -272,6 +273,12 @@ export function buildApp() {
     res.json(u);
   }));
   api.get('/pipeline', wrap(async (req, res) => res.json(await lists.pipelineSummary(req.query.account))));
+  api.get('/alerts', wrap(async (req, res) => res.json({ phones: await notify.alertPhones() })));
+  api.put('/alerts', wrap(async (req, res) => {
+    const phones = await notify.setAlertPhones(req.body?.phones);
+    await act(req, null, `Alert phone(s) set: ${phones.map((p) => '+' + p).join(', ') || 'none'}`);
+    res.json({ phones });
+  }));
   api.get('/playbook', wrap(async (req, res) => res.json(await getPlaybook())));
   api.put('/playbook', wrap(async (req, res) => {
     const p = await savePlaybook(req.body?.text);

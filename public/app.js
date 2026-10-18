@@ -881,6 +881,15 @@
   async function viewSettings() {
     await loadAccounts();
     const pb = await api('/api/playbook').catch(() => ({ text: '' }));
+    const al = await api('/api/alerts').catch(() => ({ phones: [] }));
+    const alertCard = h('form', { class: 'card', style: 'margin-top:24px', onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const r = await api('/api/alerts', { method: 'PUT', body: { phones: e.target.phones.value } });
+      toast(r.phones.length ? 'Alerts go to ' + r.phones.map((p) => '+' + p).join(', ') : 'Alerts off');
+    }) },
+      h('h2', {}, 'Connection alerts'),
+      h('p', { class: 'muted', style: 'margin-top:0' }, 'A WhatsApp (from another connected number) when a number is logged out or offline for 15+ minutes. Use a personal number that is not one of the hub numbers.'),
+      h('div', { class: 'row' }, h('input', { type: 'text', name: 'phones', class: 'grow', style: 'width:auto', value: al.phones.join(', '), placeholder: '9198…, comma separated' }), h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
     const playbookCard = h('form', { class: 'card', style: 'margin-top:24px', onsubmit: guard(async (e) => {
       e.preventDefault();
       await api('/api/playbook', { method: 'PUT', body: { text: e.target.text.value } });
@@ -978,6 +987,7 @@
       h('div', { class: 'row', style: 'margin-bottom:16px' }, h('select', { style: 'max-width:320px', 'aria-label': 'Number', onchange: (e) => { state.settingsFor = e.target.value; viewSettings(); } },
         state.accounts.map((x) => h('option', { value: x.id, selected: x.id === id }, x.label)))),
       form,
+      alertCard,
       playbookCard,
       h('div', { class: 'card', style: 'margin-top:24px;border-color:var(--bad-soft)' },
         h('h2', {}, 'Delete this number from the hub'),
