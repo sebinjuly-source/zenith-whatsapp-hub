@@ -121,6 +121,7 @@ class Manager extends EventEmitter {
     if (s.status === 'open') throw new Error('Already connected');
     if (history) await this.update(id, { settings: { historyMode: history } });
     if (s.sock) await s.stop();
+    s.qrRounds = 0;
     await s.start({ pairPhone, linking: true });
     return s.info();
   }

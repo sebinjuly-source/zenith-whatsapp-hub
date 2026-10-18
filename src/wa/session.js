@@ -176,7 +176,6 @@ export class Session extends EventEmitter {
       // Always accept history notifications: they also carry the lid↔phone mappings Baileys needs.
       // With historyMode 'none' the old messages are simply not stored (see onHistory).
       shouldSyncHistoryMessage: () => true,
-      qrTimeout: 45000, // keep each QR on screen long enough to open the scanner
       markOnlineOnConnect: false, // keep notifications on your phone
       generateHighQualityLinkPreview: false,
       getMessage: async (key) => this.sentCache.get(key.id),
@@ -227,6 +226,7 @@ export class Session extends EventEmitter {
     }
     if (connection === 'open') {
       this.retries = 0;
+      this.qrRounds = 0;
       this.qr = this.qrDataUrl = this.pairingCode = null;
       const phone = store.phoneOf(this.myJid);
       const waName = this.sock.user?.name || this.sock.user?.notify || null;
@@ -244,10 +244,17 @@ export class Session extends EventEmitter {
       const wasWaitingForScan = this.status === 'qr';
       this.sock = null;
       if (this.stopping) return this.setStatus('stopped');
-      if (wasWaitingForScan && code === DisconnectReason.timedOut) {
-        // Nobody scanned in time — stop instead of generating QR codes forever.
-        await logEvent(this.id, 'info', 'QR code expired. Click "Link" to get a new one.');
-        return this.setStatus('stopped');
+      if (wasWaitingForScan && (code === DisconnectReason.timedOut || code === DisconnectReason.connectionClosed)) {
+        // WhatsApp ends an unscanned pairing session after ~3.5 min. Start a fresh one (new codes) a few
+        // times, then stop instead of generating QR codes forever.
+        this.qrRounds = (this.qrRounds || 0) + 1;
+        if (this.qrRounds >= 3) {
+          this.qrRounds = 0;
+          await logEvent(this.id, 'info', 'QR codes expired without a scan. Click "Link number" to try again.');
+          return this.setStatus('stopped');
+        }
+        this.setStatus('connecting');
+        return setTimeout(() => !this.stopping && this.start({ pairPhone: this.pairPhone, linking: true }), 500);
       }
       if (code === DisconnectReason.loggedOut) {
         await this.forgetLogin();
