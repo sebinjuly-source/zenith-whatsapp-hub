@@ -392,3 +392,12 @@ test('typing indicator only for AI/bulk messages, not your own sends', async () 
   assert.equal(opts.at(-1), 0);
   s.send = orig;
 });
+
+test('dashboard page carries a version so open tabs reload after a deploy', async () => {
+  const html = await (await fetch(base + '/')).text();
+  const health = await (await fetch(base + '/health')).json();
+  assert.ok(health.version);
+  assert.ok(html.includes('app.js?v=' + health.version), 'script URL carries the version');
+  assert.ok(html.includes("window.HUB_VERSION = '" + health.version + "'"), 'page knows its version');
+  assert.equal((await fetch(base + '/app.js')).status, 200);
+});

@@ -748,6 +748,13 @@
   function live() {
     es?.close();
     es = new EventSource('/api/stream');
+    // After a deploy the stream reconnects to the new server: reload once so this tab runs the new dashboard.
+    es.onopen = async () => {
+      try {
+        const h = await (await fetch('/health')).json();
+        if (window.HUB_VERSION && h.version && h.version !== window.HUB_VERSION) location.reload();
+      } catch {}
+    };
     let t;
     es.addEventListener('account', (e) => {
       const info = JSON.parse(e.data);

@@ -5,6 +5,7 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import config from './config.js';
 import { query, dbKind } from './db.js';
@@ -27,6 +28,13 @@ const actorOf = (req) => (req.get('x-api-key') || req.query.key ? 'script' : 'yo
 const act = (req, accountId, text) => logEvent(accountId, 'info', text, actorOf(req));
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
+// Changes on every deploy (Render sets RENDER_GIT_COMMIT); open dashboards reload when it changes.
+export const VERSION = (process.env.RENDER_GIT_COMMIT || String(Date.now())).slice(0, 10);
+const indexHtml = () =>
+  fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8')
+    .replace('href="styles.css"', `href="styles.css?v=${VERSION}"`)
+    .replace('src="app.js"', `src="app.js?v=${VERSION}"`)
+    .replace('<script ', `<script>window.HUB_VERSION = '${VERSION}';</script>\n  <script `);
 
 const wrap = (fn) => (req, res) =>
   Promise.resolve(fn(req, res)).catch((err) => res.status(err.status || 400).json({ error: err.message }));
@@ -45,6 +53,7 @@ export function buildApp() {
     res.json({
       ok: true,
       db: dbKind(),
+      version: VERSION,
       memoryMb: Math.round(process.memoryUsage().rss / 1048576), // Render free plan: 512 MB
       accounts: manager.list().map((a) => ({ id: a.id, status: a.status })),
     }),
@@ -60,7 +69,7 @@ export function buildApp() {
   // MCP for AI agents: <server>/mcp/<API_KEY>
   mountMcp(app);
 
-  app.use(express.static(publicDir));
+  app.use(express.static(publicDir, { index: false }));
 
   // ---- Legacy endpoint: same body as the old whatsapp-form-bot, so Apps Script only needs a URL change.
   app.post('/webhook', wrap(async (req, res) => {
@@ -285,6 +294,6 @@ export function buildApp() {
   });
 
   app.use('/api', api);
-  app.get('/', (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
+  app.get('/', (req, res) => res.set('Cache-Control', 'no-cache').type('html').send(indexHtml()));
   return app;
 }
