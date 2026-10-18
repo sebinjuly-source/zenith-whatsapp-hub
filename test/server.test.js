@@ -309,3 +309,38 @@ test('MCP lists stay one line per item even for multi-line messages', async () =
   assert.equal(out.split('\n').length, 1);
   assert.match(out, /line one line two line three/);
 });
+
+test('deep history backfill: walks chats, pulls older messages until none are left, saves progress', async () => {
+  await manager.create({ id: 'bf', label: 'Backfill test' });
+  const bf = fake('bf');
+  const now = Math.floor(Date.now() / 1000);
+  for (const [jid, n] of [['919700000001@s.whatsapp.net', 2], ['919700000002@s.whatsapp.net', 0]]) {
+    await query(`INSERT INTO chats (account_id, jid, last_ts) VALUES ('bf', $1, $2)`, [jid, now]);
+    await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('bf', $1, $2, false, $3, 'text', 'latest')`, [jid, `L-${jid}`, now]);
+    bf[`older-${jid}`] = n; // how many older pages the "phone" has for this chat
+  }
+  const asked = [];
+  bf.fetchOlderAndWait = async (jid) => {
+    asked.push(jid);
+    if (!bf[`older-${jid}`]) return 0;
+    bf[`older-${jid}`]--;
+    const [o] = await query(`SELECT min(ts) AS ts FROM messages WHERE account_id = 'bf' AND chat_jid = $1`, [jid]);
+    await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('bf', $1, $2, false, $3, 'text', 'older')`, [jid, `O${asked.length}`, o.ts - 1000]);
+    return 1;
+  };
+  const r = await call('POST', '/api/accounts/bf/backfill', {});
+  assert.equal(r.status, 200);
+  assert.equal((await call('POST', '/api/accounts/bf/backfill', {})).status, 400, 'only one backfill at a time');
+  await outbox.enqueue({ account: 'bf', to: '9866666665', payload: { text: 'wake' }, source: 'api' });
+  const job = await until(async () => {
+    const [j] = await query(`SELECT * FROM jobs WHERE id = $1 AND status = 'done'`, [r.data.jobId]);
+    return j;
+  }, 8000);
+  assert.equal(job.payload.progress.added, 2);
+  assert.equal(job.payload.progress.done, 2);
+  assert.match(job.result, /2\/2 chats, \+2 older messages/);
+  // chat 1 asked until empty (2 pages + 1 empty), chat 2 asked once
+  assert.equal(asked.filter((j) => j.startsWith('919700000001')).length, 3);
+  assert.equal(asked.filter((j) => j.startsWith('919700000002')).length, 1);
+  assert.match(await mcp('list_accounts'), /deep history #\d+: done/);
+});

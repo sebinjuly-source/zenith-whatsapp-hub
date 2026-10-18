@@ -85,9 +85,11 @@ function buildServer() {
     await manager.refresh();
     for (const a of manager.list()) {
       const st = await store.accountStats(a.id);
+      const bf = await outbox.backfillStatus(a.id);
       lines.push(
         `${a.id}${a.isDefault ? ' (default)' : ''} | ${a.label} | purpose: ${a.purpose || '-'} | +${a.phone || '?'} | ${a.status} | ai:${a.settings.aiMode} | ` +
-          `${st.chats} chats (${st.groups} groups), ${st.contacts} contacts, ${st.messages} msgs since ${fmtTime(st.oldest_ts)} | sync:${a.sync?.state || '-'}`,
+          `${st.chats} chats (${st.groups} groups), ${st.contacts} contacts, ${st.messages} msgs since ${fmtTime(st.oldest_ts)} | sync:${a.sync?.state || '-'}` +
+          (bf ? ` | deep history #${bf.id}: ${bf.status}${bf.result ? ' — ' + bf.result : ''}` : ''),
       );
     }
     return lines.join('\n') || 'No accounts yet.';
@@ -325,6 +327,21 @@ function buildServer() {
     await outbox.reject(a.id);
     return `#${a.id} rejected.`;
   });
+
+  tool(
+    'backfill_history',
+    'Deep history: pull older messages from the phone chat by chat (50 at a time, paced like scrolling up) for numbers whose initial import was short. Runs in the background for a while (hours for ~1000 chats); progress shows in list_accounts. The phone must stay online.',
+    {
+      account: accountArg,
+      since: z.string().optional().describe('Stop at this date (YYYY-MM-DD). Omit to go back as far as the phone has.'),
+      include_groups: z.boolean().optional().describe('Also backfill group chats (default false)'),
+    },
+    async (a) => {
+      const s = await manager.resolve(a.account);
+      const r = await outbox.requestJob(s, 'backfill', { sinceTs: toTs(a.since) || 0, includeGroups: !!a.include_groups });
+      return `Deep history backfill queued as job #${r.jobId} for ${s.id}. It starts within ~10 s on the server connected to this number; check progress with list_accounts.`;
+    },
+  );
 
   tool('save_media', 'Download and keep a file from a message (e.g. a candidate\'s resume). Use the media id shown by get_messages.', {
     account: accountArg, chat: chatArg, message_id: z.string(),

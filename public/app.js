@@ -133,12 +133,26 @@
         h('dt', {}, 'Oldest message'), h('dd', {}, st.oldest_ts ? fmt(st.oldest_ts) : '–'),
         h('dt', {}, 'AI sending'), h('dd', {}, a.settings.aiMode === 'auto' ? 'Automatic' : 'Drafts for approval'),
         h('dt', {}, 'History'), h('dd', {}, syncView(a)),
+        a.backfill ? h('dt', {}, 'Deep history') : null,
+        a.backfill ? h('dd', {}, `${a.backfill.status}${a.backfill.result ? ' — ' + a.backfill.result : ''}`) : null,
       ),
       h('div', { class: 'row' },
         a.status === 'open'
           ? h('button', { class: 'btn small', onclick: () => { state.inbox.account = a.id; location.hash = 'inbox'; } }, 'Open inbox')
           : h('button', { class: 'btn small primary', onclick: () => openLink(a) }, a.status === 'qr' ? 'Show QR' : 'Link number'),
         h('button', { class: 'btn small', onclick: () => { state.settingsFor = a.id; location.hash = 'settings'; } }, 'Settings'),
+        a.status === 'open' || a.status === 'elsewhere'
+          ? (a.backfill && ['pending', 'running'].includes(a.backfill.status)
+              ? h('button', { class: 'btn small', onclick: guard(async () => { await api(`/api/jobs/${a.backfill.id}/cancel`, { method: 'POST' }); route(); }) }, 'Stop deep history')
+              : h('button', { class: 'btn small', title: 'Pull older messages chat by chat from the phone', onclick: guard(async () => {
+                  const since = prompt('Pull older messages back to which date? (YYYY-MM-DD, or leave empty for everything the phone has)', '');
+                  if (since === null) return;
+                  const groups = confirm('Include group chats too? (OK = yes, Cancel = people only)');
+                  await api(`/api/accounts/${a.id}/backfill`, { body: { since: since || undefined, groups } });
+                  toast('Deep history started — keep the phone online. Progress shows on this card.');
+                  route();
+                }) }, 'Deep history'))
+          : null,
         !a.isDefault ? h('button', { class: 'btn small', onclick: guard(async () => { await api(`/api/accounts/${a.id}`, { method: 'PATCH', body: { isDefault: true } }); route(); }) }, 'Make default') : null,
         a.status === 'open' || a.status === 'connecting' || a.status === 'replaced'
           ? h('button', { class: 'btn small danger', onclick: guard(async () => {

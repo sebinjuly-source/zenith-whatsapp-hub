@@ -332,6 +332,12 @@ export class Session extends EventEmitter {
     if (keepHistory) await this.saveChats(chats || []);
     const stored = keepHistory ? await this.ingest(messages || [], { history: true }) : 0;
     const s = this.sync;
+    if (syncType === SYNC_TYPE.ON_DEMAND) {
+      // Answer to "fetch older messages" / deep backfill — not part of the initial import.
+      s.backfilled = (s.backfilled || 0) + stored;
+      await this.saveSync();
+      return;
+    }
     s.state = 'syncing';
     s.chunks = (s.chunks || 0) + 1;
     s.messages = (s.messages || 0) + stored;
@@ -365,12 +371,96 @@ export class Session extends EventEmitter {
   async fetchOlder(chatJid, count = 50) {
     if (!this.sock) throw new Error('Not connected');
     const rows = await query(
-      'SELECT id, from_me, ts FROM messages WHERE account_id = $1 AND chat_jid = $2 ORDER BY ts ASC LIMIT 1',
+      'SELECT id, from_me, ts, sender_jid FROM messages WHERE account_id = $1 AND chat_jid = $2 ORDER BY ts ASC LIMIT 1',
       [this.id, chatJid],
     );
     if (!rows[0]) throw new Error('No messages stored for this chat yet');
-    const { id, from_me: fromMe, ts } = rows[0];
-    return this.sock.fetchMessageHistory(Math.min(count, 50), { remoteJid: chatJid, id, fromMe }, ts);
+    const { id, from_me: fromMe, ts, sender_jid: sender } = rows[0];
+    const key = { remoteJid: chatJid, id, fromMe };
+    if (isJidGroup(chatJid) && !fromMe && sender) key.participant = sender;
+    return this.sock.fetchMessageHistory(Math.min(count, 50), key, ts);
+  }
+
+  /** Ask for older messages of one chat and wait (up to waitMs) for them. Returns how many older ones arrived. */
+  async fetchOlderAndWait(chatJid, waitMs = 20000) {
+    const [before] = await query('SELECT min(ts) AS ts FROM messages WHERE account_id = $1 AND chat_jid = $2', [this.id, chatJid]);
+    if (!before?.ts) return 0;
+    let on;
+    const arrived = new Promise((resolve) => {
+      const t = setTimeout(resolve, waitMs);
+      on = (chats) => {
+        if (chats.has(chatJid)) {
+          clearTimeout(t);
+          resolve();
+        }
+      };
+      this.on('history-rows', on);
+    });
+    try {
+      await this.fetchOlder(chatJid, 50);
+      await arrived;
+    } finally {
+      this.off('history-rows', on);
+    }
+    await this.work; // make sure the chunk is fully written
+    const [after] = await query(
+      'SELECT count(*)::int AS n FROM messages WHERE account_id = $1 AND chat_jid = $2 AND ts < $3',
+      [this.id, chatJid, before.ts],
+    );
+    return after.n;
+  }
+
+  /**
+   * Deep history backfill: walk through chats (most recent first) and pull older messages from the phone,
+   * 50 at a time, until a chat has nothing older or reaches sinceTs. Progress is saved in the job row so
+   * it continues after a restart. Paced like a person scrolling up in WhatsApp Web.
+   */
+  async runBackfill(job) {
+    const p = job.payload || {};
+    const progress = { index: 0, done: 0, added: 0, ...(p.progress || {}) };
+    const sinceTs = p.sinceTs || 0;
+    const chats = await query(
+      `SELECT jid FROM chats WHERE account_id = $1 ${p.includeGroups ? '' : 'AND NOT is_group'} AND last_ts IS NOT NULL
+       ORDER BY last_ts DESC`,
+      [this.id],
+    );
+    progress.total = chats.length;
+    const save = (status = 'running', result) =>
+      query(
+        `UPDATE jobs SET payload = $2, status = $3, result = $4, updated_at = now(),
+           done_at = CASE WHEN $3 = 'running' OR $3 = 'pending' THEN NULL ELSE now() END
+         WHERE id = $1`,
+        [job.id, JSON.stringify({ ...p, progress }), status,
+          result ?? `${progress.done}/${progress.total} chats, +${progress.added} older messages`],
+      );
+    await save();
+    await logEvent(this.id, 'info', `Deep history backfill ${progress.index ? 'resumed' : 'started'} (${chats.length} chats)`);
+    for (; progress.index < chats.length; progress.index++) {
+      if (this.status !== 'open' || this.stopping) return save('pending'); // continues when connected again
+      if (progress.index % 5 === 0) {
+        const [j] = await query('SELECT status FROM jobs WHERE id = $1', [job.id]);
+        if (j?.status === 'cancelled') return;
+      }
+      const jid = chats[progress.index].jid;
+      for (let round = 0; round < 60; round++) {
+        const [o] = await query('SELECT min(ts) AS ts FROM messages WHERE account_id = $1 AND chat_jid = $2', [this.id, jid]);
+        if (!o?.ts || o.ts <= sinceTs) break;
+        let got = 0;
+        try {
+          got = await this.fetchOlderAndWait(jid);
+        } catch (err) {
+          this.log.warn({ jid, err: err.message }, 'backfill request failed');
+        }
+        if (!got) break;
+        progress.added += got;
+        await sleep((2500 + Math.random() * 2500) * config.timeScale);
+      }
+      progress.done++;
+      if (progress.index % 5 === 0) await save();
+      await sleep((1500 + Math.random() * 1500) * config.timeScale);
+    }
+    await save('done');
+    await logEvent(this.id, 'info', `Deep history backfill finished: ${progress.added} older messages from ${progress.total} chats`);
   }
 
   // -------------------------------------------------------------------------
@@ -432,6 +522,7 @@ export class Session extends EventEmitter {
     }
     if (seenContacts.length) await store.upsertContacts(this.id, seenContacts);
     await store.insertMessages(this.id, rows);
+    if (history && rows.length) this.emit('history-rows', new Set(rows.map((r) => r.chatJid)));
     if (live) {
       for (const r of rows) {
         if (r.fromMe) continue;

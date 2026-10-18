@@ -269,6 +269,18 @@ function startWorker(accountId) {
  */
 /** Queue an action that needs the live connection; runs here if this server holds the number. */
 export async function requestJob(session, kind, payload) {
+  if (kind === 'backfill') {
+    const [busy] = await query(
+      `SELECT id FROM jobs WHERE account_id = $1 AND kind = 'backfill' AND status IN ('pending','running')`,
+      [session.id],
+    );
+    if (busy) throw new Error(`A deep history backfill is already running for "${session.id}" (job #${busy.id})`);
+    const [job] = await query('INSERT INTO jobs (account_id, kind, payload) VALUES ($1,$2,$3) RETURNING id', [
+      session.id, kind, JSON.stringify(payload),
+    ]);
+    wake(session.id);
+    return { ran: false, jobId: job.id };
+  }
   if (session.status === 'open') return { ran: true, result: await JOBS[kind](session, payload) };
   await query('INSERT INTO jobs (account_id, kind, payload) VALUES ($1,$2,$3)', [session.id, kind, JSON.stringify(payload)]);
   return { ran: false };
@@ -278,7 +290,24 @@ const JOBS = {
   fetch_older: (session, { chat, count }) => session.fetchOlder(chat, count || 50),
 };
 
+/** Latest deep-history backfill job of an account (or null). */
+export async function backfillStatus(accountId) {
+  const [j] = await query(
+    `SELECT id, status, result, created_at, updated_at, payload FROM jobs WHERE account_id = $1 AND kind = 'backfill' ORDER BY id DESC LIMIT 1`,
+    [accountId],
+  );
+  return j || null;
+}
+
+const backfills = new Set(); // accounts with a backfill running in this process
+
 async function runJobs(session) {
+  // A backfill whose server died mid-way (no progress saved for 10 min) becomes pending again and resumes.
+  await query(
+    `UPDATE jobs SET status = 'pending' WHERE account_id = $1 AND kind = 'backfill' AND status = 'running'
+       AND updated_at < now() - interval '10 minutes'`,
+    [session.id],
+  );
   for (;;) {
     const [job] = await query(
       `UPDATE jobs SET status = 'running' WHERE id = (
@@ -287,6 +316,19 @@ async function runJobs(session) {
       [session.id],
     );
     if (!job) return;
+    if (job.kind === 'backfill') {
+      // Long-running: runs in the background so sending isn't blocked.
+      if (backfills.has(session.id)) {
+        await query(`UPDATE jobs SET status = 'pending' WHERE id = $1`, [job.id]);
+        return;
+      }
+      backfills.add(session.id);
+      session
+        .runBackfill(job)
+        .catch((err) => query(`UPDATE jobs SET status = 'failed', result = $2, done_at = now() WHERE id = $1`, [job.id, err.message]))
+        .finally(() => backfills.delete(session.id));
+      continue;
+    }
     try {
       const r = await JOBS[job.kind]?.(session, job.payload);
       await query(`UPDATE jobs SET status = 'done', result = $2, done_at = now() WHERE id = $1`, [job.id, String(r ?? '')]);

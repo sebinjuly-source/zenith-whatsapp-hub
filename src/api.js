@@ -70,7 +70,10 @@ export function buildApp() {
   api.get('/accounts', wrap(async (req, res) => {
     await manager.refresh();
     const list = manager.list();
-    for (const a of list) a.stats = await store.accountStats(a.id);
+    for (const a of list) {
+      a.stats = await store.accountStats(a.id);
+      a.backfill = await outbox.backfillStatus(a.id);
+    }
     res.json(list);
   }));
   api.post('/accounts', wrap(async (req, res) => res.json(await manager.create(req.body || {}))));
@@ -107,6 +110,16 @@ export function buildApp() {
   api.post('/accounts/:id/chats/:jid/older', wrap(async (req, res) => {
     const r = await outbox.requestJob(manager.get(req.params.id), 'fetch_older', { chat: req.params.jid, count: req.body?.count || 50 });
     res.json({ ok: true, note: r.ran ? 'Asked the phone — older messages arrive within a minute if it is online.' : 'Queued for the server connected to this number — older messages arrive in a minute or two.' });
+  }));
+  // Deep history: pull older messages chat by chat from the phone. Body: { since?: 'YYYY-MM-DD', groups?: bool }
+  api.post('/accounts/:id/backfill', wrap(async (req, res) => {
+    const s = manager.get(req.params.id);
+    const r = await outbox.requestJob(s, 'backfill', { sinceTs: toTs(req.body?.since) || 0, includeGroups: !!req.body?.groups });
+    res.json({ ok: true, jobId: r.jobId });
+  }));
+  api.post('/jobs/:id/cancel', wrap(async (req, res) => {
+    await query(`UPDATE jobs SET status = 'cancelled', done_at = now() WHERE id = $1 AND status IN ('pending','running')`, [req.params.id]);
+    res.json({ ok: true });
   }));
   api.get('/accounts/:id/contacts/:jid', wrap(async (req, res) => res.json(await store.getContact(req.params.id, req.params.jid))));
   api.patch('/accounts/:id/contacts/:jid', wrap(async (req, res) => res.json(await store.updateContact(req.params.id, req.params.jid, req.body || {}))));
