@@ -36,6 +36,8 @@ Only one server may run a given number at a time (a second one gets "Running els
 - **Reply to a message** — "↪ reply" in the inbox quotes it; REST replyTo, MCP reply_to_message_id.
 - **One person across numbers** — contact panel "Also on", MCP find_person.
 - **Rules** — per number: when (person/group, new/known sender, message types, words) → tag, status, save file, board task, auto-reply template (once per person per day), remind later.
+- **Lists + automatic follow-ups** — import a batch (Lists page, MCP import_list, REST /api/lists/import, or the Google Sheet script). Each person's status (not messaged / sent / replied / failed / opted out) is worked out from the real WhatsApp messages since the list's start date. "Message not-messaged + failed" sends each person their own prepared message. Follow-ups: silent for N days → a follow-up quoting your last message, up to N times, checked every 10 min.
+- **Google Sheets (optional)** — apps-script/ListSync.gs: paste into the sheet's Apps Script, set the API key and column names, run setup(). It pushes rows to the hub and writes status columns back every 15 min.
 - **Alerts** — set ALERT_PHONE to get a WhatsApp when a number is logged out or offline for 15+ min.
 - **Idempotency** — idempotencyKey / Idempotency-Key header: a retried request never sends twice.
 
