@@ -279,3 +279,33 @@ test('MCP: tool list and reading tools respond compactly', async () => {
   assert.match(await mcp('list_accounts'), /hotel \(default\)/);
   assert.match(await mcp('get_messages', { account: 'hotel', chat: 'nobody here' }), /Error: No chat matches/);
 });
+
+test('live-connection jobs: queued when another server holds the number, run by the holder', async () => {
+  const s = manager.get('hotel');
+  const calls = [];
+  s.fetchOlder = async (chat, count) => {
+    calls.push([chat, count]);
+    return 'REQ1';
+  };
+  s.status = 'elsewhere'; // pretend another server runs this number
+  const txt = await mcp('fetch_older_messages', { account: 'hotel', chat: '919812345678', count: 30 });
+  assert.match(txt, /Queued for the server connected/);
+  assert.equal(calls.length, 0);
+  s.status = 'open'; // now we hold it: the worker picks the job up
+  await outbox.enqueue({ account: 'hotel', to: '9866666664', payload: { text: 'wake' }, source: 'api' });
+  await until(() => calls.length === 1);
+  assert.deepEqual(calls[0], ['919812345678@s.whatsapp.net', 30]);
+  const [job] = await query(`SELECT status, result FROM jobs ORDER BY id DESC LIMIT 1`);
+  assert.equal(job.status, 'done');
+  assert.equal(job.result, 'REQ1');
+  // when we hold the number it runs immediately
+  assert.match(await mcp('fetch_older_messages', { account: 'hotel', chat: '919812345678' }), /Requested from the phone/);
+});
+
+test('MCP lists stay one line per item even for multi-line messages', async () => {
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hotel','919899999999@s.whatsapp.net','ML1',false, extract(epoch from now())::bigint, 'text', 'line one\nline two\n\nline three')`);
+  await query(`INSERT INTO chats (account_id, jid, last_ts, last_preview, last_from_me) VALUES ('hotel','919899999999@s.whatsapp.net', extract(epoch from now())::bigint, 'line one\nline two\n\nline three', false) ON CONFLICT DO NOTHING`);
+  const out = await mcp('list_chats', { account: 'hotel', query: '919899999999' });
+  assert.equal(out.split('\n').length, 1);
+  assert.match(out, /line one line two line three/);
+});

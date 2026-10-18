@@ -220,6 +220,7 @@ function startWorker(accountId) {
       await nap(15000);
       return;
     }
+    await runJobs(session);
     const s = session.settings;
     const gapOver = Date.now() >= nextAutomatedAt;
     const automatedAllowed = gapOver && insideSendingWindow(s) && (await automatedSentToday(accountId)) < s.dailyCap;
@@ -235,7 +236,8 @@ function startWorker(accountId) {
     if (!row) {
       // Wait for new work, or until the random gap ends, whichever is first.
       const wait = !gapOver ? Math.max(1000, nextAutomatedAt - Date.now()) : automatedAllowed ? 60000 : 5 * 60000;
-      await nap(Math.min(wait, 5 * 60000));
+      // Poll at least every 10 s: approvals/jobs may come from another server, which can't wake us.
+      await nap(Math.min(wait, 10000));
       return;
     }
     const automated = AUTOMATED.includes(row.source);
@@ -265,6 +267,35 @@ function startWorker(accountId) {
  * have gone out, so mark it failed instead of resending blindly. Safe with two servers: a live send
  * never takes this long (sending times out after 2 min).
  */
+/** Queue an action that needs the live connection; runs here if this server holds the number. */
+export async function requestJob(session, kind, payload) {
+  if (session.status === 'open') return { ran: true, result: await JOBS[kind](session, payload) };
+  await query('INSERT INTO jobs (account_id, kind, payload) VALUES ($1,$2,$3)', [session.id, kind, JSON.stringify(payload)]);
+  return { ran: false };
+}
+
+const JOBS = {
+  fetch_older: (session, { chat, count }) => session.fetchOlder(chat, count || 50),
+};
+
+async function runJobs(session) {
+  for (;;) {
+    const [job] = await query(
+      `UPDATE jobs SET status = 'running' WHERE id = (
+         SELECT id FROM jobs WHERE account_id = $1 AND status = 'pending' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
+       RETURNING *`,
+      [session.id],
+    );
+    if (!job) return;
+    try {
+      const r = await JOBS[job.kind]?.(session, job.payload);
+      await query(`UPDATE jobs SET status = 'done', result = $2, done_at = now() WHERE id = $1`, [job.id, String(r ?? '')]);
+    } catch (err) {
+      await query(`UPDATE jobs SET status = 'failed', result = $2, done_at = now() WHERE id = $1`, [job.id, err.message]);
+    }
+  }
+}
+
 export async function sweepStuck() {
   const rows = await query(
     `UPDATE outbox SET status = 'failed', error = 'Interrupted (server restart) — check the chat before resending'

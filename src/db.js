@@ -149,6 +149,19 @@ CREATE INDEX IF NOT EXISTS tasks_board ON tasks (account_id, status);
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS task_id BIGINT;
 CREATE INDEX IF NOT EXISTS outbox_task ON outbox (task_id);
 
+-- Actions that need the live WhatsApp connection, run by whichever server holds the number.
+CREATE TABLE IF NOT EXISTS jobs (
+  id BIGSERIAL PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'pending',
+  result TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  done_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS jobs_pending ON jobs (account_id, status);
+
 CREATE TABLE IF NOT EXISTS events (
   id BIGSERIAL PRIMARY KEY,
   account_id TEXT,

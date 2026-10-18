@@ -80,19 +80,19 @@ export async function loadOutgoing({ url, base64, mimetype, fileName }) {
     return { buffer, mimetype: mimetype || mime.lookup(fileName || '') || 'application/octet-stream', fileName };
   }
   if (!url) throw new Error('Attachment needs a url or base64');
-  // Google Drive "view" links → direct download links
+  // Google Drive share links (…/file/d/ID/view, open?id=ID) → the direct file. Use export=view:
+  // export=download sometimes stalls for a minute before redirecting.
   const drive = url.match(/drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?(?:export=\w+&)?id=)([\w-]+)/);
-  const fetchUrl = drive ? `https://drive.google.com/uc?export=download&id=${drive[1]}` : url;
+  const fetchUrl = drive ? `https://drive.google.com/uc?export=view&id=${drive[1]}` : url;
   const res = await fetch(fetchUrl, { redirect: 'follow', signal: AbortSignal.timeout(60000) });
   if (!res.ok) throw new Error(`Could not download attachment (${res.status})`);
   const buffer = Buffer.from(await res.arrayBuffer());
   const ctype = (res.headers.get('content-type') || '').split(';')[0];
   const disp = res.headers.get('content-disposition') || '';
   const dispName = disp.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i)?.[1];
-  const name = fileName || (dispName && decodeURIComponent(dispName)) || decodeURIComponent(new URL(url).pathname.split('/').pop() || '') || 'file';
-  return {
-    buffer,
-    mimetype: mimetype || (ctype && ctype !== 'application/octet-stream' ? ctype : mime.lookup(name) || 'application/octet-stream'),
-    fileName: name,
-  };
+  let name = fileName || (dispName && decodeURIComponent(dispName)) || decodeURIComponent(new URL(url).pathname.split('/').pop() || '') || 'file';
+  const type = mimetype || (ctype && ctype !== 'application/octet-stream' ? ctype : mime.lookup(name) || 'application/octet-stream');
+  // Links like Drive's ".../uc" carry no extension — add one so the file opens on the phone.
+  if (!/\.[a-z0-9]{2,5}$/i.test(name) && mime.extension(type)) name = `${name === 'uc' || name === 'view' ? 'file' : name}.${mime.extension(type)}`;
+  return { buffer, mimetype: type, fileName: name };
 }

@@ -29,7 +29,10 @@ class Manager extends EventEmitter {
     for (const acc of accounts) {
       let s = this.sessions.get(acc.id);
       if (!s) s = this.attach(acc);
-      else Object.assign(s.account, acc);
+      else {
+        Object.assign(s.account, acc);
+        if (s.status !== 'open') s.sync = { ...(acc.sync || {}) }; // another server runs it: show its progress
+      }
       if (acc.enabled && s.status === 'stopped' && !s.sock && !s.stopping && (await hasAuthState(acc.id))) {
         s.start().catch((err) => logEvent(acc.id, 'error', `Start failed: ${err.message}`));
       }

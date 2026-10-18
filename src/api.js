@@ -105,8 +105,8 @@ export function buildApp() {
     }));
   }));
   api.post('/accounts/:id/chats/:jid/older', wrap(async (req, res) => {
-    const reqId = await manager.get(req.params.id).fetchOlder(req.params.jid, req.body?.count || 50);
-    res.json({ ok: true, requestId: reqId, note: 'Older messages arrive in the background within a minute if the phone is online.' });
+    const r = await outbox.requestJob(manager.get(req.params.id), 'fetch_older', { chat: req.params.jid, count: req.body?.count || 50 });
+    res.json({ ok: true, note: r.ran ? 'Asked the phone — older messages arrive within a minute if it is online.' : 'Queued for the server connected to this number — older messages arrive in a minute or two.' });
   }));
   api.get('/accounts/:id/contacts/:jid', wrap(async (req, res) => res.json(await store.getContact(req.params.id, req.params.jid))));
   api.patch('/accounts/:id/contacts/:jid', wrap(async (req, res) => res.json(await store.updateContact(req.params.id, req.params.jid, req.body || {}))));

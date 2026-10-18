@@ -22,7 +22,11 @@ const fmtTime = (ts) =>
         timeZone: config.tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
       }).replace(',', '')
     : '-';
-const trim = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s || '');
+// One line per item in lists: collapse newlines/whitespace, then cut.
+const trim = (s, n) => {
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  return t.length > n ? t.slice(0, n) + '…' : t;
+};
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 const fail = (err) => ({ content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true });
 const safe = (fn) => async (args) => {
@@ -336,8 +340,10 @@ function buildServer() {
   }, async (a) => {
     const s = await manager.resolve(a.account);
     const jid = await resolveChat(s.id, a.chat);
-    await s.fetchOlder(jid, a.count || 50);
-    return 'Requested. Call get_messages again in about a minute.';
+    const r = await outbox.requestJob(s, 'fetch_older', { chat: jid, count: a.count || 50 });
+    return r.ran
+      ? 'Requested from the phone. Call get_messages again in about a minute.'
+      : 'Queued for the server connected to this number (runs within ~10 s). Call get_messages again in a minute or two.';
   });
 
   const taskLine = (t) =>
