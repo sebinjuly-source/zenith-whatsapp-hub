@@ -608,3 +608,86 @@ test('rules: a PDF from someone new on the hiring number gets tagged, saved, a t
   assert.match(await mcp('list_rules', { account: 'hiring' }), /Resumes .*ran 2x/);
   assert.match(await mcp('recent_activity', { account: 'hiring', who: 'system' }), /Rule "Resumes" on 919788888886: tagged candidate/);
 });
+
+test('lists: import, status from real messages, send to new+failed only, follow-ups, outcomes, export', async () => {
+  const listsMod = await import('../src/lists.js');
+  const now = Math.floor(Date.now() / 1000);
+  const P = (n) => `91970000000${n}@s.whatsapp.net`;
+  // history in WhatsApp: #1 messaged 3 days ago, no reply; #2 messaged + replied; #3 messaged long BEFORE the list started (doesn't count)
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
+    ('hiring',$1,'L1',true,$4,'text','job offer'),
+    ('hiring',$2,'L2',true,$4,'text','job offer'), ('hiring',$2,'L2r',false,$4 + 600,'text','Yes interested, location?'),
+    ('hiring',$3,'L3',true,$5,'text','old batch message')`,
+  [P(1), P(2), P(3), now - 3 * 86400, now - 90 * 86400]);
+  const since = new Date((now - 10 * 86400) * 1000).toISOString();
+  const imp = await mcp('import_list', {
+    account: 'hiring', name: 'Chef Batch T', since,
+    members: [
+      { phone: '9700000001', name: 'Suresh Kumar', message: 'Namaste Suresh ji,%0AChef chahiye.%0AInterested?' },
+      { phone: '9700000002', name: 'Vinay', message: 'Namaste Vinay ji' },
+      { phone: '9700000003', name: 'Old Contact', message: 'Namaste Old ji' },
+      { phone: '9700000004', name: 'Never Sent', message: 'Namaste Never ji,%0Aline two' },
+      { phone: '123', name: 'Bad phone' },
+    ],
+  });
+  assert.match(imp, /4 people imported/);
+  assert.match(imp, /Bad phone \(invalid phone\)/);
+  const l = await listsMod.getList('Chef Batch T');
+  let rows = await listsMod.listMembers(l.id);
+  const st = Object.fromEntries(rows.map((r) => [r.phone, r.status]));
+  assert.deepEqual(st, { '919700000001': 'sent', '919700000002': 'replied', '919700000003': 'new', '919700000004': 'new' });
+  assert.equal(rows.find((r) => r.phone === '919700000004').message, 'Namaste Never ji,\nline two', '%0A decoded to a line break');
+  assert.match(await mcp('list_lists', { account: 'hiring' }), /Chef Batch T .*4 people: 2 new, 0 queued, 1 sent\/no reply, 1 replied/);
+  assert.match(await mcp('list_members', { list: 'Chef Batch T', status: 'replied' }), /919700000002 \| Vinay \| replied .*"Yes interested, location\?"/);
+
+  // send to new + failed → only #3 and #4, each with their own message; hiring is in approve mode → drafts
+  const s = await mcp('send_to_list', { list: 'Chef Batch T' });
+  assert.match(s, /2 messages saved as drafts/);
+  const drafts = await query(`SELECT to_jid, payload FROM outbox WHERE list_id = $1 ORDER BY to_jid`, [l.id]);
+  assert.deepEqual(drafts.map((d) => d.to_jid), [P(3), P(4)]);
+  assert.equal(drafts[1].payload.text, 'Namaste Never ji,\nline two');
+  await listsMod.refreshList(l.id);
+  assert.equal((await listsMod.listMembers(l.id, { status: 'queued' })).length, 2);
+  // approve → sent → statuses become "sent" (message recorded like a real send)
+  const before = sent.length;
+  const taskId = (await query(`SELECT task_id FROM outbox WHERE list_id = $1 LIMIT 1`, [l.id]))[0].task_id;
+  await call('POST', `/api/tasks/${taskId}/approve`);
+  await until(() => sent.length >= before + 2, 8000);
+  for (const x of sent.slice(before)) {
+    await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hiring',$1,$2,true,extract(epoch from now())::bigint,'text','sent')`, [x.jid, 'S' + Math.random()]);
+  }
+  await listsMod.refreshList(l.id);
+  assert.equal((await listsMod.listMembers(l.id, { status: 'sent' })).length, 3);
+
+  // a failed send shows as failed with the reason
+  await query(`INSERT INTO list_members (list_id, jid, phone, name, message) VALUES ($1,$2,'919700000005','Fail Case','hi')`, [l.id, P(5)]);
+  await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, error, list_id) VALUES ('hiring',$1,'{"text":"hi"}','campaign','failed','919700000005 is not on WhatsApp',$2)`, [P(5), l.id]);
+  await listsMod.refreshList(l.id);
+  const f5 = (await listsMod.listMembers(l.id, { status: 'failed' }))[0];
+  assert.equal(f5.phone, '919700000005');
+  assert.match(f5.error, /not on WhatsApp/);
+
+  // follow-ups: only #1 qualifies (messaged 3 days ago, no reply); #2 replied; #3/#4 just messaged
+  assert.match(await mcp('set_followup', { list: 'Chef Batch T', enabled: true, after_days: 2, max: 1, text: 'Namaste {first_name} ji, kya aap interested hain?' }), /on — after 2 day/);
+  await listsMod.runFollowups();
+  const fu = await query(`SELECT to_jid, payload, status FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
+  assert.deepEqual(fu.map((x) => x.to_jid), [P(1)]);
+  assert.equal(fu[0].payload.text, 'Namaste Suresh ji, kya aap interested hain?');
+  assert.equal(fu[0].payload.replyTo, 'L1', 'quotes our original message');
+  assert.equal(fu[0].status, 'draft', 'approve mode: follow-ups wait for approval');
+  await listsMod.runFollowups();
+  assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]))[0].n, 1, 'not drafted twice while pending');
+  // once sent, max=1 stops further follow-ups even after more silent days
+  await query(`UPDATE outbox SET status = 'sent' WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hiring',$1,'FU1',true,$2,'text','follow-up')`, [P(1), now - 3 * 86400 + 60]);
+  await listsMod.runFollowups();
+  assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]))[0].n, 1);
+
+  // outcome + export for the sheet
+  assert.match(await mcp('update_list_member', { list: 'Chef Batch T', phone: '9700000002', outcome: 'wants-travel-allowance', notes: 'Lives far; asked for fuel help' }), /Vinay: outcome wants-travel-allowance/);
+  const exp = (await call('GET', `/api/lists/${l.id}/export`)).data;
+  const v = exp.find((r) => r.phone === '919700000002');
+  assert.equal(v.status, 'replied');
+  assert.equal(v.outcome, 'wants-travel-allowance');
+  assert.equal(v.last_reply_text, 'Yes interested, location?');
+});

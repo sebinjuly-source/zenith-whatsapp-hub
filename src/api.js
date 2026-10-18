@@ -19,6 +19,7 @@ import * as tasks from './tasks.js';
 import * as templates from './templates.js';
 import * as rules from './rules.js';
 import { findPerson } from './people.js';
+import * as lists from './lists.js';
 import { logEvent } from './db.js';
 import { normalizeSettings } from './settings.js';
 import { describeSettingsChange, HISTORY_MODES } from './describe.js';
@@ -227,6 +228,44 @@ export function buildApp() {
     await act(req, r.account_id, `Deleted rule "${r.name}"`);
     res.json({ ok: true });
   }));
+
+  // ---- Contact lists (candidate batches) + follow-ups
+  api.get('/lists', wrap(async (req, res) => {
+    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1)', [req.query.account || null])) await lists.refreshList(l.id);
+    res.json(await lists.listLists(req.query.account));
+  }));
+  // Create/extend a list: { account, name, since?, source?, members: [{ phone, name, message?, ...fields }], followup? }
+  api.post('/lists/import', wrap(async (req, res) => {
+    const r = await lists.importList(req.body || {});
+    await act(req, r.list.account_id, `Imported ${r.imported} people into list "${r.list.name}"${r.skipped.length ? ` (${r.skipped.length} skipped)` : ''}`);
+    res.json(r);
+  }));
+  api.get('/lists/:id/members', wrap(async (req, res) => {
+    const l = await lists.getList(req.params.id);
+    await lists.refreshList(l.id);
+    res.json(await lists.listMembers(l.id, { status: req.query.status, outcome: req.query.outcome }));
+  }));
+  api.patch('/lists/:id/members/:phone', wrap(async (req, res) => {
+    const l = await lists.getList(req.params.id);
+    const m = await lists.updateMember(l.id, req.params.phone, req.body || {});
+    await act(req, l.account_id, `List "${l.name}": ${m.name || m.phone}${req.body?.outcome !== undefined ? ' → ' + (req.body.outcome || 'no outcome') : ''}${req.body?.notes ? ' (note)' : ''}`);
+    res.json(m);
+  }));
+  api.patch('/lists/:id/followup', wrap(async (req, res) => {
+    const l = await lists.getList(req.params.id);
+    const u = await lists.setFollowup(l.id, req.body || {});
+    const f = u.followup;
+    await act(req, l.account_id, `Follow-ups for "${l.name}": ${f.enabled ? `on — after ${f.afterDays} day(s), up to ${f.max}` : 'off'}`);
+    res.json(u);
+  }));
+  api.post('/lists/:id/send', wrap(async (req, res) => {
+    const l = await lists.getList(req.params.id);
+    const r = await lists.sendToList(l.id, { ...(req.body || {}), createdBy: 'you' });
+    await act(req, l.account_id, `List "${l.name}": sending to ${r.queued} (${(req.body?.statuses || ['new', 'failed']).join(', ')})`);
+    res.json(r);
+  }));
+  // Rows with status columns, e.g. for the Google Sheets script to write back
+  api.get('/lists/:id/export', wrap(async (req, res) => res.json(await lists.exportRows((await lists.getList(req.params.id)).id))));
 
   // ---- One person across all numbers
   api.get('/people', wrap(async (req, res) => res.json(await findPerson(req.query.q))));

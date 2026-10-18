@@ -18,6 +18,7 @@ import * as tasks from './tasks.js';
 import * as templates from './templates.js';
 import * as rules from './rules.js';
 import { findPerson } from './people.js';
+import * as lists from './lists.js';
 import { logEvent } from './db.js';
 import { HISTORY_MODES } from './describe.js';
 import { normalizeSettings } from './settings.js';
@@ -476,6 +477,74 @@ function buildServer() {
     });
     await ai(s.id, `Saved rule "${r.name}"`);
     return `Rule #${r.id} "${r.name}" saved (${r.enabled ? 'on' : 'off'}).`;
+  });
+
+  const listArg = z.string().describe('List id or name, e.g. "Chef candidates – Batch 5"');
+  const d = (t) => (t ? fmtTime(Math.floor(new Date(t).getTime() / 1000)) : '-');
+
+  tool('list_lists', 'Contact lists (e.g. candidate batches) with counts per status: new (not messaged), queued, sent (no reply), replied, failed, opted_out — plus follow-up settings.', {
+    account: z.string().optional(),
+  }, async (a) => {
+    const acc = a.account ? (await manager.resolve(a.account)).id : null;
+    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1)', [acc])) await lists.refreshList(l.id);
+    const rows = await lists.listLists(acc);
+    return rows.length
+      ? rows.map((l) => `#${l.id} | ${l.name} | ${l.account_id} | ${l.total} people: ${l.new} new, ${l.queued} queued, ${l.sent} sent/no reply, ${l.replied} replied, ${l.failed} failed, ${l.opted_out} opted out | follow-up: ${l.followup?.enabled ? `after ${l.followup.afterDays}d, max ${l.followup.max}` : 'off'}`).join('\n')
+      : 'No lists yet.';
+  });
+
+  tool('list_members', 'People on a list, one line each: phone | name | status | outcome | last sent | last reply (+ their last message) | follow-ups | error. Filter by status to stay short.', {
+    list: listArg,
+    status: z.string().optional().describe('Comma list of: new, queued, sent, replied, failed, opted_out'),
+    outcome: z.string().optional(),
+  }, async (a) => {
+    const l = await lists.getList(a.list);
+    await lists.refreshList(l.id);
+    const rows = await lists.listMembers(l.id, { status: a.status, outcome: a.outcome });
+    return rows.length
+      ? rows.map((m) => [m.phone, trim(m.name, 25), m.status, m.outcome ? `outcome:${m.outcome}` : null, `sent ${d(m.last_sent_at)}`,
+          m.last_reply_at ? `reply ${d(m.last_reply_at)}: "${trim(m.last_reply_text, 80)}"` : null, m.followups_sent ? `follow-ups:${m.followups_sent}` : null,
+          m.error ? `error:${trim(m.error, 60)}` : null, m.notes ? `notes:${trim(m.notes, 60)}` : null].filter(Boolean).join(' | ')).join('\n')
+      : 'Nobody matches.';
+  });
+
+  tool('import_list', 'Create or extend a contact list (e.g. candidates from WorkIndia). Existing phones are updated, not duplicated. "since" = ignore messages before this date when working out who was already messaged.', {
+    account: accountArg, name: z.string(), since: z.string().optional(), source: z.string().optional(),
+    members: z.array(z.object({ phone: z.string(), name: z.string().optional(), message: z.string().optional().describe('Personal first message for this person') }).passthrough()).min(1),
+  }, async (a) => {
+    const r = await lists.importList({ account: a.account, name: a.name, since: a.since, source: a.source, members: a.members });
+    await ai(r.list.account_id, `Imported ${r.imported} people into list "${r.list.name}"`);
+    return `List #${r.list.id} "${r.list.name}": ${r.imported} people imported/updated${r.skipped.length ? `, skipped ${r.skipped.length}: ${r.skipped.map((x) => x.row + ' (' + x.reason + ')').join('; ')}` : ''}.`;
+  });
+
+  tool('send_to_list', 'Message the people on a list with the given statuses (default new + failed). Each gets their own prepared message from the list, unless text/template is given. Follows the number\'s approval mode, delay, daily cap and hours. Use only_phones to pick specific people.', {
+    list: listArg, statuses: z.array(z.enum(['new', 'failed', 'sent', 'replied'])).optional(),
+    text: z.string().optional(), template: z.string().optional(), only_phones: z.array(z.string()).optional(),
+  }, async (a) => {
+    const l = await lists.getList(a.list);
+    const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, onlyPhones: a.only_phones, createdBy: 'ai', source: 'mcp' });
+    await ai(l.account_id, `List "${l.name}": ${r.queued} messages ${r.mode === 'approve' ? 'drafted' : 'queued'}`);
+    const skipped = r.skipped.length ? ` Skipped: ${r.skipped.map((x) => x.to + ' (' + x.reason + ')').join('; ')}` : '';
+    return r.task ? `Task #${r.task.id}: ${r.queued} messages ${r.mode === 'approve' ? 'saved as drafts — waiting for approval on the board' : 'queued'}.${skipped}` : `Nothing to send.${skipped}`;
+  });
+
+  tool('set_followup', 'Automatic follow-ups for a list: people who were messaged but have not replied after N days get the follow-up message (quoting our last message), up to max times. Checked every 10 minutes.', {
+    list: listArg, enabled: z.boolean(), after_days: z.number().optional(), max: z.number().int().optional(),
+    text: z.string().optional().describe('Follow-up message; may use {first_name}, {name}'), template: z.string().optional(),
+  }, async (a) => {
+    const l = await lists.getList(a.list);
+    const u = await lists.setFollowup(l.id, { enabled: a.enabled, afterDays: a.after_days, max: a.max, text: a.text, template: a.template });
+    await ai(l.account_id, `Follow-ups for "${l.name}": ${u.followup.enabled ? 'on' : 'off'}`);
+    return `Follow-ups for "${l.name}": ${u.followup.enabled ? `on — after ${u.followup.afterDays} day(s) without reply, up to ${u.followup.max}` : 'off'}.`;
+  });
+
+  tool('update_list_member', 'Record the outcome for a person on a list (e.g. interested, not-interested, trial-booked, hired, wants-travel-allowance) and/or notes.', {
+    list: listArg, phone: z.string(), outcome: z.string().optional(), notes: z.string().optional(),
+  }, async (a) => {
+    const l = await lists.getList(a.list);
+    const m = await lists.updateMember(l.id, a.phone, { outcome: a.outcome, notes: a.notes });
+    await ai(l.account_id, `List "${l.name}": ${m.name || m.phone} → ${m.outcome || 'no outcome'}`);
+    return `${m.name || m.phone}: outcome ${m.outcome || '-'}${m.notes ? ', notes saved' : ''}.`;
   });
 
   tool('save_media', 'Download and keep a file from a message (e.g. a candidate\'s resume). Use the media id shown by get_messages.', {

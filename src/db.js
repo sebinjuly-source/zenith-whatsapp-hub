@@ -197,6 +197,42 @@ ALTER TABLE chats ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'open';
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS snooze_note TEXT;
 
+-- Contact lists (candidate batches etc.) with per-person status worked out from WhatsApp messages
+CREATE TABLE IF NOT EXISTS lists (
+  id BIGSERIAL PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  source TEXT,
+  since TIMESTAMPTZ NOT NULL DEFAULT now(),
+  followup JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (account_id, name)
+);
+CREATE TABLE IF NOT EXISTS list_members (
+  list_id BIGINT NOT NULL,
+  jid TEXT NOT NULL,
+  phone TEXT,
+  name TEXT,
+  fields JSONB NOT NULL DEFAULT '{}',
+  message TEXT,
+  status TEXT NOT NULL DEFAULT 'new',
+  outcome TEXT,
+  notes TEXT,
+  error TEXT,
+  first_sent_at TIMESTAMPTZ,
+  last_sent_at TIMESTAMPTZ,
+  last_reply_at TIMESTAMPTZ,
+  replies INT NOT NULL DEFAULT 0,
+  followups_sent INT NOT NULL DEFAULT 0,
+  row_ref TEXT,
+  added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (list_id, jid)
+);
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS list_id BIGINT;
+CREATE INDEX IF NOT EXISTS outbox_list ON outbox (list_id, to_jid);
+
 CREATE TABLE IF NOT EXISTS events (
   id BIGSERIAL PRIMARY KEY,
   account_id TEXT,

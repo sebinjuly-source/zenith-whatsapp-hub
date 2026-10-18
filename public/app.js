@@ -71,6 +71,7 @@
           link('accounts', 'Numbers'),
           link('inbox', 'Inbox'),
           link('outbox', 'Drafts & outbox', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null),
+          link('lists', 'Lists'),
           link('templates', 'Templates'),
           link('rules', 'Rules'),
           link('settings', 'Settings'),
@@ -616,6 +617,94 @@
     ]);
   }
 
+  // ---------- lists ----------
+  const STATUS_LABEL = { new: 'Not messaged', queued: 'Queued', sent: 'Sent · no reply', replied: 'Replied', failed: 'Failed', opted_out: 'Opted out' };
+  async function viewLists() {
+    await loadAccounts();
+    const all = await api('/api/lists');
+    const sel = (state.listId && all.find((l) => l.id === state.listId)) || all[0];
+    state.listId = sel?.id;
+    const fmtD = (t) => (t ? new Date(t).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '–');
+    const picker = h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(260px,1fr));margin-bottom:16px' },
+      all.map((l) => h('div', { class: 'card', style: `cursor:pointer;${l.id === sel?.id ? 'border-color:var(--accent)' : ''}`, onclick: () => { state.listId = l.id; state.listFilter = ''; viewLists(); } },
+        h('b', {}, l.name), h('div', { class: 'muted', style: 'font-size:12px' }, l.account_label, ' · ', l.total, ' people'),
+        h('div', { style: 'margin-top:6px' }, ['new', 'sent', 'replied', 'failed'].map((k) => h('span', { class: 'tag' }, `${STATUS_LABEL[k]}: ${l[k]}`)),
+          l.followup?.enabled ? h('span', { class: 'tag' }, `follow-up after ${l.followup.afterDays}d`) : null))));
+    const importForm = h('details', { class: 'card', style: 'margin-top:16px' }, h('summary', {}, 'Import a list (paste rows)'),
+      h('form', { onsubmit: guard(async (e) => {
+        e.preventDefault();
+        const f = e.target;
+        const members = f.rows.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
+          const [phone, name, ...msg] = l.split('\t').length > 1 ? l.split('\t') : l.split(',');
+          return { phone: phone.trim(), name: (name || '').trim() || undefined, message: msg.join(',').trim() || undefined };
+        });
+        const r = await api('/api/lists/import', { body: { account: f.account.value, name: f.name.value, since: f.since.value || undefined, members } });
+        toast(`Imported ${r.imported}${r.skipped.length ? `, skipped ${r.skipped.length}` : ''}`);
+        state.listId = r.list.id;
+        viewLists();
+      }) },
+        h('label', { class: 'field' }, h('span', {}, 'List name'), h('input', { type: 'text', name: 'name', required: true, placeholder: 'Chef candidates – Batch 6' })),
+        h('label', { class: 'field' }, h('span', {}, 'Number'), h('select', { name: 'account' }, state.accounts.map((a) => h('option', { value: a.id }, a.label)))),
+        h('label', { class: 'field' }, h('span', {}, 'Count messages from (optional)'), h('input', { type: 'date', name: 'since' }), h('em', {}, 'Messages to these people before this date are ignored when deciding who was already messaged. Empty = from today.')),
+        h('label', { class: 'field' }, h('span', {}, 'People — one per line: phone, name, personal message (optional). Tab-separated also works (paste from a sheet).'), h('textarea', { name: 'rows', rows: 6, required: true })),
+        h('button', { class: 'btn primary', type: 'submit' }, 'Import')));
+    if (!sel) return shell([h('h1', {}, 'Lists'), h('p', { class: 'sub' }, 'Candidate batches and other contact lists, with who was messaged, who replied and automatic follow-ups.'), importForm]);
+
+    const filter = state.listFilter || '';
+    const members = await api(`/api/lists/${sel.id}/members${filter ? '?status=' + filter : ''}`);
+    const f = sel.followup || {};
+    const tabs = h('div', { class: 'seg', style: 'max-width:720px;margin:10px 0' },
+      [['', `All ${sel.total}`], ['new', `Not messaged ${sel.new}`], ['sent', `No reply ${sel.sent}`], ['replied', `Replied ${sel.replied}`], ['failed', `Failed ${sel.failed}`], ['queued', `Queued ${sel.queued}`]].map(([k, l]) =>
+        h('button', { class: filter === k ? 'on' : '', onclick: () => { state.listFilter = k; viewLists(); } }, l)));
+    const sendBtn = h('button', { class: 'btn primary', disabled: !(sel.new + sel.failed), onclick: guard(async () => {
+      if (!confirm(`Message the ${sel.new + sel.failed} people not messaged yet or failed, each with their own prepared message?`)) return;
+      const r = await api(`/api/lists/${sel.id}/send`, { body: { statuses: ['new', 'failed'] } });
+      alert(`${r.queued} messages ${r.mode === 'approve' ? 'saved for approval on the Board (Waiting for approval)' : 'queued'}.` + (r.skipped.length ? `\nSkipped: ${r.skipped.map((x) => x.to + ' – ' + x.reason).join(', ')}` : ''));
+      viewLists();
+    }) }, `Message not-messaged + failed (${sel.new + sel.failed})`);
+    const fuForm = h('form', { class: 'card', onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const x = e.target;
+      await api(`/api/lists/${sel.id}/followup`, { method: 'PATCH', body: { enabled: x.enabled.checked, afterDays: Number(x.afterDays.value), max: Number(x.max.value), text: x.text.value } });
+      toast('Follow-up settings saved');
+      viewLists();
+    }) },
+      h('h2', {}, 'Automatic follow-ups'),
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: !!f.enabled }), h('span', {}, 'On', h('em', {}, 'People messaged but silent get this, quoting your last message. Uses the number\'s approval mode, delay and daily limit.'))),
+      h('div', { class: 'row' },
+        h('label', { class: 'field grow' }, h('span', {}, 'After (days without reply)'), h('input', { type: 'number', name: 'afterDays', min: 0.5, step: 0.5, value: f.afterDays ?? 2 })),
+        h('label', { class: 'field grow' }, h('span', {}, 'At most (follow-ups per person)'), h('input', { type: 'number', name: 'max', min: 0, max: 5, value: f.max ?? 1 }))),
+      h('label', { class: 'field' }, h('span', {}, 'Follow-up message'), h('textarea', { name: 'text', rows: 3, value: f.text || '', placeholder: 'Namaste {first_name} ji, kya aap abhi bhi interested hain? Reply karein ya call karein. - Zenith Suites HR' })),
+      h('button', { class: 'btn primary', type: 'submit' }, 'Save follow-ups'));
+    const table = h('table', { class: 'list' },
+      h('thead', {}, h('tr', {}, ['#', 'Name', 'Phone', 'Status', 'Last sent', 'Reply', 'Outcome / notes'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, members.map((m) => {
+        const outcome = h('input', { type: 'text', value: m.outcome || '', placeholder: 'interested, trial booked…', style: 'width:150px;padding:4px 6px;font-size:12.5px', onchange: guard(async (e) => {
+          await api(`/api/lists/${sel.id}/members/${m.phone}`, { method: 'PATCH', body: { outcome: e.target.value } });
+          toast('Saved');
+        }) });
+        return h('tr', {},
+          h('td', {}, m.row_ref || ''), h('td', {}, m.name || ''), h('td', { class: 'mono' }, m.phone),
+          h('td', {}, h('span', { class: 'tag', style: m.status === 'replied' ? 'background:var(--accent-soft)' : m.status === 'failed' ? 'background:var(--bad-soft)' : '' }, STATUS_LABEL[m.status] || m.status),
+            m.followups_sent ? h('div', { class: 'muted', style: 'font-size:11px' }, `${m.followups_sent} follow-up(s)`) : null,
+            m.error ? h('div', { style: 'color:var(--bad);font-size:11px' }, m.error) : null),
+          h('td', { style: 'white-space:nowrap' }, fmtD(m.last_sent_at)),
+          h('td', { style: 'max-width:260px' }, m.last_reply_at ? [h('div', { style: 'font-size:11px', class: 'muted' }, fmtD(m.last_reply_at)), m.last_reply_text || ''] : '–'),
+          h('td', {}, outcome, m.notes ? h('div', { class: 'muted', style: 'font-size:11px' }, m.notes) : null));
+      })));
+    shell([
+      h('h1', {}, 'Lists'),
+      h('p', { class: 'sub' }, 'Status comes from the real WhatsApp messages of the list\'s number — including ones sent from the phone or an old macro.'),
+      picker,
+      h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, sel.name), sendBtn,
+        h('a', { class: 'btn', href: `/api/lists/${sel.id}/export`, target: '_blank' }, 'Export (JSON)')),
+      tabs,
+      h('div', { style: 'overflow-x:auto' }, table),
+      h('div', { class: 'settings-grid', style: 'margin-top:16px' }, fuForm),
+      importForm,
+    ]);
+  }
+
   // ---------- templates ----------
   async function viewTemplates() {
     await loadAccounts();
@@ -904,7 +993,7 @@
   }
 
   // ---------- routing & live updates ----------
-  const views = { templates: viewTemplates, rules: viewRules, board: viewBoard, accounts: viewAccounts, inbox: viewInbox, outbox: viewOutbox, settings: viewSettings, connect: viewConnect, activity: viewActivity };
+  const views = { lists: viewLists, templates: viewTemplates, rules: viewRules, board: viewBoard, accounts: viewAccounts, inbox: viewInbox, outbox: viewOutbox, settings: viewSettings, connect: viewConnect, activity: viewActivity };
   async function route() {
     state.route = location.hash.slice(1) || 'board';
     state.reloadChats = state.reloadThread = null;

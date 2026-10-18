@@ -237,6 +237,9 @@ async function buildContent(payload) {
   return { document: file.buffer, mimetype: file.mimetype, fileName: file.fileName || 'file', caption };
 }
 
+/** Nudge a number's sender to look at the queue now. */
+export const wakeAccount = (accountId) => wake(accountId);
+
 function wake(accountId) {
   const w = workers.get(accountId);
   if (w) w.wake();
@@ -318,6 +321,7 @@ function startWorker(accountId) {
     }
     done.emit(String(row.id), result);
     if (row.task_id) await refreshTask(row.task_id).catch(() => {});
+    if (row.list_id) import('./lists.js').then((l) => l.refreshList(row.list_id)).catch(() => {});
     if (automated) nextAutomatedAt = Date.now() + randomDelayMs(s) * config.timeScale;
     await sleep(MIN_DELAY_SEC * 1000 * config.timeScale); // never two messages from one number within 5 s
   }
