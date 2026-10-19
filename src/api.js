@@ -76,6 +76,8 @@ export function buildApp() {
 
   // Meta WhatsApp Cloud API webhook (its own checks: verify token + signature).
   mountMetaWebhook(app);
+  // Public privacy policy (Meta needs it before the app can go Live).
+  app.get('/privacy', (req, res) => res.sendFile(path.join(publicDir, 'privacy.html')));
 
   // MCP for AI agents: <server>/mcp/<API_KEY>
   mountMcp(app);
