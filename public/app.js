@@ -141,6 +141,11 @@
         h('dt', {}, 'Stored'), h('dd', {}, `${nice(st.chats)} chats (${nice(st.groups)} groups) · ${nice(st.contacts)} contacts · ${nice(st.messages)} messages`),
         h('dt', {}, 'Oldest message'), h('dd', {}, st.oldest_ts ? fmt(st.oldest_ts) : '–'),
         h('dt', {}, 'AI sending'), h('dd', {}, a.settings.aiMode === 'auto' ? 'Automatic' : 'Drafts for approval'),
+        a.newChats ? h('dt', {}, 'New numbers (24 h)') : null,
+        a.newChats ? h('dd', { style: a.newChats.count >= a.newChats.limit ? 'color:var(--bad);font-weight:600' : '' },
+          `${a.newChats.count} of ${a.newChats.limit}`, a.newChats.nextFreeAt ? ` — limit reached, next slot ${new Date(a.newChats.nextFreeAt).toLocaleString()}` : '') : null,
+        a.reachout?.isActive ? h('dt', {}, 'WhatsApp block') : null,
+        a.reachout?.isActive ? h('dd', { style: 'color:var(--bad);font-weight:600' }, 'No messages to new numbers until ' + (a.reachout.timeEnforcementEnds ? new Date(a.reachout.timeEnforcementEnds).toLocaleString() : 'WhatsApp lifts it')) : null,
         h('dt', {}, 'History'), h('dd', {}, syncView(a)),
         a.backfill ? h('dt', {}, 'Deep history') : null,
         a.backfill ? h('dd', {}, `${a.backfill.status}${a.backfill.result ? ' — ' + a.backfill.result : ''}`) : null,
@@ -229,26 +234,38 @@
     if (linkModal) {
       linkModal.started = true;
       linkModal.lastQr = null;
-      fill(linkModal.body, h('div', { class: 'qrbox' }, h('span', { class: 'muted' }, 'Generating QR…')));
+      linkModal.wantsCode = !!opts.pairPhone;
+      fill(linkModal.body, h('div', { class: 'qrbox' }, h('span', { class: 'muted' }, opts.pairPhone ? 'Getting your code…' : 'Generating QR…')));
     }
     await api(`/api/accounts/${id}/link`, { body: opts });
   });
   function drawChoice(a) {
     const opt = (v, title, hint) => h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'history', value: v, checked: (a.settings?.historyMode || 'full') === v }), h('span', {}, title, h('em', {}, hint)));
+    // On a phone you can't scan your own screen, so the phone-number code is the default there.
+    const onPhone = window.matchMedia('(max-width: 760px)').matches;
+    const phoneField = h('label', { class: 'field', style: `margin:4px 0 0 28px;${onPhone ? '' : 'display:none'}` },
+      h('span', {}, 'WhatsApp number being linked'), h('input', { type: 'tel', name: 'phone', placeholder: '98765 43210 or +91 98765 43210', value: a.phone || '' }));
+    const how = (v, title, hint) => h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'how', value: v, checked: (v === 'code') === onPhone,
+      onchange: () => { phoneField.style.display = v === 'code' ? '' : 'none'; } }), h('span', {}, title, h('em', {}, hint)));
     const form = h('form', { onsubmit: (e) => {
       e.preventDefault();
       const history = e.target.history.value;
-      const phone = e.target.phone.value.trim();
-      startLink(a.id, phone ? { history, pairPhone: phone } : { history });
+      if (e.target.how.value === 'code') {
+        let phone = e.target.phone.value.replace(/\D/g, '');
+        if (phone.length === 10) phone = '91' + phone;
+        if (phone.length < 11) return toast('Type the number being linked, with country code (e.g. 919876543210)');
+        startLink(a.id, { history, pairPhone: phone });
+      } else startLink(a.id, { history });
     } },
-      h('p', { style: 'margin-top:0' }, 'What should be imported from this phone?'),
+      h('p', { style: 'margin-top:0' }, h('b', {}, '1. How do you want to link?')),
+      how('qr', 'Scan a QR code', 'This page is open on a computer or another phone; scan it with the phone being linked.'),
+      how('code', 'Link with phone number (enter a code)', 'This page is on the same phone you are linking, or scanning fails. You type an 8-letter code into WhatsApp.'),
+      phoneField,
+      h('p', { style: 'margin:14px 0 6px' }, h('b', {}, '2. What should be imported from this phone?')),
       opt('full', 'Full chat history', 'Everything the phone has — needed to find old leads. Best done on the PC; keep the phone online until it finishes.'),
       opt('recent', 'Recent history only', 'Roughly the last few months, as WhatsApp Web normally gets.'),
-      opt('none', 'No history — new messages only', 'For numbers that only send (e.g. dental reminders).'),
-      h('details', { style: 'margin:6px 0 12px' }, h('summary', {}, 'Linking on the same phone that shows this page? Use a pairing code'),
-        h('label', { class: 'field', style: 'margin-top:8px' }, h('span', {}, 'Number being linked (with country code)'), h('input', { type: 'text', name: 'phone', placeholder: '919876543210' }),
-          h('em', {}, 'Leave empty to use the QR code.'))),
-      h('button', { class: 'btn primary', type: 'submit' }, 'Continue'),
+      opt('none', 'No history — new messages only', 'For a brand-new number, or numbers that only send.'),
+      h('button', { class: 'btn primary', type: 'submit', style: 'margin-top:8px' }, 'Continue'),
     );
     fill(linkModal.body, form);
   }
@@ -262,15 +279,22 @@
     }
     if (info.status === 'qr' && info.qr === linkModal.lastQr && !info.pairingCode) return; // nothing new to draw
     linkModal.lastQr = info.qr;
+    const wantsCode = linkModal.wantsCode;
     const steps = h('ol', { class: 'steps' },
       h('li', {}, 'On the phone: WhatsApp → Settings (or ⋮) → Linked devices → Link a device.'),
-      info.pairingCode ? h('li', {}, 'Tap "Link with phone number instead" and type the code below.') : h('li', {}, 'Scan this code. It refreshes by itself; always scan the one showing now.'),
+      wantsCode
+        ? h('li', {}, 'Below the camera, tap "Link with phone number instead", then type this code (it may ask for your phone lock first):')
+        : h('li', {}, 'Scan this code. It refreshes by itself; always scan the one showing now.'),
     );
+    const code = info.pairingCode ? info.pairingCode.replace(/^(.{4})(.{4})$/, '$1-$2') : null;
     const qr = info.qr ? h('img', { src: info.qr, alt: 'WhatsApp QR code' }) : h('span', { class: 'muted' }, info.status === 'stopped' ? 'QR expired.' : 'Generating QR…');
     fill(b,
       steps,
-      info.pairingCode ? h('div', { class: 'code' }, info.pairingCode) : h('div', { class: 'qrbox' }, qr),
-      info.status === 'stopped' || info.status === 'logged_out' ? h('button', { class: 'btn primary', onclick: () => drawChoice(info) }, 'Start again') : null,
+      wantsCode
+        ? h('div', { class: 'code', style: 'font-size:32px;letter-spacing:4px;text-align:center;padding:16px;user-select:all' }, code || (info.status === 'stopped' ? 'Code expired.' : 'Getting your code…'))
+        : h('div', { class: 'qrbox' }, qr),
+      wantsCode && code ? h('p', { class: 'muted', style: 'font-size:12px' }, 'The code is valid for a few minutes. If WhatsApp says it is wrong, press Start again for a new one.') : null,
+      h('button', { class: info.status === 'stopped' || info.status === 'logged_out' ? 'btn primary' : 'btn small', style: 'margin-top:8px', onclick: () => drawChoice(state.accounts.find((x) => x.id === info.id) || info) }, info.status === 'stopped' || info.status === 'logged_out' ? 'Start again' : 'Start again / use the other method'),
       info.qrAt ? h('p', { class: 'muted', style: 'font-size:12px;margin:0' }, `Code shown at ${new Date(info.qrAt).toLocaleTimeString()}`) : null,
     );
   }
@@ -862,12 +886,55 @@
     const tabs = h('div', { class: 'seg', style: 'max-width:520px;margin-bottom:16px' },
       [['draft', 'Drafts'], ['queued', 'Queued'], ['sent', 'Sent'], ['failed,rejected', 'Failed / rejected'], ['all', 'All']].map(([k, l]) =>
         h('button', { class: tab === k ? 'on' : '', onclick: () => { state.outboxTab = k; viewOutbox(); } }, l)));
+    // Selection: tick messages (or "Select all"), then move them to another number, approve or reject them.
+    const movable = (r) => r.status === 'draft' || r.status === 'queued';
+    const sel = new Set();
+    const boxes = [];
+    const selInfo = h('b', {}, '0 selected');
+    const allBox = h('input', { type: 'checkbox', 'aria-label': 'Select all' });
+    const refreshSel = () => {
+      selInfo.textContent = `${sel.size} selected`;
+      allBox.checked = sel.size > 0 && sel.size === boxes.length;
+      allBox.indeterminate = sel.size > 0 && sel.size < boxes.length;
+    };
+    allBox.onchange = () => {
+      for (const [cb, id] of boxes) { cb.checked = allBox.checked; if (allBox.checked) sel.add(id); else sel.delete(id); }
+      refreshSel();
+    };
+    const accountOptions = (current) => state.accounts.map((a) => h('option', { value: a.id, selected: a.id === current },
+      `${a.label}${a.phone ? ' · +' + a.phone : ''}${a.status === 'open' ? '' : ' (' + (a.status === 'qr' ? 'not linked yet' : a.status) + ')'}`));
+    const limitOf = (id) => {
+      const a = state.accounts.find((x) => x.id === id);
+      return Math.min(a?.settings?.dailyCap ?? 35, a?.settings?.newChatsPer24h ?? 42) || 1;
+    };
+    const paceText = (list) => {
+      const per = {};
+      for (const r of list) per[r.account_id] = (per[r.account_id] || 0) + 1;
+      return Object.entries(per).map(([id, n]) => `${labelOf(id)}: ${n} messages, at most ${limitOf(id)} a day → about ${Math.ceil(n / limitOf(id))} day${n > limitOf(id) ? 's' : ''}`).join('\n');
+    };
+    const moveTo = async (ids, to) => {
+      const r = await api('/api/outbox/move', { body: { ids, account: to } });
+      toast(`Moved ${r.moved} to ${r.toLabel} — they wait there as drafts for your approval`);
+      viewOutbox();
+    };
     const items = rows.map((r) => {
       const ta = h('textarea', { rows: 3, value: r.payload.text || r.payload.attachment?.caption || '' });
+      let cb = null;
+      if (movable(r)) {
+        cb = h('input', { type: 'checkbox', 'aria-label': 'Select', onchange: (e) => { if (e.target.checked) sel.add(r.id); else sel.delete(r.id); refreshSel(); } });
+        boxes.push([cb, r.id]);
+      }
+      const from = movable(r) && state.accounts.length > 1
+        ? h('select', { class: 'tag', title: 'Number that sends this message', style: 'width:auto;padding:2px 6px', onchange: guard(async (e) => {
+            if (!confirm(`Send this message from "${labelOf(e.target.value)}" instead? It will wait there as a draft for your approval.`)) { e.target.value = r.account_id; return; }
+            await moveTo([r.id], e.target.value);
+          }) }, accountOptions(r.account_id))
+        : h('span', { class: 'tag', title: 'Sent from this number' }, 'From: ' + labelOf(r.account_id));
       return h('div', { class: 'card' },
-        h('div', { class: 'row' },
+        h('div', { class: 'row', style: 'align-items:center' },
+          cb,
           h('b', { class: 'grow' }, r.to_name || '+' + r.to_jid.split('@')[0]),
-          h('span', { class: 'tag', title: 'Sent from this number' }, 'From: ' + labelOf(r.account_id)), h('span', { class: 'tag' }, { mcp: 'AI', campaign: 'bulk', api: 'script', dashboard: 'you' }[r.source] || r.source), h('span', { class: 'muted' }, new Date(r.created_at).toLocaleString())),
+          from, h('span', { class: 'tag' }, { mcp: 'AI', campaign: 'bulk', api: 'script', dashboard: 'you' }[r.source] || r.source), h('span', { class: 'muted' }, new Date(r.created_at).toLocaleString())),
         r.note ? h('p', { class: 'muted', style: 'margin:6px 0' }, 'Why: ', r.note) : null,
         r.payload.attachment ? h('p', { class: 'muted', style: 'margin:6px 0' }, '📎 ', r.payload.attachment.fileName || r.payload.attachment.url || 'file') : null,
         r.status === 'draft'
@@ -880,17 +947,41 @@
               r.sent_at ? h('p', { class: 'muted', style: 'margin:0' }, 'Sent ', new Date(r.sent_at).toLocaleString()) : null),
       );
     });
+    const picked = () => rows.filter((r) => sel.has(r.id));
+    const moveSel = h('select', { style: 'width:auto' }, h('option', { value: '' }, 'Send from…'), accountOptions(''));
+    const bar = boxes.length ? h('div', { class: 'card', style: 'max-width:820px;margin-bottom:16px' },
+      h('div', { class: 'row', style: 'align-items:center;flex-wrap:wrap;gap:8px' },
+        h('label', { class: 'row', style: 'align-items:center;gap:6px;margin:0' }, allBox, h('span', {}, `Select all ${boxes.length}${rows.length >= 200 ? ' shown' : ''}`)),
+        selInfo,
+        h('span', { class: 'grow' }),
+        state.accounts.length > 1 ? moveSel : null,
+        state.accounts.length > 1 ? h('button', { class: 'btn small', onclick: guard(async () => {
+          if (!sel.size) return toast('Tick the messages first');
+          if (!moveSel.value) return toast('Choose the number that should send them');
+          if (!confirm(`Move ${sel.size} messages to "${labelOf(moveSel.value)}"?\n\nThey become drafts there and go out only after you approve them, within that number's limits.`)) return;
+          await moveTo([...sel], moveSel.value);
+        }) }, 'Move selected') : null,
+        h('button', { class: 'btn small primary', onclick: guard(async () => {
+          const list = picked().filter((r) => r.status === 'draft');
+          if (!list.length) return toast('Tick drafts first');
+          if (!confirm(`Approve and send ${list.length} selected drafts as they are?\n\n${paceText(list)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit.`)) return;
+          const r = await api('/api/outbox/approve-selected', { body: { ids: list.map((x) => x.id) } });
+          toast(`Approved ${r.approved} — queued`);
+          viewOutbox();
+        }) }, 'Approve selected'),
+        h('button', { class: 'btn small danger', onclick: guard(async () => {
+          if (!sel.size) return toast('Tick the messages first');
+          if (!confirm(`Reject ${sel.size} selected messages? They will not be sent.`)) return;
+          const r = await api('/api/outbox/reject-selected', { body: { ids: [...sel] } });
+          toast(`Rejected ${r.rejected}`);
+          viewOutbox();
+        }) }, 'Reject selected')),
+      h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, 'Tick messages (or Select all, then untick a few). Move selected changes which number sends them, e.g. when a number is blocked.')) : null;
     const drafts = rows.filter((r) => r.status === 'draft');
-    const approveAllBar = drafts.length > 1 ? h('div', { class: 'card row', style: 'max-width:640px;margin-bottom:16px;align-items:center' },
+    const approveAllBar = drafts.length > 1 ? h('div', { class: 'card row', style: 'max-width:820px;margin-bottom:16px;align-items:center' },
       h('span', { class: 'grow' }, `${drafts.length}${rows.length >= 200 ? '+' : ''} drafts${acc ? ' from ' + labelOf(acc) : ''}${state.outboxTask ? ` in task #${state.outboxTask}` : ''}`),
       h('button', { class: 'btn primary', onclick: guard(async () => {
-        const per = {};
-        for (const r of drafts) per[r.account_id] = (per[r.account_id] || 0) + 1;
-        const pace = Object.entries(per).map(([id, n]) => {
-          const cap = state.accounts.find((a) => a.id === id)?.settings?.dailyCap || 35;
-          return `${labelOf(id)}: ${n} messages, ${cap} a day → about ${Math.ceil(n / cap)} day${n > cap ? 's' : ''}`;
-        }).join('\n');
-        if (!confirm(`Approve and send all ${drafts.length} drafts as they are?\n\n${pace}\n\nThey still go out one by one with the random gap and daily limit. Text you edited below but did not approve is not used.`)) return;
+        if (!confirm(`Approve and send all ${drafts.length} drafts as they are?\n\n${paceText(drafts)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit. Text you edited below but did not approve is not used.`)) return;
         const r = await api('/api/outbox/approve-all', { body: { account: acc || undefined, task: state.outboxTask || undefined } });
         toast(`Approved ${r.approved} — queued`);
         viewOutbox();
@@ -898,10 +989,11 @@
     shell([
       h('h1', {}, 'Drafts & outbox'),
       state.outboxTask ? h('p', {}, `Showing messages of task #${state.outboxTask} · `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); state.outboxTask = null; viewOutbox(); } }, 'show all')) : null,
-      h('p', { class: 'sub' }, 'Messages written by AI or campaigns wait here when a number is in approval mode. Edit, approve or reject.'),
+      h('p', { class: 'sub' }, 'Messages written by AI or campaigns wait here when a number is in approval mode. Edit, approve, reject, or move them to another number.'),
       numberPick,
       tabs,
       approveAllBar,
+      bar,
       h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr))' }, items.length ? items : [h('p', { class: 'muted' }, 'Nothing here.')]),
     ]);
   }
@@ -946,6 +1038,7 @@
         typing: fd.typing.checked,
         anytime: fd.anytime.checked,
         dailyCap: +fd.dailyCap.value,
+        newChatsPer24h: +fd.newChatsPer24h.value,
         followupStart: fd.followupStart.value,
         followupDailyMax: +fd.followupDailyMax.value,
         sendStart: fd.sendStart.value,
@@ -985,7 +1078,8 @@
             f('followupDailyMax', 'Follow-ups per day (max)', h('input', { type: 'number', name: 'followupDailyMax', min: 0, value: s.followupDailyMax }))),
           h('p', { class: 'muted', style: 'margin:-6px 0 12px;font-size:12px' }, 'Follow-ups to people who never replied go out only on days with no first messages to new people, after this time.'),
           sw('anytime', 'Send at any time', 'Day and night, every day. Turn off to use the time window below.'),
-          f('dailyCap', 'Daily limit (automated messages)', h('input', { type: 'number', name: 'dailyCap', min: 0, value: s.dailyCap }), 'Messages you send yourself or from Apps Script are not counted.'),
+          f('newChatsPer24h', 'New numbers per 24 hours (safety limit)', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 45, value: s.newChatsPer24h }), 'First messages to people this number never chatted with, in any 24 hours — from the AI, bulk, you, scripts and the phone itself. Hard maximum 45 (a number was blocked by WhatsApp after 48 in one day).'),
+          f('dailyCap', 'Automated messages per 24 hours', h('input', { type: 'number', name: 'dailyCap', min: 0, value: s.dailyCap }), 'AI, bulk and follow-ups, counted over the last 24 hours. Messages you send yourself are not counted here (new numbers still are, above).'),
           h('div', { class: 'row', style: s.anytime ? 'opacity:.5' : '' },
             f('sendStart', 'Send between', h('input', { type: 'time', name: 'sendStart', value: s.sendStart })),
             f('sendEnd', 'and', h('input', { type: 'time', name: 'sendEnd', value: s.sendEnd })),

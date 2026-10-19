@@ -10,7 +10,7 @@ import config from './config.js';
 import { manager } from './wa/manager.js';
 import { loadOutgoing } from './media.js';
 import { toJid } from './store.js';
-import { MIN_DELAY_SEC, randomDelayMs, insideSendingWindow, afterTime } from './settings.js';
+import { MIN_DELAY_SEC, NEW_CHATS_HARD_MAX, randomDelayMs, insideSendingWindow, afterTime } from './settings.js';
 import { createTask, refreshTask, fillTemplate, planRecipients } from './tasks.js';
 import { hasAuthState } from './wa/auth-state.js';
 import { getTemplate, contactFields, fieldsIn } from './templates.js';
@@ -46,6 +46,8 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
   }
   await assertCanSend(session);
   const automated = AUTOMATED.includes(source);
+  // Your own sends go out right away, so check the new-number limit now (automated ones simply wait in the queue).
+  if (!NEEDS_APPROVAL.includes(source) && !automated) await assertNewChatAllowed(session, jid);
   const status = NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued';
   const [row] = await query(
     `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id, idem_key)
@@ -154,10 +156,11 @@ export async function approveTask(taskId) {
   return { approved: rows.length };
 }
 
-/** Approve every draft at once — optionally only one number's or one task's. Saved text is sent as it is. */
-export async function approveAll({ account, taskId } = {}) {
+/** Approve every draft at once — optionally only one number's, one task's, or the chosen ids. Saved text is sent as it is. */
+export async function approveAll({ account, taskId, ids } = {}) {
   const p = [];
   const where = [`status = 'draft'`];
+  if (ids) { p.push(ids.map(Number)); where.push(`id = ANY($${p.length}::bigint[])`); }
   if (account) { p.push(account); where.push(`account_id = $${p.length}`); }
   if (taskId) { p.push(taskId); where.push(`task_id = $${p.length}`); }
   const rows = await query(
@@ -170,6 +173,52 @@ export async function approveAll({ account, taskId } = {}) {
   for (const r of rows) perAccount[r.account_id] = (perAccount[r.account_id] || 0) + 1;
   for (const a of Object.keys(perAccount)) wake(a);
   return { approved: rows.length, perAccount };
+}
+
+/** Reject the chosen drafts / queued messages. */
+export async function rejectMany(ids) {
+  const rows = await query(
+    `UPDATE outbox SET status = 'rejected' WHERE id = ANY($1::bigint[]) AND status IN ('draft','queued') RETURNING account_id, task_id, list_id`,
+    [ids.map(Number)],
+  );
+  await afterBatchChange(rows);
+  return { rejected: rows.length, perAccount: countBy(rows, 'account_id') };
+}
+
+/**
+ * Move unsent messages (drafts and queued) to another number — e.g. when a number is blocked. They become drafts
+ * again on the new number, so nothing goes out from it without your approval. A list or task whose remaining
+ * messages all moved moves with them (follow-ups then come from the new number).
+ */
+export async function moveToAccount(ids, account) {
+  const target = await manager.resolve(account);
+  const rows = await query(
+    `UPDATE outbox o SET account_id = $2, status = 'draft', idem_key = NULL, scheduled_at = now()
+     FROM outbox old WHERE old.id = o.id AND o.id = ANY($1::bigint[]) AND o.status IN ('draft','queued') AND o.account_id <> $2
+     RETURNING o.id, old.account_id AS from_account, o.task_id, o.list_id`,
+    [ids.map(Number), target.id],
+  );
+  const stillThere = (col, id) => query(
+    `SELECT 1 FROM outbox WHERE ${col} = $1 AND account_id <> $2 AND status IN ('draft','queued','sending') LIMIT 1`, [id, target.id]);
+  for (const t of new Set(rows.map((r) => r.task_id).filter(Boolean))) {
+    if (!(await stillThere('task_id', t)).length) await query('UPDATE tasks SET account_id = $2 WHERE id = $1', [t, target.id]);
+  }
+  for (const l of new Set(rows.map((r) => r.list_id).filter(Boolean))) {
+    if (!(await stillThere('list_id', l)).length) await query('UPDATE lists SET account_id = $2 WHERE id = $1', [l, target.id]);
+  }
+  await afterBatchChange(rows);
+  return { moved: rows.length, to: target.id, toLabel: target.account.label, from: countBy(rows, 'from_account') };
+}
+
+const countBy = (rows, key) => rows.reduce((m, r) => ({ ...m, [r[key]]: (m[r[key]] || 0) + 1 }), {});
+
+async function afterBatchChange(rows) {
+  for (const t of new Set(rows.map((r) => r.task_id).filter(Boolean))) await refreshTask(t).catch(() => {});
+  const lists = [...new Set(rows.map((r) => r.list_id).filter(Boolean))];
+  if (lists.length) {
+    const l = await import('./lists.js');
+    for (const id of lists) await l.refreshList(id).catch(() => {});
+  }
 }
 
 export async function reject(id) {
@@ -235,14 +284,57 @@ export async function followupsToday(accountId) {
   return r.n;
 }
 
+/** Automated messages sent in the last 24 hours (rolling — a midnight reset let 48 new numbers through in 24 h). */
 async function automatedSentToday(accountId) {
   const [r] = await query(
     `SELECT count(*)::int AS n FROM outbox
-     WHERE account_id = $1 AND source = ANY($2) AND status = 'sent'
-       AND sent_at >= (date_trunc('day', now() AT TIME ZONE $3) AT TIME ZONE $3)`,
-    [accountId, AUTOMATED, config.tz],
+     WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND sent_at > now() - interval '24 hours'`,
+    [accountId, AUTOMATED],
   );
   return r.n;
+}
+
+// A chat with no message at all in it yet = a NEW number for this WhatsApp account.
+const IS_NEW_CHAT = (acc, jid) => `NOT EXISTS (SELECT 1 FROM messages x WHERE x.account_id = ${acc} AND x.chat_jid = ${jid})`;
+
+/**
+ * New numbers this account started a chat with in the last 24 hours (rolling), from any source — the hub, the
+ * phone itself, other linked devices: chats whose very first message is ours and was sent in the window.
+ * Returns { count, limit, nextFreeAt } — nextFreeAt = when the oldest of them leaves the window.
+ */
+export async function newChatsStatus(accountId, settings) {
+  const since = Math.floor(Date.now() / 1000) - 24 * 3600;
+  const [r] = await query(
+    `SELECT count(*)::int AS n, min(f)::bigint AS oldest FROM (
+       SELECT chat_jid, min(ts) AS f FROM messages
+       WHERE account_id = $1 AND from_me AND ts > $2 AND chat_jid NOT LIKE '%@g.us' AND chat_jid NOT LIKE '%broadcast%' AND chat_jid NOT LIKE '%@newsletter'
+       GROUP BY chat_jid) m
+     WHERE NOT EXISTS (SELECT 1 FROM messages x WHERE x.account_id = $1 AND x.chat_jid = m.chat_jid AND x.ts < m.f)`,
+    [accountId, since],
+  );
+  const limit = Math.min(NEW_CHATS_HARD_MAX, settings?.newChatsPer24h ?? NEW_CHATS_HARD_MAX);
+  return { count: r.n, limit, nextFreeAt: r.n >= limit && r.oldest ? new Date((Number(r.oldest) + 24 * 3600) * 1000) : null };
+}
+
+/** WhatsApp itself has put a temporary block on messaging new people ("reach-out timelock")? */
+function whatsappBlocksNewChats(session) {
+  const l = session.reachout;
+  return !!(l?.isActive && (!l.timeEnforcementEnds || new Date(l.timeEnforcementEnds) > new Date()));
+}
+
+/** Throws a clear error if a message to this person would cross the new-number limit right now. */
+export async function assertNewChatAllowed(session, jid) {
+  if (jid.endsWith('@g.us')) return;
+  const [known] = await query('SELECT 1 FROM messages WHERE account_id = $1 AND chat_jid = $2 LIMIT 1', [session.id, jid]);
+  if (known) return;
+  if (whatsappBlocksNewChats(session)) {
+    const until = session.reachout.timeEnforcementEnds ? new Date(session.reachout.timeEnforcementEnds).toLocaleString('en-IN', { timeZone: config.tz }) : 'WhatsApp lifts it';
+    throw new Error(`WhatsApp has blocked "${session.account.label}" from messaging new numbers until ${until}`);
+  }
+  const st = await newChatsStatus(session.id, session.settings);
+  if (st.count >= st.limit) {
+    throw new Error(`New-number limit reached on "${session.account.label}": ${st.count} new numbers in the last 24 hours (limit ${st.limit}). Next free slot ${st.nextFreeAt ? st.nextFreeAt.toLocaleString('en-IN', { timeZone: config.tz }) : 'soon'}`);
+  }
 }
 
 /** Rebuild enough of a stored message for WhatsApp to show it as the quoted message of a reply. */
@@ -289,6 +381,21 @@ function wake(accountId) {
   else startWorker(accountId);
 }
 
+const holdNoted = new Map(); // accountId -> until (ms): log "limit reached" once per hold
+
+/** Activity entry (once per hold) explaining why messages to new numbers are waiting. */
+async function noteNewChatHold(accountId, reachout, nc) {
+  const until = reachout?.timeEnforcementEnds ? new Date(reachout.timeEnforcementEnds) : nc.nextFreeAt;
+  const key = until ? until.getTime() : 1;
+  if (holdNoted.get(accountId) === key) return;
+  holdNoted.set(accountId, key);
+  const when = until ? until.toLocaleString('en-IN', { timeZone: config.tz }) : 'later';
+  const [w] = await query(`SELECT count(*)::int n FROM outbox o WHERE account_id = $1 AND status = 'queued' AND ${IS_NEW_CHAT('$1', 'o.to_jid')}`, [accountId]);
+  await logEvent(accountId, 'warn', reachout
+    ? `WhatsApp has blocked messages to new numbers until ${when}. ${w.n} messages to new numbers wait; chats with people you already talk to continue.`
+    : `New-number limit reached: ${nc.count} new numbers in the last 24 hours (limit ${nc.limit}). ${w.n} messages to new numbers wait until about ${when}.`);
+}
+
 function startWorker(accountId) {
   let wakeUp = () => {};
   let nextAutomatedAt = 0; // random gap applies between automated messages only
@@ -332,15 +439,21 @@ function startWorker(accountId) {
     // Follow-ups only go out on days with no new outreach (new candidates get the limited capacity first).
     const followupsAllowed = automatedAllowed && afterTime(s.followupStart) && !(await newOutreachToday(accountId))
       && (await followupsToday(accountId)) < s.followupDailyMax;
+    // New numbers: never more than the limit in any 24 hours, and nothing while WhatsApp blocks new chats.
+    const nc = await newChatsStatus(accountId, s);
+    const blocked = whatsappBlocksNewChats(session);
+    const newChatsAllowed = !blocked && nc.count < nc.limit;
+    if (!newChatsAllowed) await noteNewChatHold(accountId, blocked ? session.reachout : null, nc);
     // Claim one row atomically, so two servers can never pick the same message.
     const [row] = await query(
       `UPDATE outbox SET status = 'sending', sent_at = now() WHERE id = (
          SELECT id FROM outbox WHERE account_id = $1 AND status = 'queued' AND scheduled_at <= now()
            AND ($2 OR source <> ALL($3))
            AND (note IS DISTINCT FROM 'follow-up' OR $4)
+           AND ($5 OR to_jid LIKE '%@g.us' OR NOT ${IS_NEW_CHAT('$1', 'outbox.to_jid')})
          ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED)
        RETURNING *`,
-      [accountId, automatedAllowed, AUTOMATED, followupsAllowed],
+      [accountId, automatedAllowed, AUTOMATED, followupsAllowed, newChatsAllowed],
     );
     if (!row) {
       // Wait for new work, or until the random gap ends, whichever is first.

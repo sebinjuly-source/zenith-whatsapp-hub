@@ -104,6 +104,7 @@ export function buildApp() {
     for (const a of list) {
       a.stats = await store.accountStats(a.id);
       a.backfill = await outbox.backfillStatus(a.id);
+      a.newChats = await outbox.newChatsStatus(a.id, a.settings);
     }
     res.json(list);
   }));
@@ -364,6 +365,32 @@ export function buildApp() {
     const account = b.account ? (await manager.resolve(b.account)).id : null;
     const r = await outbox.approveAll({ account, taskId: b.task || null });
     for (const [a, n] of Object.entries(r.perAccount)) await act(req, a, `Approved all ${n} drafts${b.task ? ` of task #${b.task}` : ''}`);
+    res.json(r);
+  }));
+  // Selected messages: { ids: [..] } → approve / reject; { ids, account } → move to another number (as drafts)
+  const idsOf = (req) => {
+    const ids = (req.body?.ids || []).map(Number).filter(Boolean);
+    if (!ids.length) throw new Error('Select at least one message');
+    return ids;
+  };
+  api.post('/outbox/approve-selected', wrap(async (req, res) => {
+    const r = await outbox.approveAll({ ids: idsOf(req) });
+    for (const [acc, n] of Object.entries(r.perAccount)) await act(req, acc, `Approved ${n} selected drafts`);
+    res.json(r);
+  }));
+  api.post('/outbox/reject-selected', wrap(async (req, res) => {
+    const r = await outbox.rejectMany(idsOf(req));
+    for (const [acc, n] of Object.entries(r.perAccount)) await act(req, acc, `Rejected ${n} selected messages`);
+    res.json(r);
+  }));
+  api.post('/outbox/move', wrap(async (req, res) => {
+    const ids = idsOf(req);
+    if (!req.body?.account) throw new Error('Choose the number that should send them');
+    const r = await outbox.moveToAccount(ids, req.body.account);
+    for (const [acc, n] of Object.entries(r.from)) {
+      await act(req, acc, `Moved ${n} unsent messages to "${r.toLabel}"`);
+      await act(req, r.to, `Received ${n} messages from "${acc}" — waiting as drafts for approval`);
+    }
     res.json(r);
   }));
   api.post('/outbox/:id/approve', wrap(async (req, res) => {

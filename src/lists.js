@@ -145,25 +145,27 @@ export async function importList({ account, name, role, since, source, members, 
 }
 
 /** Recompute every member's status from the WhatsApp messages and the outbox (one query). */
+// Messages from the list's number AND from any number its messages were moved to (e.g. when a number is blocked).
 export async function refreshList(listId) {
   await query(
-    `WITH l AS (SELECT id, account_id, extract(epoch FROM since)::bigint AS since FROM lists WHERE id = $1),
+    `WITH l AS (SELECT id, account_id, extract(epoch FROM since)::bigint AS since,
+       ARRAY(SELECT DISTINCT o.account_id FROM outbox o WHERE o.list_id = $1) || account_id AS accs FROM lists WHERE id = $1),
      m AS (
        SELECT lm.jid,
-         (SELECT min(ts) FROM messages x, l WHERE x.account_id = l.account_id AND x.chat_jid = lm.jid AND x.from_me AND x.ts >= l.since) AS first_sent,
-         (SELECT max(ts) FROM messages x, l WHERE x.account_id = l.account_id AND x.chat_jid = lm.jid AND x.from_me AND x.ts >= l.since) AS last_sent,
-         (SELECT count(*) FROM messages x, l WHERE x.account_id = l.account_id AND x.chat_jid = lm.jid AND x.from_me AND x.ts >= l.since) AS sent_count
+         (SELECT min(ts) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND x.ts >= l.since) AS first_sent,
+         (SELECT max(ts) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND x.ts >= l.since) AS last_sent,
+         (SELECT count(*) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND x.ts >= l.since) AS sent_count
        FROM list_members lm WHERE lm.list_id = $1
      ),
      r AS (
        SELECT m.jid, m.first_sent, m.last_sent, m.sent_count,
-         (SELECT max(ts) FROM messages x, l WHERE x.account_id = l.account_id AND x.chat_jid = m.jid AND NOT x.from_me AND x.ts >= m.first_sent) AS last_reply,
-         (SELECT count(*) FROM messages x, l WHERE x.account_id = l.account_id AND x.chat_jid = m.jid AND NOT x.from_me AND x.ts >= m.first_sent) AS replies,
+         (SELECT max(ts) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = m.jid AND NOT x.from_me AND x.ts >= m.first_sent) AS last_reply,
+         (SELECT count(*) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = m.jid AND NOT x.from_me AND x.ts >= m.first_sent) AS replies,
          (SELECT count(*) FROM outbox o WHERE o.list_id = $1 AND o.to_jid = m.jid AND o.status IN ('draft','queued','sending')) AS pending,
          (SELECT o.error FROM outbox o WHERE o.list_id = $1 AND o.to_jid = m.jid AND o.status = 'failed' ORDER BY o.id DESC LIMIT 1) AS last_error,
          (SELECT o.created_at FROM outbox o WHERE o.list_id = $1 AND o.to_jid = m.jid AND o.status = 'failed' ORDER BY o.id DESC LIMIT 1) AS failed_at,
          (SELECT count(*) FROM outbox o WHERE o.list_id = $1 AND o.to_jid = m.jid AND o.note = 'follow-up' AND o.status = 'sent') AS followups,
-         EXISTS (SELECT 1 FROM contacts c, l WHERE c.account_id = l.account_id AND c.jid = m.jid AND 'opted-out' = ANY(c.tags)) AS opted_out
+         EXISTS (SELECT 1 FROM contacts c, l WHERE c.account_id = ANY(l.accs) AND c.jid = m.jid AND 'opted-out' = ANY(c.tags)) AS opted_out
        FROM m
      )
      UPDATE list_members lm SET

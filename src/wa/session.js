@@ -74,6 +74,7 @@ export class Session extends EventEmitter {
       phone: this.account.phone,
       waName: this.account.wa_name,
       sync: this.sync,
+      reachout: this.reachout || null, // WhatsApp's own block on messaging new numbers, if any
     };
   }
 
@@ -211,7 +212,8 @@ export class Session extends EventEmitter {
     );
   }
 
-  async onConnection({ connection, lastDisconnect, qr }) {
+  async onConnection({ connection, lastDisconnect, qr, reachoutTimeLock }) {
+    if (reachoutTimeLock) await this.setReachout(reachoutTimeLock);
     if (qr) {
       this.qr = qr;
       this.qrDataUrl = await QRCode.toDataURL(qr, { margin: 2, width: 300 });
@@ -283,7 +285,33 @@ export class Session extends EventEmitter {
     }
   }
 
+  /** Ask WhatsApp whether this number is currently blocked from starting new chats (checked on connect + hourly). */
+  async checkReachout() {
+    if (!this.sock?.fetchAccountReachoutTimelock) return;
+    try {
+      await this.setReachout(await this.sock.fetchAccountReachoutTimelock());
+    } catch (err) {
+      this.log.debug({ err: err.message }, 'reach-out check failed');
+    }
+  }
+
+  async setReachout(r) {
+    const until = r?.timeEnforcementEnds ? new Date(r.timeEnforcementEnds).toISOString() : null;
+    const next = { isActive: !!r?.isActive, timeEnforcementEnds: until, checkedAt: new Date().toISOString() };
+    const was = this.reachout?.isActive;
+    this.reachout = next;
+    if (next.isActive && !was) {
+      const when = until ? new Date(until).toLocaleString('en-IN', { timeZone: process.env.TZ_NAME || 'Asia/Kolkata' }) : 'unknown';
+      await logEvent(this.id, 'warn', `WhatsApp says this number may not message new people until ${when}. Messages to new numbers wait; existing chats continue.`);
+    } else if (!next.isActive && was) await logEvent(this.id, 'info', 'WhatsApp lifted the block on messaging new people.');
+    this.emit('change', this.info());
+  }
+
   async afterOpen() {
+    await this.checkReachout();
+    clearInterval(this.reachoutTimer);
+    this.reachoutTimer = setInterval(() => this.status === 'open' && this.checkReachout(), 60 * 60 * 1000);
+    this.reachoutTimer.unref?.();
     const groups = await this.sock.groupFetchAllParticipating().catch(() => ({}));
     await this.enqueue(() => this.saveGroups(Object.values(groups)));
     const blocked = await this.sock.fetchBlocklist().catch(() => null);
@@ -293,6 +321,7 @@ export class Session extends EventEmitter {
   async stop() {
     this.stopping = true;
     clearTimeout(this.leaseRetry);
+    clearInterval(this.reachoutTimer);
     try {
       this.sock?.end(undefined);
     } catch {}

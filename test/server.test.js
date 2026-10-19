@@ -877,3 +877,76 @@ test('job roles: lists, tasks and log kept separate per role; earlier batches ne
   assert.ok(!/Front office – Batch 1/.test(act), 'chef log does not show front office entries');
   assert.deepEqual((await call('GET', '/api/roles')).data.filter((r) => ['Chef', 'Front office'].includes(r)), ['Chef', 'Front office']);
 });
+
+test('new-number limit: hard maximum 45 per rolling 24 h, held in the queue, existing chats continue', async () => {
+  const { normalizeSettings, NEW_CHATS_HARD_MAX } = await import('../src/settings.js');
+  assert.equal(NEW_CHATS_HARD_MAX, 45);
+  assert.equal(normalizeSettings({}).newChatsPer24h, 42, 'default 48 − 6');
+  assert.equal(normalizeSettings({ newChatsPer24h: 99 }).newChatsPer24h, 45, 'can never be set above 45');
+  await manager.create({ id: 'lim', label: 'Limited' });
+  fake('lim');
+  await manager.update('lim', { settings: { aiMode: 'auto', newChatsPer24h: 2, delayMinSec: 5, delayMaxSec: 5, anytime: true } });
+  const now = Math.floor(Date.now() / 1000);
+  // two new chats started by us in the last 24 h (one typed on the phone), one old chat, one chat they started
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
+    ('lim','917000000001@s.whatsapp.net','L1',true,${now - 3600},'text','hi'),
+    ('lim','917000000002@s.whatsapp.net','L2',true,${now - 600},'text','hi'),
+    ('lim','917000000003@s.whatsapp.net','L3',false,${now - 90000},'text','hello'),
+    ('lim','917000000003@s.whatsapp.net','L4',true,${now - 300},'text','reply'),
+    ('lim','917000000004@s.whatsapp.net','L5',false,${now - 200},'text','they wrote first'),
+    ('lim','917000000004@s.whatsapp.net','L6',true,${now - 100},'text','answer')`);
+  const st = await outbox.newChatsStatus('lim', normalizeSettings({ newChatsPer24h: 2 }));
+  assert.equal(st.count, 2, 'only chats we started in the last 24 h count');
+  assert.ok(st.nextFreeAt instanceof Date);
+  const before = sent.length;
+  await mcp('bulk_send', { account: 'lim', title: 'Over limit', text: 'Hi {name}', recipients: [{ to: '7000000009', name: 'New' }, { to: '7000000003', name: 'Known' }], skip_if_contacted_days: 0 });
+  await until(() => sent.slice(before).some((s) => s.jid === '917000000003@s.whatsapp.net'), 8000);
+  await sleep(300);
+  assert.ok(!sent.slice(before).some((s) => s.jid === '917000000009@s.whatsapp.net'), 'new number held at the limit');
+  assert.match(await mcp('recent_activity', { account: 'lim', who: 'system' }), /New-number limit reached: 2 new numbers/);
+  // your own send to a new number is refused with the reason, not silently queued
+  const r = await call('POST', '/api/send', { account: 'lim', to: '7000000010', text: 'hello' });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /New-number limit reached/);
+  // WhatsApp's own block also holds new chats
+  await manager.update('lim', { settings: { newChatsPer24h: 45 } });
+  manager.get('lim').reachout = { isActive: true, timeEnforcementEnds: new Date(Date.now() + 3600e3).toISOString() };
+  await assert.rejects(outbox.assertNewChatAllowed(manager.get('lim'), '917000000011@s.whatsapp.net'), /WhatsApp has blocked/);
+  manager.get('lim').reachout = null;
+  await until(() => sent.slice(before).some((s) => s.jid === '917000000009@s.whatsapp.net'), 8000);
+  assert.match(await mcp('list_accounts'), /lim .*new numbers last 24h: 2\/45/); // the fake WhatsApp doesn't store sent messages
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'lim' AND status IN ('draft','queued')`);
+  await manager.remove('lim');
+});
+
+test('move selected messages to another number: they become drafts there, the list follows', async () => {
+  await manager.create({ id: 'spare', label: 'Spare' });
+  fake('spare');
+  await mcp('import_list', { account: 'hiring', name: 'Movers', role: 'Movers', members: [{ phone: '9400000001', name: 'A', message: 'Hi A' }, { phone: '9400000002', name: 'B', message: 'Hi B' }, { phone: '9400000003', name: 'C', message: 'Hi C' }] });
+  await mcp('send_to_list', { list: 'Movers' });
+  const rows = await query(`SELECT o.id FROM outbox o JOIN lists l ON l.id = o.list_id WHERE l.name = 'Movers' ORDER BY o.id`);
+  assert.equal(rows.length, 3);
+  await call('POST', '/api/outbox/approve-selected', { ids: [rows[0].id] }); // one already approved (queued)
+  // move all three (a queued one included) → drafts on the spare number
+  const m = await call('POST', '/api/outbox/move', { ids: rows.map((r) => r.id), account: 'spare' });
+  assert.equal(m.status, 200, JSON.stringify(m.data));
+  assert.equal(m.data.moved, 3 - (await query(`SELECT count(*)::int n FROM outbox WHERE id = $1 AND status = 'sent'`, [rows[0].id]))[0].n, JSON.stringify(m.data));
+  const after = await query(`SELECT account_id, status FROM outbox WHERE id = ANY($1::bigint[]) AND status <> 'sent'`, [rows.map((r) => r.id)]);
+  assert.ok(after.every((r) => r.account_id === 'spare' && r.status === 'draft'));
+  const [l] = await query(`SELECT account_id FROM lists WHERE name = 'Movers'`);
+  assert.equal(l.account_id, 'spare', 'list moved with its messages (follow-ups from the new number)');
+  assert.match(await mcp('recent_activity', { account: 'spare' }), /Received \d+ messages from "hiring"/);
+  // reject one, approve the rest
+  const left = await query(`SELECT id FROM outbox WHERE account_id = 'spare' AND status = 'draft' ORDER BY id`);
+  assert.equal((await call('POST', '/api/outbox/reject-selected', { ids: [left[0].id] })).data.rejected, 1);
+  assert.equal((await call('POST', '/api/outbox/approve-selected', { ids: left.slice(1).map((r) => r.id) })).data.approved, left.length - 1);
+  assert.equal((await call('POST', '/api/outbox/move', { ids: [], account: 'spare' })).status, 400);
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'spare' AND status IN ('draft','queued')`);
+  await manager.remove('spare');
+});
+
+test('alert phones: any format is cleaned to digits with country code', async () => {
+  const r = await call('PUT', '/api/alerts', { phones: '+91 63613 21377, 98450-12345' });
+  assert.deepEqual(r.data.phones, ['916361321377', '919845012345']);
+  await call('PUT', '/api/alerts', { phones: '' });
+});

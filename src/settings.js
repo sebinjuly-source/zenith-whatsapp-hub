@@ -6,6 +6,14 @@ import config from './config.js';
 
 export const MIN_DELAY_SEC = 5;
 
+/**
+ * New numbers (people this WhatsApp number has never chatted with) per rolling 24 hours: a hard ceiling that no
+ * setting can exceed. Set on 19 Oct 2026 from real data: Seema's number was blocked by WhatsApp for 24 h after
+ * messaging 48 new numbers in 24 h → absolute limit 48 − 3 = 45, default working limit 48 − 6 = 42.
+ */
+export const NEW_CHATS_HARD_MAX = 45;
+export const NEW_CHATS_DEFAULT = 42;
+
 export const DEFAULT_SETTINGS = {
   // How messages written by AI agents or campaigns go out: 'approve' = saved as drafts for you to approve,
   // 'auto' = sent automatically (still through the delay/limit rules below).
@@ -17,6 +25,9 @@ export const DEFAULT_SETTINGS = {
   typing: true,
   // Max automated messages (campaign + AI) per day. API/dashboard sends you make yourself are not capped.
   dailyCap: 35,
+  // First messages to NEW numbers (never chatted before) in any rolling 24 h, from every source — including you,
+  // scripts and the phone itself. Never above NEW_CHATS_HARD_MAX.
+  newChatsPer24h: NEW_CHATS_DEFAULT,
   // Send at any time of day, every day. Turn off to use the window below (your timezone).
   anytime: true,
   sendStart: '10:00',
@@ -57,6 +68,7 @@ export function normalizeSettings(input = {}) {
     typing: !!s.typing,
     anytime: s.anytime !== false,
     dailyCap: clampInt(s.dailyCap, 0, 1000, DEFAULT_SETTINGS.dailyCap),
+    newChatsPer24h: clampInt(s.newChatsPer24h, 0, NEW_CHATS_HARD_MAX, NEW_CHATS_DEFAULT),
     sendStart: isTime(s.sendStart) ? s.sendStart : DEFAULT_SETTINGS.sendStart,
     sendEnd: isTime(s.sendEnd) ? s.sendEnd : DEFAULT_SETTINGS.sendEnd,
     sendDays: Array.isArray(s.sendDays)

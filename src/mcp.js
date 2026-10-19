@@ -104,10 +104,13 @@ function buildServer(playbook = '') {
       const mode = normalizeSettings(a.settings).historyMode;
       const phases = a.sync?.phases || {};
       const imported = mode === 'full' ? phases.FULL : mode === 'recent' ? phases.RECENT : phases.INITIAL_BOOTSTRAP;
+      const nc = await outbox.newChatsStatus(a.id, normalizeSettings(a.settings));
       lines.push(
         `${a.id}${a.isDefault ? ' (default)' : ''} | ${a.label} | purpose: ${a.purpose || '-'} | +${a.phone || '?'} | ${a.status} | ai:${a.settings.aiMode} | ` +
           `${st.chats} chats (${st.groups} groups), ${st.contacts} contacts, ${st.messages} msgs since ${fmtTime(st.oldest_ts)} | history chosen at link: ${HISTORY_MODES[mode]} (${imported === 'complete' ? 'imported' : 'importing'})` +
-          (bf ? ` | deep history #${bf.id}: ${bf.status}${bf.result ? ' — ' + bf.result : ''}` : ''),
+          (bf ? ` | deep history #${bf.id}: ${bf.status}${bf.result ? ' — ' + bf.result : ''}` : '') +
+          ` | new numbers last 24h: ${nc.count}/${nc.limit}${nc.nextFreeAt ? ' (limit reached)' : ''}` +
+          (a.reachout?.isActive ? ` | WHATSAPP BLOCKS NEW CHATS until ${a.reachout.timeEnforcementEnds || '?'}` : ''),
       );
     }
     return lines.join('\n') || 'No accounts yet.';

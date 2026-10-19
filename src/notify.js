@@ -13,7 +13,7 @@ export async function alertPhones() {
   const [r] = await query(`SELECT value FROM config WHERE key = 'alerts'`).catch(() => []);
   const fromDb = r?.value?.phones || [];
   const fromEnv = (process.env.ALERT_PHONE || '').split(',');
-  return [...new Set([...fromDb, ...fromEnv].map((p) => String(p).replace(/D/g, '')).filter((p) => p.length >= 10)
+  return [...new Set([...fromDb, ...fromEnv].map((p) => String(p).replace(/\D/g, '')).filter((p) => p.length >= 10)
     .map((p) => (p.length === 10 ? '91' + p : p)))];
 }
 
