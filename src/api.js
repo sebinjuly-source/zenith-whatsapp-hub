@@ -14,6 +14,7 @@ import * as store from './store.js';
 import * as outbox from './outbox.js';
 import { getMedia } from './media.js';
 import { mountMcp } from './mcp.js';
+import { mountMetaWebhook } from './meta.js';
 import { toTs } from './util.js';
 import * as tasks from './tasks.js';
 import * as templates from './templates.js';
@@ -52,7 +53,8 @@ function authed(req) {
 
 export function buildApp() {
   const app = express();
-  app.use(express.json({ limit: '30mb' }));
+  // Raw body kept only for Meta's webhook signature check.
+  app.use(express.json({ limit: '30mb', verify: (req, res, buf) => { if (req.url.startsWith('/meta/')) req.rawBody = buf; } }));
   app.use(cookieParser());
 
   app.get('/health', (req, res) =>
@@ -71,6 +73,9 @@ export function buildApp() {
     res.json({ ok: true });
   });
   app.post('/logout', (req, res) => res.clearCookie('hub_key').json({ ok: true }));
+
+  // Meta WhatsApp Cloud API webhook (its own checks: verify token + signature).
+  mountMetaWebhook(app);
 
   // MCP for AI agents: <server>/mcp/<API_KEY>
   mountMcp(app);

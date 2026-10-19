@@ -1025,3 +1025,23 @@ test('queue status explains what waits, why and until when; drafts show the list
   assert.equal(c?.name, 'Sagar Kumar', 'the sending number now knows the name (inbox shows it)');
   await manager.remove('qs');
 });
+
+test('Meta webhook: answers the verify check only with the right token, checks the signature', async () => {
+  const crypto = await import('crypto');
+  process.env.META_VERIFY_TOKEN = 'verify-test-word';
+  process.env.META_APP_SECRET = 'app-secret-test';
+  try {
+    const ok = await fetch(`${base}/meta/webhook?hub.mode=subscribe&hub.verify_token=verify-test-word&hub.challenge=12345`);
+    assert.equal(ok.status, 200);
+    assert.equal(await ok.text(), '12345');
+    assert.equal((await fetch(`${base}/meta/webhook?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=1`)).status, 403);
+    const body = JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: '111' }, messages: [{ id: 'x' }] } }] }] });
+    const sig = 'sha256=' + crypto.createHmac('sha256', 'app-secret-test').update(body).digest('hex');
+    const post = (s) => fetch(`${base}/meta/webhook`, { method: 'POST', body, headers: { 'content-type': 'application/json', 'x-hub-signature-256': s } });
+    assert.equal((await post(sig)).status, 200);
+    assert.equal((await post('sha256=bad')).status, 401);
+  } finally {
+    delete process.env.META_VERIFY_TOKEN;
+    delete process.env.META_APP_SECRET;
+  }
+});
