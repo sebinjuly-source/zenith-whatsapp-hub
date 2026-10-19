@@ -7,6 +7,7 @@
 import { EventEmitter } from 'events';
 import { query, logEvent } from './db.js';
 import config from './config.js';
+import logger from './logger.js';
 import { manager } from './wa/manager.js';
 import { loadOutgoing } from './media.js';
 import { toJid } from './store.js';
@@ -186,18 +187,19 @@ export async function rejectMany(ids) {
 }
 
 /**
- * Move unsent messages (drafts and queued) to another number — e.g. when a number is blocked. They become drafts
- * again on the new number, so nothing goes out from it without your approval. A list or task whose remaining
- * messages all moved moves with them (follow-ups then come from the new number).
+ * Move unsent messages (drafts and queued) to another number — e.g. when a number is blocked. Each keeps its state:
+ * drafts stay drafts (still need approval), approved messages stay approved and go out from the new number within
+ * its limits. A list or task whose remaining messages all moved moves with them (follow-ups then come from there).
  */
 export async function moveToAccount(ids, account) {
   const target = await manager.resolve(account);
   const rows = await query(
-    `UPDATE outbox o SET account_id = $2, status = 'draft', idem_key = NULL, scheduled_at = now()
+    `UPDATE outbox o SET account_id = $2, idem_key = NULL, scheduled_at = now()
      FROM outbox old WHERE old.id = o.id AND o.id = ANY($1::bigint[]) AND o.status IN ('draft','queued') AND o.account_id <> $2
-     RETURNING o.id, old.account_id AS from_account, o.task_id, o.list_id`,
+     RETURNING o.id, old.account_id AS from_account, o.status, o.task_id, o.list_id, o.to_jid`,
     [ids.map(Number), target.id],
   );
+  for (const r of rows) if (r.list_id) await rememberName(target.id, r).catch(() => {});
   const stillThere = (col, id) => query(
     `SELECT 1 FROM outbox WHERE ${col} = $1 AND account_id <> $2 AND status IN ('draft','queued','sending') LIMIT 1`, [id, target.id]);
   for (const t of new Set(rows.map((r) => r.task_id).filter(Boolean))) {
@@ -207,7 +209,25 @@ export async function moveToAccount(ids, account) {
     if (!(await stillThere('list_id', l)).length) await query('UPDATE lists SET account_id = $2 WHERE id = $1', [l, target.id]);
   }
   await afterBatchChange(rows);
-  return { moved: rows.length, to: target.id, toLabel: target.account.label, from: countBy(rows, 'from_account') };
+  if (rows.some((r) => r.status === 'queued')) wake(target.id);
+  return {
+    moved: rows.length, to: target.id, toLabel: target.account.label, from: countBy(rows, 'from_account'),
+    drafts: rows.filter((r) => r.status === 'draft').length, approved: rows.filter((r) => r.status === 'queued').length,
+  };
+}
+
+/**
+ * Someone messaged from a list gets their list name in the sending number's contacts, so its inbox and drafts show
+ * "Sagar" instead of bare digits (a new or moved-to number has no saved contacts yet). Never overwrites a name.
+ */
+async function rememberName(accountId, row) {
+  await query(
+    `INSERT INTO contacts (account_id, jid, phone, name)
+     SELECT $1, m.jid, m.phone, m.name FROM list_members m
+     WHERE m.list_id = $2 AND m.jid = $3 AND COALESCE(m.name, '') <> ''
+     ON CONFLICT (account_id, jid) DO UPDATE SET name = COALESCE(NULLIF(contacts.name, ''), EXCLUDED.name)`,
+    [accountId, row.list_id, row.to_jid],
+  );
 }
 
 const countBy = (rows, key) => rows.reduce((m, r) => ({ ...m, [r[key]]: (m[r[key]] || 0) + 1 }), {});
@@ -248,8 +268,9 @@ export async function listOutbox({ account, status, taskId, limit = 50 } = {}) {
   }
   p.push(Math.min(limit, 500));
   return query(
-    `SELECT o.*, COALESCE(ct.name, ct.notify, ch.name) AS to_name, t.title AS task_title
+    `SELECT o.*, COALESCE(NULLIF(ct.name, ''), NULLIF(lm.name, ''), ct.notify, ch.name) AS to_name, t.title AS task_title
      FROM outbox o
+     LEFT JOIN list_members lm ON lm.list_id = o.list_id AND lm.jid = o.to_jid
      LEFT JOIN contacts ct ON ct.account_id = o.account_id AND ct.jid = o.to_jid
      LEFT JOIN chats ch ON ch.account_id = o.account_id AND ch.jid = o.to_jid
      LEFT JOIN tasks t ON t.id = o.task_id
@@ -381,6 +402,52 @@ function wake(accountId) {
   else startWorker(accountId);
 }
 
+/**
+ * Plain answer to "why is this waiting, and when will it go?" for one number's queue: counts, the limit that
+ * currently holds messages back (if any), when it frees up, and roughly how long the whole queue takes.
+ */
+export async function queueStatus(accountId) {
+  const session = manager.get(accountId);
+  const s = session.settings;
+  const [q] = await query(
+    `SELECT count(*) FILTER (WHERE status = 'queued')::int AS queued,
+            count(*) FILTER (WHERE status = 'draft')::int AS drafts,
+            count(*) FILTER (WHERE status = 'queued' AND source = ANY($2))::int AS queued_automated,
+            count(*) FILTER (WHERE status = 'queued' AND to_jid NOT LIKE '%@g.us' AND ${IS_NEW_CHAT('$1', 'o.to_jid')})::int AS queued_new
+     FROM outbox o WHERE account_id = $1 AND status IN ('queued','draft')`,
+    [accountId, AUTOMATED],
+  );
+  const [a] = await query(
+    `SELECT count(*)::int AS n, min(sent_at) AS oldest FROM outbox
+     WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND sent_at > now() - interval '24 hours'`,
+    [accountId, AUTOMATED],
+  );
+  const nc = await newChatsStatus(accountId, s);
+  const blocked = whatsappBlocksNewChats(session);
+  const capFreeAt = a.n >= s.dailyCap && a.oldest ? new Date(new Date(a.oldest).getTime() + 24 * 3600e3) : null;
+  const nextAt = workers.get(accountId)?.nextAt?.() || 0;
+  let state = 'sending';
+  let reason = '';
+  let until = null;
+  if (!q.queued) state = 'idle';
+  else if (!session.account.enabled) { state = 'held'; reason = 'Number is paused (Settings)'; }
+  else if (session.status !== 'open') { state = 'held'; reason = `Number is not connected (${session.status}) — messages go out once it is`; }
+  else if (q.queued_automated && !insideSendingWindow(s)) { state = 'held'; reason = `Outside sending hours (${s.sendStart}–${s.sendEnd})`; }
+  else if (q.queued_automated && a.n >= s.dailyCap) { state = 'held'; reason = `Automated limit reached: ${a.n} of ${s.dailyCap} in the last 24 hours`; until = capFreeAt; }
+  else if (q.queued_new && blocked) { state = 'held'; reason = 'WhatsApp blocks messages to new numbers for now'; until = session.reachout.timeEnforcementEnds ? new Date(session.reachout.timeEnforcementEnds) : null; }
+  else if (q.queued_new && q.queued_new === q.queued && nc.count >= nc.limit) { state = 'held'; reason = `New-number limit reached: ${nc.count} of ${nc.limit} in the last 24 hours`; until = nc.nextFreeAt; }
+  else if (nextAt > Date.now()) { reason = 'Waiting the random gap between messages'; until = new Date(nextAt); }
+  // Rough finish time: what each rolling 24 h allows, from here on.
+  const perDay = Math.max(1, Math.min(s.dailyCap, q.queued_new ? nc.limit : Infinity));
+  const days = q.queued ? Math.ceil(q.queued / perDay) : 0;
+  return {
+    account: accountId, label: session.account.label, connection: session.status, state, reason, until,
+    queued: q.queued, drafts: q.drafts, queuedNew: q.queued_new,
+    automated24h: a.n, dailyCap: s.dailyCap, newChats: nc, perDay, days,
+    gapSec: [s.delayMinSec, s.delayMaxSec],
+  };
+}
+
 const holdNoted = new Map(); // accountId -> until (ms): log "limit reached" once per hold
 
 /** Activity entry (once per hold) explaining why messages to new numbers are waiting. */
@@ -399,7 +466,7 @@ async function noteNewChatHold(accountId, reachout, nc) {
 function startWorker(accountId) {
   let wakeUp = () => {};
   let nextAutomatedAt = 0; // random gap applies between automated messages only
-  workers.set(accountId, { wake: () => wakeUp() });
+  workers.set(accountId, { wake: () => wakeUp(), nextAt: () => nextAutomatedAt });
   const nap = (ms) =>
     new Promise((resolve) => {
       const t = setTimeout(resolve, ms);
@@ -464,20 +531,29 @@ function startWorker(accountId) {
     }
     const automated = AUTOMATED.includes(row.source);
     let result;
+    let sent;
+    let sendError;
     try {
       const content = await buildContent(row.payload);
       const textLen = (row.payload.text || '').length;
       // "typing…" is for AI/bulk messages; your own and Apps Script sends go out straight away
       const typingMs = automated && s.typing ? Math.min(6000, Math.max(1500, textLen * 40)) : 0;
       const quoted = row.payload.replyTo ? await quotedMessage(session.id, row.to_jid, row.payload.replyTo) : undefined;
-      const sent = await session.send(row.to_jid, content, { typingMs, quoted });
+      sent = await session.send(row.to_jid, content, { typingMs, quoted });
+    } catch (err) {
+      sendError = err;
+    }
+    // Recording the result is separate from sending: if the database hiccups here, the row stays "sending" and
+    // the sweep marks it sent (it finds the message in the chat) — a delivered message is never called "failed".
+    if (sendError) {
+      [result] = await query(`UPDATE outbox SET status = 'failed', error = $2 WHERE id = $1 RETURNING *`, [row.id, sendError.message]);
+      await logEvent(accountId, 'warn', `Send to ${row.to_jid.split('@')[0]} failed: ${sendError.message}`);
+    } else {
       [result] = await query(
         `UPDATE outbox SET status = 'sent', sent_at = now(), message_id = $2, error = NULL WHERE id = $1 RETURNING *`,
         [row.id, sent?.key?.id || null],
       );
-    } catch (err) {
-      [result] = await query(`UPDATE outbox SET status = 'failed', error = $2 WHERE id = $1 RETURNING *`, [row.id, err.message]);
-      await logEvent(accountId, 'warn', `Send to ${row.to_jid.split('@')[0]} failed: ${err.message}`);
+      if (row.list_id) await rememberName(accountId, row).catch(() => {});
     }
     done.emit(String(row.id), result);
     if (row.task_id) await refreshTask(row.task_id).catch(() => {});
@@ -566,15 +642,33 @@ async function runJobs(session) {
 }
 
 export async function sweepStuck() {
+  // If WhatsApp has our message in that chat since the send started, it did go out (only the "sent" note was
+  // lost, e.g. a database hiccup) — mark it sent, so it is never re-sent as "failed".
+  const went = await query(
+    `WITH found AS (
+       SELECT o.id, (SELECT x.id FROM messages x WHERE x.account_id = o.account_id AND x.chat_jid = o.to_jid AND x.from_me
+                     AND x.ts >= extract(epoch FROM o.sent_at)::bigint - 5 ORDER BY x.ts LIMIT 1) AS msg
+       FROM outbox o WHERE o.status = 'sending' AND o.sent_at < now() - interval '4 minutes')
+     UPDATE outbox SET status = 'sent', message_id = found.msg, error = NULL
+     FROM found WHERE outbox.id = found.id AND found.msg IS NOT NULL RETURNING outbox.task_id, outbox.list_id`,
+  );
   const rows = await query(
     `UPDATE outbox SET status = 'failed', error = 'Interrupted (server restart) — check the chat before resending'
-     WHERE status = 'sending' AND sent_at < now() - interval '4 minutes' RETURNING task_id`,
+     WHERE status = 'sending' AND sent_at < now() - interval '4 minutes' RETURNING task_id, list_id`,
   );
-  for (const r of rows) if (r.task_id) await refreshTask(r.task_id).catch(() => {});
+  await afterBatchChange([...went, ...rows]);
 }
 
 export async function startOutbox() {
   await sweepStuck();
+  // Names for people messaged from lists (also those moved between numbers before this existed).
+  await query(
+    `INSERT INTO contacts (account_id, jid, phone, name)
+     SELECT DISTINCT ON (o.account_id, o.to_jid) o.account_id, o.to_jid, m.phone, m.name
+     FROM outbox o JOIN list_members m ON m.list_id = o.list_id AND m.jid = o.to_jid
+     WHERE COALESCE(m.name, '') <> ''
+     ON CONFLICT (account_id, jid) DO UPDATE SET name = COALESCE(NULLIF(contacts.name, ''), EXCLUDED.name)`,
+  ).catch((err) => logger.warn({ err: err.message }, 'name backfill failed'));
   setInterval(() => sweepStuck().catch(() => {}), 5 * 60000).unref();
   // Tasks scheduled for later move to "in progress" when their time comes.
   setInterval(async () => {

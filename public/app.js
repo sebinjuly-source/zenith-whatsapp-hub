@@ -16,7 +16,7 @@
       else if (k === 'checked') el.checked = !!v;
       else el.setAttribute(k, v === true ? '' : v);
     }
-    for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
     return el;
   }
   const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
@@ -902,7 +902,7 @@
       refreshSel();
     };
     const accountOptions = (current) => state.accounts.map((a) => h('option', { value: a.id, selected: a.id === current },
-      `${a.label}${a.phone ? ' · +' + a.phone : ''}${a.status === 'open' ? '' : ' (' + (a.status === 'qr' ? 'not linked yet' : a.status) + ')'}`));
+      `${a.label}${a.phone ? ' · +' + a.phone : ''}${a.status === 'open' ? '' : a.status === 'qr' ? ' (not linked yet)' : ' (not connected)'}`));
     const limitOf = (id) => {
       const a = state.accounts.find((x) => x.id === id);
       return Math.min(a?.settings?.dailyCap ?? 35, a?.settings?.newChatsPer24h ?? 42) || 1;
@@ -914,19 +914,19 @@
     };
     const moveTo = async (ids, to) => {
       const r = await api('/api/outbox/move', { body: { ids, account: to } });
-      toast(`Moved ${r.moved} to ${r.toLabel} — they wait there as drafts for your approval`);
+      toast(r.moved ? `Moved ${r.moved} to ${r.toLabel}${r.approved ? ` — ${r.approved} go out from there by themselves` : ''}${r.drafts ? ` — ${r.drafts} drafts still need your approval` : ''}` : 'Nothing to move: they are already on that number');
       viewOutbox();
     };
     const items = rows.map((r) => {
       const ta = h('textarea', { rows: 3, value: r.payload.text || r.payload.attachment?.caption || '' });
       let cb = null;
       if (movable(r)) {
-        cb = h('input', { type: 'checkbox', 'aria-label': 'Select', onchange: (e) => { if (e.target.checked) sel.add(r.id); else sel.delete(r.id); refreshSel(); } });
+        cb = h('input', { type: 'checkbox', 'aria-label': `Select ${r.to_name || r.to_jid.split('@')[0]}`, onchange: (e) => { if (e.target.checked) sel.add(r.id); else sel.delete(r.id); refreshSel(); } });
         boxes.push([cb, r.id]);
       }
       const from = movable(r) && state.accounts.length > 1
         ? h('select', { class: 'tag', title: 'Number that sends this message', style: 'width:auto;padding:2px 6px', onchange: guard(async (e) => {
-            if (!confirm(`Send this message from "${labelOf(e.target.value)}" instead? It will wait there as a draft for your approval.`)) { e.target.value = r.account_id; return; }
+            if (!confirm(`Send this message from "${labelOf(e.target.value)}" instead?${r.status === 'queued' ? ' It is already approved and will go out from there by itself.' : ' It stays a draft until you approve it.'}`)) { e.target.value = r.account_id; return; }
             await moveTo([r.id], e.target.value);
           }) }, accountOptions(r.account_id))
         : h('span', { class: 'tag', title: 'Sent from this number' }, 'From: ' + labelOf(r.account_id));
@@ -958,25 +958,35 @@
         state.accounts.length > 1 ? h('button', { class: 'btn small', onclick: guard(async () => {
           if (!sel.size) return toast('Tick the messages first');
           if (!moveSel.value) return toast('Choose the number that should send them');
-          if (!confirm(`Move ${sel.size} messages to "${labelOf(moveSel.value)}"?\n\nThey become drafts there and go out only after you approve them, within that number's limits.`)) return;
-          await moveTo([...sel], moveSel.value);
+          const toMove = picked().filter((r) => r.account_id !== moveSel.value);
+          if (!toMove.length) return toast(`They are already on ${labelOf(moveSel.value)}`);
+          const nApproved = toMove.filter((r) => r.status === 'queued').length;
+          if (!confirm(`Move ${toMove.length} messages to "${labelOf(moveSel.value)}"?${sel.size > toMove.length ? ` (${sel.size - toMove.length} ticked are already there.)` : ''}
+
+${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel.value)} by themselves, within its limits.
+` : ''}${toMove.length - nApproved ? `${toMove.length - nApproved} drafts: they still need your approval.` : ''}`)) return;
+          await moveTo(toMove.map((r) => r.id), moveSel.value);
         }) }, 'Move selected') : null,
-        h('button', { class: 'btn small primary', onclick: guard(async () => {
+        rows.some((r) => r.status === 'draft') ? h('button', { class: 'btn small primary', onclick: guard(async () => {
           const list = picked().filter((r) => r.status === 'draft');
-          if (!list.length) return toast('Tick drafts first');
+          if (!list.length) {
+            return toast(sel.size ? 'Those are already approved: queued messages go out by themselves, one by one. Only drafts need approving.' : 'Tick the drafts you want to approve first');
+          }
           if (!confirm(`Approve and send ${list.length} selected drafts as they are?\n\n${paceText(list)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit.`)) return;
           const r = await api('/api/outbox/approve-selected', { body: { ids: list.map((x) => x.id) } });
           toast(`Approved ${r.approved} — queued`);
           viewOutbox();
-        }) }, 'Approve selected'),
+        }) }, 'Approve selected') : null,
         h('button', { class: 'btn small danger', onclick: guard(async () => {
           if (!sel.size) return toast('Tick the messages first');
-          if (!confirm(`Reject ${sel.size} selected messages? They will not be sent.`)) return;
+          if (!confirm(`${tab === 'queued' ? 'Cancel' : 'Reject'} ${sel.size} selected messages? They will not be sent.`)) return;
           const r = await api('/api/outbox/reject-selected', { body: { ids: [...sel] } });
-          toast(`Rejected ${r.rejected}`);
+          toast(`${tab === 'queued' ? 'Cancelled' : 'Rejected'} ${r.rejected}`);
           viewOutbox();
-        }) }, 'Reject selected')),
-      h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, 'Tick messages (or Select all, then untick a few). Move selected changes which number sends them, e.g. when a number is blocked.')) : null;
+        }) }, tab === 'queued' ? 'Cancel selected' : 'Reject selected')),
+      h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, tab === 'queued'
+        ? 'Queued messages are already approved and go out by themselves, one at a time. Tick some (or Select all, then untick a few) to move them to another number or cancel them.'
+        : 'Tick messages (or Select all, then untick a few). Move selected changes which number sends them, e.g. when a number is blocked.')) : null;
     const drafts = rows.filter((r) => r.status === 'draft');
     const approveAllBar = drafts.length > 1 ? h('div', { class: 'card row', style: 'max-width:820px;margin-bottom:16px;align-items:center' },
       h('span', { class: 'grow' }, `${drafts.length}${rows.length >= 200 ? '+' : ''} drafts${acc ? ' from ' + labelOf(acc) : ''}${state.outboxTask ? ` in task #${state.outboxTask}` : ''}`),
@@ -986,11 +996,25 @@
         toast(`Approved ${r.approved} — queued`);
         viewOutbox();
       }) }, `Approve all ${drafts.length}${rows.length >= 200 ? '+' : ''}`)) : null;
+    const statuses = await api(`/api/outbox/status${acc ? '?account=' + encodeURIComponent(acc) : ''}`).catch(() => []);
+    const when = (t) => (t ? new Date(t).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '');
+    const statusCards = statuses.filter((q) => q.queued || q.drafts).map((q) => h('div', { class: 'card', style: `max-width:820px;margin-bottom:10px;border-left:4px solid ${q.state === 'held' ? 'var(--bad)' : 'var(--accent)'}` },
+      h('div', { class: 'row', style: 'align-items:center;flex-wrap:wrap;gap:6px' },
+        h('b', { class: 'grow' }, q.label),
+        q.drafts ? h('span', { class: 'tag' }, `${q.drafts} drafts to approve`) : null,
+        q.queued ? h('span', { class: 'tag' }, `${q.queued} approved, waiting to send`) : null),
+      q.queued ? h('p', { style: 'margin:6px 0 0' },
+        q.state === 'held' ? h('b', { style: 'color:var(--bad)' }, 'On hold: ') : h('b', {}, 'Sending: '),
+        q.state === 'held' ? q.reason : (q.reason ? `${q.reason} (next about ${when(q.until)}). ` : 'next message any moment. '),
+        q.state === 'held' && q.until ? ` — continues about ${when(q.until)}.` : '') : null,
+      q.queued ? h('p', { class: 'muted', style: 'margin:4px 0 0;font-size:12px' },
+        `One every ${q.gapSec[0]}–${q.gapSec[1]} s · automated ${q.automated24h}/${q.dailyCap} and new numbers ${q.newChats.count}/${q.newChats.limit} in the last 24 h · at most ${q.perDay} a day → about ${q.days} day${q.days === 1 ? '' : 's'} for these ${q.queued}.`) : null));
     shell([
       h('h1', {}, 'Drafts & outbox'),
       state.outboxTask ? h('p', {}, `Showing messages of task #${state.outboxTask} · `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); state.outboxTask = null; viewOutbox(); } }, 'show all')) : null,
       h('p', { class: 'sub' }, 'Messages written by AI or campaigns wait here when a number is in approval mode. Edit, approve, reject, or move them to another number.'),
       numberPick,
+      statusCards,
       tabs,
       approveAllBar,
       bar,
@@ -1220,7 +1244,7 @@
     } catch {
       return;
     }
-    window.onhashchange = route;
+    window.onhashchange = () => { if (linkModal) closeLink(); route(); }; // a link window never stays open over another page
     live();
     route();
   }

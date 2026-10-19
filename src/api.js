@@ -359,6 +359,12 @@ export function buildApp() {
     if (r.task) await act(req, r.task.account_id || b.account, `Created bulk send "${b.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);
     res.json(r);
   }));
+  // Per number: what is waiting, why, and until when (?account= for one number)
+  api.get('/outbox/status', wrap(async (req, res) => {
+    await manager.refresh();
+    const ids = req.query.account ? [(await manager.resolve(req.query.account)).id] : manager.list().map((a) => a.id);
+    res.json(await Promise.all(ids.map((id) => outbox.queueStatus(id))));
+  }));
   // Approve all drafts: { account?, task? } — omitted = every number
   api.post('/outbox/approve-all', wrap(async (req, res) => {
     const b = req.body || {};
@@ -389,7 +395,7 @@ export function buildApp() {
     const r = await outbox.moveToAccount(ids, req.body.account);
     for (const [acc, n] of Object.entries(r.from)) {
       await act(req, acc, `Moved ${n} unsent messages to "${r.toLabel}"`);
-      await act(req, r.to, `Received ${n} messages from "${acc}" — waiting as drafts for approval`);
+      await act(req, r.to, `Received ${n} messages from "${acc}" (${r.approved} already approved, ${r.drafts} drafts)`);
     }
     res.json(r);
   }));

@@ -263,6 +263,26 @@ export async function setPipeline(listId, settings) {
   return u;
 }
 
+/** The numbers a list sends from: its own, plus any its messages were moved to. */
+async function listNumbers(list) {
+  const rows = await query(`SELECT DISTINCT account_id FROM outbox WHERE list_id = $1`, [list.id]);
+  return [...new Set([list.account_id, ...rows.map((r) => r.account_id)])];
+}
+
+/**
+ * Which of the list's numbers has the conversation with this person: the one that exchanged a message with them
+ * most recently (like Chatwoot, a reply goes out through the inbox the conversation lives in). So a follow-up
+ * never arrives from a number the person has never heard from. Falls back to the list's number.
+ */
+async function chatAccountFor(list, jid) {
+  const nums = await listNumbers(list);
+  const [r] = await query(
+    `SELECT account_id FROM messages WHERE chat_jid = $1 AND account_id = ANY($2) ORDER BY ts DESC LIMIT 1`,
+    [jid, nums],
+  );
+  return r?.account_id || list.account_id;
+}
+
 const fmtVisit = (t) => new Date(t).toLocaleString('en-IN', { timeZone: process.env.TZ_NAME || 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 
 /**
@@ -275,19 +295,26 @@ const fmtVisit = (t) => new Date(t).toLocaleString('en-IN', { timeZone: process.
 export async function runPipeline() {
   const lists = await query(`SELECT * FROM lists`);
   for (const list of lists) {
-    const session = manager.sessions.get(list.account_id);
-    if (session?.status !== 'open') continue;
     const p = { ...DEFAULT_PIPELINE, ...(list.pipeline || {}) };
     if (!p.enabled) continue;
+    // Each person is messaged from the number that has their chat (a batch may span two numbers after a move).
+    // Only the server holding that number acts, and a number that is offline/blocked just waits (nothing is marked done).
+    if (!(await listNumbers(list)).some((id) => manager.sessions.get(id)?.status === 'open')) continue;
     try {
-      const approve = !p.autoSend && session.settings.aiMode === 'approve';
+      const woke = new Set();
       const send = async (m, text, note) => {
+        const acc = await chatAccountFor(list, m.jid);
+        const session = manager.sessions.get(acc);
+        if (session?.status !== 'open') return false;
+        const approve = !p.autoSend && session.settings.aiMode === 'approve';
         const first = (m.name || '').trim().split(/\s+/)[0];
         const body = fillTemplate(text, { ...m.fields, name: m.name, first_name: first, phone: m.phone, visit_date: m.visit_at ? fmtVisit(m.visit_at) : '' });
         await query(
           `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, list_id) VALUES ($1,$2,$3,'campaign',$4,5,$5,$6)`,
-          [list.account_id, m.jid, JSON.stringify({ text: body }), approve ? 'draft' : 'queued', note, list.id],
+          [acc, m.jid, JSON.stringify({ text: body }), approve ? 'draft' : 'queued', note, list.id],
         );
+        woke.add(acc);
+        return true;
       };
       const pending = (note) => `NOT EXISTS (SELECT 1 FROM outbox o WHERE o.list_id = m.list_id AND o.to_jid = m.jid AND o.note = '${note}' AND o.status IN ('draft','queued','sending'))`;
       // 1. interested but no date yet → ask for one
@@ -296,9 +323,11 @@ export async function runPipeline() {
            AND COALESCE(m.last_reply_at, m.stage_at, m.updated_at) <= now() - ($2 || ' hours')::interval AND ${pending('ask-date')}`,
         [list.id, String(p.askDateAfterHours)],
       );
+      let asked = 0;
       for (const m of ask) {
-        await send(m, p.askDateText, 'ask-date');
+        if (!(await send(m, p.askDateText, 'ask-date'))) continue;
         await query('UPDATE list_members SET asked_date_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
+        asked++;
       }
       // 2. date given → reminder before the visit + task for you
       const remind = await query(
@@ -306,8 +335,10 @@ export async function runPipeline() {
            AND m.visit_at > now() AND m.visit_at <= now() + ($2 || ' hours')::interval`,
         [list.id, String(p.remindHoursBefore)],
       );
+      let reminded = 0;
       for (const m of remind) {
-        await send(m, p.reminderText, 'visit-reminder');
+        if (!(await send(m, p.reminderText, 'visit-reminder'))) continue;
+        reminded++;
         await createTask({ account: list.account_id, title: `Visit: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminder sent to +${m.phone}. Update the stage after the visit.`, dueAt: m.visit_at, createdBy: 'rule', role: list.role });
         await query('UPDATE list_members SET reminded_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
       }
@@ -320,9 +351,9 @@ export async function runPipeline() {
         await createTask({ account: list.account_id, title: `Did ${m.name || m.phone} come? (${fmtVisit(m.visit_at)})`, details: `${list.name}: set the stage to visited / trial / no_show.`, createdBy: 'rule', role: list.role });
         await query('UPDATE list_members SET checked_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
       }
-      if (ask.length + remind.length) outbox.wakeAccount(list.account_id);
-      if (ask.length + remind.length + check.length) {
-        await logEvent(list.account_id, 'info', `Pipeline "${list.name}": ${ask.length} asked for a date, ${remind.length} visit reminders, ${check.length} visit checks`, 'system', list.role);
+      for (const acc of woke) outbox.wakeAccount(acc);
+      if (asked + reminded + check.length) {
+        await logEvent(list.account_id, 'info', `Pipeline "${list.name}": ${asked} asked for a date, ${reminded} visit reminders, ${check.length} visit checks`, 'system', list.role);
       }
     } catch (err) {
       await logEvent(list.account_id, 'warn', `Pipeline "${list.name}" failed: ${err.message}`, 'system', list.role);
@@ -413,53 +444,79 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
  */
 export async function runFollowups() {
   const lists = await query(`SELECT * FROM lists WHERE (followup->>'enabled')::boolean`);
-  for (const list of lists) {
+  const tz = process.env.TZ_NAME || 'Asia/Kolkata';
+  // Per number (shared by all lists): may it send follow-ups now, and how many more today?
+  const numbers = new Map();
+  const numberState = async (id) => {
+    if (numbers.has(id)) return numbers.get(id);
+    const session = manager.sessions.get(id);
+    let st = { open: false };
     // Only the server that currently holds this number schedules its follow-ups (never twice).
-    const session = manager.sessions.get(list.account_id);
-    if (session?.status !== 'open') continue;
-    try {
-      await refreshList(list.id);
-      const f = list.followup;
-      // New candidates first: no follow-ups on a day this number messages (or is about to message) new people,
-      // not before the number's follow-up time (default 21:00), and at most followupDailyMax a day.
-      if (f.quietDaysOnly !== false && (await outbox.newOutreachToday(list.account_id))) continue;
-      const st = session.settings;
-      if (!afterTime(st.followupStart)) continue;
+    if (session?.status === 'open') {
       const already = (await query(
         `SELECT count(*)::int AS n FROM outbox WHERE account_id = $1 AND note = 'follow-up' AND status IN ('draft','queued','sending','sent')
            AND created_at >= (date_trunc('day', now() AT TIME ZONE $2) AT TIME ZONE $2)`,
-        [list.account_id, process.env.TZ_NAME || 'Asia/Kolkata'],
+        [id, tz],
       ))[0].n;
-      const room = st.followupDailyMax - already;
-      if (room <= 0) continue;
+      st = {
+        open: true,
+        session,
+        // New candidates first: no follow-ups on a day this number messages (or is about to message) new people,
+        // not before the number's follow-up time (default 21:00), and at most followupDailyMax a day.
+        timeOk: afterTime(session.settings.followupStart),
+        newOutreach: await outbox.newOutreachToday(id),
+        room: session.settings.followupDailyMax - already,
+      };
+    }
+    numbers.set(id, st);
+    return st;
+  };
+  for (const list of lists) {
+    if (!(await Promise.all((await listNumbers(list)).map(numberState))).some((s) => s.open)) continue;
+    try {
+      await refreshList(list.id);
+      const f = list.followup;
       const due = await query(
         `SELECT m.* FROM list_members m WHERE m.list_id = $1 AND m.status = 'sent' AND m.followups_sent < $2
            AND m.last_sent_at <= now() - ($3 || ' days')::interval
            AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.list_id = m.list_id AND o.to_jid = m.jid AND o.status IN ('draft','queued','sending'))
            AND ${CLOSED_SQL}
          ORDER BY CASE WHEN m.row_ref ~ '^[0-9]+$' THEN m.row_ref::int END NULLS LAST, m.last_sent_at
-         LIMIT $4`,
-        [list.id, f.max, String(f.afterDays), room],
+         LIMIT 500`,
+        [list.id, f.max, String(f.afterDays)],
       );
-      if (!due.length) continue;
-      const tpl = f.template ? await getTemplate(list.account_id, f.template) : null;
-      const approve = !f.autoSend && session.settings.aiMode === 'approve';
-      const task = await createTask({ account: list.account_id, title: `${list.name}: follow up ${due.length}`, details: `No reply after ${f.afterDays} day(s)`, kind: 'bulk', createdBy: 'rule', role: list.role });
-      const rows = [];
+      // Each follow-up goes from the number that has the person's chat, within that number's own limits.
+      const byNumber = new Map();
       for (const m of due) {
-        const first = (m.name || '').trim().split(/\s+/)[0];
-        const body = fillTemplate(tpl?.body || f.text, { ...m.fields, name: m.name, first_name: first, phone: m.phone });
-        const [last] = await query(
-          `SELECT id FROM messages WHERE account_id = $1 AND chat_jid = $2 AND from_me ORDER BY ts DESC LIMIT 1`,
-          [list.account_id, m.jid],
-        );
-        rows.push([list.account_id, m.jid, JSON.stringify({ text: body, attachment: tpl?.attachment || undefined, replyTo: last?.id }), 'campaign', approve ? 'draft' : 'queued', -1, 'follow-up', task.id, list.id]);
+        const acc = await chatAccountFor(list, m.jid);
+        const st = await numberState(acc);
+        if (!st.open || !st.timeOk || st.room <= 0) continue;
+        if (f.quietDaysOnly !== false && st.newOutreach) continue;
+        st.room--;
+        if (!byNumber.has(acc)) byNumber.set(acc, []);
+        byNumber.get(acc).push(m);
       }
-      await insertMany('outbox', ['account_id', 'to_jid', 'payload', 'source', 'status', 'priority', 'note', 'task_id', 'list_id'], rows);
-      await refreshTask(task.id);
-      await refreshList(list.id);
-      outbox.wakeAccount(list.account_id);
-      await logEvent(list.account_id, 'info', `Follow-ups for "${list.name}": ${rows.length} ${approve ? 'drafted for approval' : 'queued'}`, 'system', list.role);
+      for (const [acc, members] of byNumber) {
+        const st = numbers.get(acc);
+        const tpl = f.template ? await getTemplate(acc, f.template) : null;
+        const approve = !f.autoSend && st.session.settings.aiMode === 'approve';
+        const task = await createTask({ account: acc, title: `${list.name}: follow up ${members.length}`, details: `No reply after ${f.afterDays} day(s)`, kind: 'bulk', createdBy: 'rule', role: list.role });
+        const rows = [];
+        for (const m of members) {
+          const first = (m.name || '').trim().split(/\s+/)[0];
+          const body = fillTemplate(tpl?.body || f.text, { ...m.fields, name: m.name, first_name: first, phone: m.phone });
+          const [last] = await query(
+            `SELECT id FROM messages WHERE account_id = $1 AND chat_jid = $2 AND from_me ORDER BY ts DESC LIMIT 1`,
+            [acc, m.jid],
+          );
+          rows.push([acc, m.jid, JSON.stringify({ text: body, attachment: tpl?.attachment || undefined, replyTo: last?.id }), 'campaign', approve ? 'draft' : 'queued', -1, 'follow-up', task.id, list.id]);
+        }
+        await insertMany('outbox', ['account_id', 'to_jid', 'payload', 'source', 'status', 'priority', 'note', 'task_id', 'list_id'], rows);
+        await refreshTask(task.id);
+        outbox.wakeAccount(acc);
+        await logEvent(acc, 'info', `Follow-ups for "${list.name}": ${rows.length} ${approve ? 'drafted for approval' : 'queued'}`, 'system', list.role);
+      }
+      if (byNumber.size) await refreshList(list.id);
     } catch (err) {
       await logEvent(list.account_id, 'warn', `Follow-ups for "${list.name}" failed: ${err.message}`, 'system', list.role);
     }

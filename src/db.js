@@ -266,12 +266,28 @@ function makePgDriver() {
       connectionString: config.databaseUrl,
       ssl: /localhost|127\.0\.0\.1/.test(config.databaseUrl) ? false : { rejectUnauthorized: false },
       max: 5,
+      // Supabase's pooler drops idle connections; retire ours first and keep live ones warm.
+      idleTimeoutMillis: 20000,
+      keepAlive: true,
+      connectionTimeoutMillis: 15000,
     });
     pool.on('error', (err) => logger.error({ err: err.message }, 'Postgres pool error'));
+    // A connection killed while idle fails the next query at once ("Connection terminated unexpectedly") before
+    // the statement runs. Retry those on a fresh connection instead of failing a send or the outbox loop.
+    const transient = (err) => /Connection terminated|ECONNRESET|EPIPE|connection timeout|Client has encountered a connection error|terminating connection/i.test(err?.message || '')
+      || ['57P01', '57P02', '57P03', '08006', '08003'].includes(err?.code);
     return {
       kind: 'postgres',
       async query(text, params = []) {
-        return (await pool.query(text, params)).rows;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return (await pool.query(text, params)).rows;
+          } catch (err) {
+            if (attempt >= 2 || !transient(err)) throw err;
+            logger.warn({ err: err.message, attempt }, 'Database connection dropped — retrying');
+            await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+          }
+        }
       },
       async exec(text) {
         await pool.query(text);

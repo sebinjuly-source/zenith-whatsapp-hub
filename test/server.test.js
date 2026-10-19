@@ -919,7 +919,7 @@ test('new-number limit: hard maximum 45 per rolling 24 h, held in the queue, exi
   await manager.remove('lim');
 });
 
-test('move selected messages to another number: they become drafts there, the list follows', async () => {
+test('move selected messages to another number: each keeps its approval, the list follows', async () => {
   await manager.create({ id: 'spare', label: 'Spare' });
   fake('spare');
   await mcp('import_list', { account: 'hiring', name: 'Movers', role: 'Movers', members: [{ phone: '9400000001', name: 'A', message: 'Hi A' }, { phone: '9400000002', name: 'B', message: 'Hi B' }, { phone: '9400000003', name: 'C', message: 'Hi C' }] });
@@ -932,7 +932,8 @@ test('move selected messages to another number: they become drafts there, the li
   assert.equal(m.status, 200, JSON.stringify(m.data));
   assert.equal(m.data.moved, 3 - (await query(`SELECT count(*)::int n FROM outbox WHERE id = $1 AND status = 'sent'`, [rows[0].id]))[0].n, JSON.stringify(m.data));
   const after = await query(`SELECT account_id, status FROM outbox WHERE id = ANY($1::bigint[]) AND status <> 'sent'`, [rows.map((r) => r.id)]);
-  assert.ok(after.every((r) => r.account_id === 'spare' && r.status === 'draft'));
+  assert.ok(after.every((r) => r.account_id === 'spare'), 'all moved');
+  assert.ok(after.every((r) => ['draft', 'queued', 'sending', 'sent'].includes(r.status)) && after.filter((r) => r.status === 'draft').length === 2, 'drafts stay drafts; an approved one stays approved');
   const [l] = await query(`SELECT account_id FROM lists WHERE name = 'Movers'`);
   assert.equal(l.account_id, 'spare', 'list moved with its messages (follow-ups from the new number)');
   assert.match(await mcp('recent_activity', { account: 'spare' }), /Received \d+ messages from "hiring"/);
@@ -949,4 +950,78 @@ test('alert phones: any format is cleaned to digits with country code', async ()
   const r = await call('PUT', '/api/alerts', { phones: '+91 63613 21377, 98450-12345' });
   assert.deepEqual(r.data.phones, ['916361321377', '919845012345']);
   await call('PUT', '/api/alerts', { phones: '' });
+});
+
+test('a batch split over two numbers: each follow-up goes from the number that has that chat', async () => {
+  const listsMod = await import('../src/lists.js');
+  await manager.create({ id: 'oldno', label: 'Old number' });
+  await manager.create({ id: 'newno', label: 'New number' });
+  fake('oldno');
+  fake('newno');
+  for (const id of ['oldno', 'newno']) await manager.update(id, { settings: { followupStart: '00:00', followupDailyMax: 5, aiMode: 'auto' } });
+  const now = Math.floor(Date.now() / 1000);
+  // A was messaged from the old number, B from the new one (after the batch was moved)
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
+    ('oldno','919600000001@s.whatsapp.net','S1',true,${now - 4 * 86400},'text','offer A'),
+    ('newno','919600000002@s.whatsapp.net','S2',true,${now - 4 * 86400},'text','offer B')`);
+  await mcp('import_list', { account: 'oldno', name: 'Split', role: 'Split', since: new Date((now - 10 * 86400) * 1000).toISOString(),
+    members: [{ phone: '9600000001', name: 'A', message: 'hi' }, { phone: '9600000002', name: 'B', message: 'hi' }] });
+  const l = await listsMod.getList('Split');
+  // sent through the hub from the old number, then the rest of the batch was moved to the new number
+  await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, list_id) VALUES ('oldno','919600000001@s.whatsapp.net','{"text":"offer A"}','campaign','sent',$1), ('newno','919600000002@s.whatsapp.net','{"text":"offer B"}','campaign','sent',$1)`, [l.id]);
+  await query(`UPDATE lists SET account_id = 'newno' WHERE id = $1`, [l.id]);
+  await mcp('set_followup', { list: 'Split', enabled: true, after_days: 2, max: 1, text: 'still interested {first_name}?', auto_send: true });
+  await listsMod.runFollowups();
+  const fu = await query(`SELECT account_id, to_jid, payload FROM outbox WHERE list_id = $1 AND note = 'follow-up' ORDER BY to_jid`, [l.id]);
+  assert.deepEqual(fu.map((r) => [r.account_id, r.to_jid.slice(0, 12)]), [['oldno', '919600000001'], ['newno', '919600000002']]);
+  assert.equal(fu[0].payload.replyTo, 'S1', 'quotes the message in that chat');
+  // a number that is offline just waits: no follow-up from the other number instead
+  await query(`DELETE FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
+  manager.get('oldno').status = 'stopped';
+  await listsMod.runFollowups();
+  const fu2 = await query(`SELECT account_id, to_jid FROM outbox WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
+  assert.deepEqual(fu2.map((r) => r.account_id), ['newno']);
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id IN ('oldno','newno') AND status IN ('draft','queued')`);
+  await manager.remove('oldno');
+  await manager.remove('newno');
+});
+
+test('a send whose "sent" note was lost is recognised as sent (never shown as failed)', async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const [row] = await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, sent_at) VALUES
+    ('hotel','919700000077@s.whatsapp.net','{"text":"x"}','api','sending', now() - interval '6 minutes'),
+    ('hotel','919700000078@s.whatsapp.net','{"text":"y"}','api','sending', now() - interval '6 minutes') RETURNING id`);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hotel','919700000077@s.whatsapp.net','WENT1',true,${now - 330},'text','x')`);
+  await outbox.sweepStuck();
+  const r = await query(`SELECT to_jid, status, message_id FROM outbox WHERE to_jid IN ('919700000077@s.whatsapp.net','919700000078@s.whatsapp.net') ORDER BY to_jid`);
+  assert.deepEqual(r.map((x) => [x.status, x.message_id]), [['sent', 'WENT1'], ['failed', null]]);
+  assert.ok(row);
+});
+
+test('queue status explains what waits, why and until when; drafts show the list name', async () => {
+  await manager.create({ id: 'qs', label: 'Queue test' });
+  fake('qs');
+  await manager.update('qs', { settings: { aiMode: 'approve', dailyCap: 0 } });
+  await mcp('import_list', { account: 'qs', name: 'QS list', role: 'QS', members: [{ phone: '9500000071', name: 'Sagar Kumar', message: 'Hi Sagar' }, { phone: '9500000072', name: 'Ravi', message: 'Hi Ravi' }] });
+  await mcp('send_to_list', { list: 'QS list' });
+  let [st] = (await call('GET', '/api/outbox/status?account=qs')).data;
+  assert.equal(st.drafts, 2);
+  assert.equal(st.state, 'idle');
+  const drafts = (await call('GET', '/api/outbox?account=qs&status=draft')).data;
+  assert.deepEqual(drafts.map((d) => d.to_name).sort(), ['Ravi', 'Sagar Kumar'], 'names from the list, not bare numbers');
+  await call('POST', '/api/outbox/approve-all', { account: 'qs' });
+  [st] = (await call('GET', '/api/outbox/status?account=qs')).data;
+  assert.equal(st.queued, 2);
+  assert.equal(st.state, 'held');
+  assert.match(st.reason, /Automated limit reached: 0 of 0/);
+  await manager.update('qs', { settings: { dailyCap: 35 } });
+  manager.get('qs').status = 'stopped';
+  [st] = (await call('GET', '/api/outbox/status?account=qs')).data;
+  assert.match(st.reason, /not connected/);
+  manager.get('qs').status = 'open';
+  outbox.wakeAccount('qs');
+  await until(async () => (await query(`SELECT count(*)::int n FROM outbox WHERE account_id = 'qs' AND status = 'sent'`))[0].n === 2, 15000);
+  const [c] = await query(`SELECT name FROM contacts WHERE account_id = 'qs' AND jid = '919500000071@s.whatsapp.net'`);
+  assert.equal(c?.name, 'Sagar Kumar', 'the sending number now knows the name (inbox shows it)');
+  await manager.remove('qs');
 });
