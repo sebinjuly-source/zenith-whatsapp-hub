@@ -72,7 +72,7 @@ Manager → Insights for what you actually spent.
 
 ## 3. Your options
 
-### Option A — keep today's numbers on the hub, add **one new SIM on the official API** for bulk outreach *(recommended start)*
+### ✅ Option A (CHOSEN, 19 Oct 2026; steps in section 4) — keep today's numbers on the hub, add **one new SIM on the official API** for bulk outreach *(recommended start)*
 - Buy a new SIM (e.g. "Zenith Suites Careers"). Register it **only** on the Cloud API (it never goes into a
   phone app).
 - Use it for **first messages to new candidates and bulk sends**: official, scalable (250 → 2,000 after
@@ -115,38 +115,143 @@ messaging (vouchers, invoices, reminders as Utility templates).
 
 ---
 
-## 4. Step-by-step: what you do vs. what I do
+## 4. Option A in detail — your chosen route
 
-### You (one-time, about 1–2 hours plus Meta's review time)
-1. **Business portfolio**: business.facebook.com → create or use "Zenith Suites" (use the exact legal name
-   on your GST/registration).
-2. **Business verification**: Security Centre → Start verification. Have ready: GST certificate (or
-   registration/udyam), business address, a business phone/email, and the website zenithsuites… showing the
-   same name and address. Takes about 1–7 working days. This unlocks the 2,000 tier.
-3. **New SIM** (Option A) that is **not** on any WhatsApp app. Keep it in a phone that can receive an SMS or
-   call for the one-time code.
-4. **WhatsApp Manager** → Add phone number → display name (e.g. "Zenith Suites Careers"; must clearly relate to
-   your business) → verify with the SMS/voice code.
-5. **Payment method** in WhatsApp Manager → Billing (card/UPI as Meta allows; INR billing).
-6. Tell me when it's done. The steps that involve entering secrets or payment details are yours. I'm not allowed
-   to type passwords, tokens or card details into websites.
+**Decision (19 Oct 2026):** keep the Hotel number and Seema's number on the hub exactly as they are. Add **one new SIM**
+that lives **only on Meta's Cloud API**, and use it for first messages to new candidates (bulk outreach).
+Candidates reply to the new number. Their replies show up in the same hub inbox, lists, Board and pipeline.
 
-### Me (in the WhatsApp Hub)
-1. Add **"Meta Cloud API" as a number type** next to today's linked numbers — same dashboard, inbox, lists,
-   board, pipeline, rules and AI tools.
-2. **Webhook** for incoming messages and delivery statuses, with Meta's signature check (fakes rejected) and
-   duplicate protection (patterns borrowed from Chatwoot).
-3. **Templates**: sync your approved templates from Meta; bulk sends and list sends pick a template and fill the
-   blanks per candidate; free-form messages only inside the 24 h window (the hub warns otherwise).
-4. Show **quality rating and current tier** on the number's card, and alert you if quality drops.
-5. Upload files to Meta before sending (avoids one of Meta's rate limits) for PDFs, vouchers and images.
-6. Draft your first templates for approval: a job invite (Marketing), an interview/visit reminder (Utility), and
-   for the hotel later a booking confirmation and an invoice/voucher (Utility).
+**Why this helps you:** Seema's number stops carrying the ban risk of cold outreach. Volume can grow past
+35/day officially (250 people/day at once, 2,000 after verification). The phone numbers you rely on for
+guests and staff are never put at risk.
 
-### What I'll need from you then
-- In Meta's developer settings: a **System User access token** with WhatsApp permissions, the **phone number ID**,
-  the **WABA ID** and the **app secret**. You paste these into Render's environment variables yourself (I'll give
-  the exact names), same as you did for the database.
+### 4.0 Have this ready before you start (about 10 minutes)
+- [ ] **A new SIM** (Jio/Airtel/Vi) in any phone, able to receive **SMS or calls**, and **never used on WhatsApp**.
+      Keep it recharged: you need it again if Meta ever asks you to re-verify. Don't install WhatsApp with it.
+- [ ] The **Facebook account** you use for the Zenith Suites page (an admin of the business).
+- [ ] The exact **legal name** of the business as on the GST certificate, the **address**, and the
+      **website** (it should show the same name and address).
+- [ ] GST certificate PDF (or Udyam/shop registration), for verification in step 4.6.
+- [ ] A debit or credit card for Meta billing (you enter it yourself, step 4.5).
+- [ ] A **6-digit PIN** you choose for the number (two-step verification). Write it down somewhere safe.
+
+### 4.1 Developer account and app (10 min)
+1. Open **developers.facebook.com/apps** → log in with your Facebook account. If asked, register as a
+   developer (verify your phone/email; accept the terms yourself).
+2. **Create app** → app name: `Zenith WhatsApp Hub` → contact email: yours.
+3. Use case: **"Connect with customers through WhatsApp"** (newer screens may say *Connect on WhatsApp*) → Next.
+4. **Business portfolio:** choose **Zenith Suites** if it exists, otherwise create it with the legal name.
+   → Create app.
+
+### 4.2 WhatsApp Business account and test send (5 min)
+1. In the app: **Use cases → Customize → Connect on WhatsApp → Quickstart → "Start using the API"**
+   (API Setup page).
+2. Select or create the **WhatsApp Business account** (name: Zenith Suites; category Hotel; short description).
+3. Meta gives a free **test number**. Under *To*, add your own mobile, then press **Send message** to see a
+   test "hello_world" arrive. This proves the account works. (Don't copy the temporary token; we use a
+   permanent one.)
+
+### 4.3 Add the new SIM as the real number (10 min)
+1. API Setup → **Add phone number**.
+2. **Display name:** `Zenith Suites`. It must clearly match your business, so plain "Zenith Suites" is the
+   safest choice for approval. "Zenith Suites Careers" usually works too but can be sent for review.
+   Category: Hotel. Time zone: Asia/Kolkata. Description: one line about the hotel.
+3. Enter the new SIM's number with +91 → verify with the **SMS** (or voice) code.
+4. Two-step verification: set your **6-digit PIN**.
+5. Copy two numbers shown on the page (they're IDs, not secrets): **Phone number ID** and
+   **WhatsApp Business account ID**. Send them to me in chat.
+6. Display name status shows **Approved / Pending review**. Messages can be sent while it's pending; the name
+   then shows only after approval.
+
+### 4.4 Permanent access token (10 min). You do this; the token is a secret
+1. Open **business.facebook.com/latest/settings** → **Users → System users** → **Add**. Name it `hub`,
+   role **Admin**.
+2. **Assign assets** → Apps → *Zenith WhatsApp Hub* → **Manage app (full control)**. Then WhatsApp
+   accounts → *Zenith Suites* → **full control**. → Assign.
+3. **Generate token** → app *Zenith WhatsApp Hub* → expiry **Never** → permissions
+   `whatsapp_business_messaging`, `whatsapp_business_management`, `business_management` → Generate.
+4. Copy the token **once**. Paste it straight into **Render → zenith-whatsapp-hub → Environment** as
+   `META_TOKEN` (step 4.7). Don't send it in chat.
+
+### 4.5 Payment method (5 min). You do this
+**business.facebook.com → WhatsApp Manager → (⋮ / Overview) → Payment settings / Billing → Add payment
+method** → card, INR. Without it, template (first) messages fail once the free allowance runs out.
+
+### 4.6 Business verification (15 min of your time, Meta takes 1–7 working days)
+**business.facebook.com/latest/settings → Security Centre → Start verification** → legal name, address,
+phone, website → upload the GST certificate → confirm by email/phone/domain as offered.
+- You **don't have to wait** for this to start: an unverified business can already message **250 new people
+  a day** (more than our 35–50). Verification raises it to **2,000 a day**, allows up to 20 numbers instead of 2,
+  and makes the display name more trustworthy.
+
+### 4.7 Paste the secrets into Render (5 min). You do this
+Render → zenith-whatsapp-hub → **Environment** → add:
+
+| Name | Where it comes from |
+|---|---|
+| `META_TOKEN` | step 4.4 |
+| `META_APP_SECRET` | developers.facebook.com → your app → **App settings → Basic → App secret** (Show) |
+| `META_PHONE_NUMBER_ID` | step 4.3 (I can also set this one) |
+| `META_WABA_ID` | step 4.3 (I can also set this one) |
+| `META_VERIFY_TOKEN` | a random word I give you, used once to connect the webhook |
+
+Save. Render restarts by itself.
+
+### 4.8 What I build in the hub (about a day of work, then tested)
+1. A **"Meta Cloud API" number type** next to the linked numbers. It appears in Numbers, Inbox, Lists, Board,
+   Drafts, Activity and the AI tools like any other number (id e.g. `outreach`).
+2. **Webhook** `https://zenith-whatsapp-hub.onrender.com/meta/webhook`: incoming messages and delivery
+   statuses (sent / delivered / read / failed with Meta's reason), signature checked with the app secret,
+   duplicates ignored.
+3. **Templates:** synced from Meta. *Send to list* on the outreach number picks an approved template and fills
+   name/role/salary per candidate. Free text is only allowed inside the 24-hour window, and the hub warns you
+   otherwise.
+4. **Quality rating and daily limit** on the number's card; a WhatsApp alert to you if quality drops.
+5. **Files** (PDFs, images) uploaded to Meta before sending.
+6. **Privacy policy page** at `/privacy`, which Meta needs before the app can go **Live** (step 4.9).
+7. Tests for all of it, then a live test with your own phone.
+
+### 4.9 Connect the webhook and go Live (10 min, together)
+1. App → **Use cases → Customize → Connect on WhatsApp → Configuration → Webhook → Edit**:
+   Callback URL = `https://zenith-whatsapp-hub.onrender.com/meta/webhook`, Verify token = `META_VERIFY_TOKEN`
+   → Verify and save → **Webhook fields → subscribe `messages`**.
+2. **App settings → Basic:** privacy policy URL `https://zenith-whatsapp-hub.onrender.com/privacy`, app icon,
+   category Business → Save → switch **App mode: Live**. While the app is in development mode, Meta sends no
+   real incoming messages to the webhook.
+
+### 4.10 First templates (I draft them, you submit; approval usually takes minutes to a few hours)
+WhatsApp Manager → **Message templates → Create template**:
+
+| Name | Category | Text (variables in {{ }}) |
+|---|---|---|
+| `chef_job_invite` | Marketing | Namaste {{1}} ji, Zenith Suites (Amrutha Halli, Bengaluru) ko *{{2}}* chahiye – immediate joining. Salary {{3}}. Interested hain to *Haan* reply karein. Call: 9353315601. – Zenith Suites HR |
+| `visit_reminder` | Utility | Namaste {{1}} ji, aapka Zenith Suites visit {{2}} ko hai. Address: {{3}}. Koi problem ho to reply karein. – Zenith Suites HR |
+| `job_followup` | Marketing | Namaste {{1}} ji, Zenith Suites ki *{{2}}* job abhi bhi open hai. Interested ho to reply ya call karein: 9353315601. – Zenith Suites HR |
+
+Add a **Quick reply button** ("Haan, interested" / "Nahi") to the invite: replies are easier, and a tapped
+button opens the free 24-hour window. There's no salary in the follow-up, as before.
+
+### 4.11 How a day looks afterwards
+1. Regular Claude makes the WorkIndia batch as now → `import_list` on account **`outreach`**.
+2. `send_to_list` → drafts on the Board → **Approve all**. Each candidate gets the `chef_job_invite` template
+   with their own name, role and salary. Cost ≈ ₹0.86 each.
+3. Replies arrive in the hub on the outreach number. Everything after a reply (asking for a date, location,
+   reminders) is **free for 24 hours** after each candidate message. Later reminders use the cheap Utility
+   template.
+4. Seema's number is used for conversations you choose to continue there. No more cold bulk from it.
+
+### 4.12 Costs and limits at a glance
+- First messages: Marketing template ≈ ₹0.78–0.86 each (check Meta's live rate card) → 50/day ≈ ₹1,300/month.
+- Replies within 24 h: free. Utility reminders: a few paise, free inside an open window.
+- Unverified: 250 new people/day, 2 numbers. Verified: 2,000/day, then 10K → 100K → unlimited automatically
+  if quality stays good.
+- Quality: blocks and reports lower it. Keep the invite relevant, offer "Nahi", never send twice without a reply.
+
+### What I need from you, in order
+1. Steps 4.1–4.3 done → send me the **Phone number ID** and **WABA ID**.
+2. Steps 4.4, 4.5, 4.7 done (secrets pasted into Render by you) → tell me "done".
+3. Start 4.6 (verification) whenever convenient. It runs in the background.
+4. Then I build 4.8, we do 4.9 together, you submit the 4.10 templates, and we test with your phone.
 
 ---
 
@@ -159,6 +264,8 @@ messaging (vouchers, invoices, reminders as Utility templates).
 ---
 
 ### Sources
+- Meta — Cloud API get started: https://developers.facebook.com/documentation/business-messaging/whatsapp/get-started
+- Meta — Business phone numbers (eligibility, registration, 2-number cap until verified): https://developers.facebook.com/documentation/business-messaging/whatsapp/business-phone-numbers/phone-numbers
 - Meta — Messaging limits (2026): https://developers.facebook.com/documentation/business-messaging/whatsapp/messaging-limits
 - Meta — Pricing: https://developers.facebook.com/documentation/business-messaging/whatsapp/pricing.md
 - India pricing analyses (figures differ, verify): https://baat.ai/blog/whatsapp-api-pricing-india ·
