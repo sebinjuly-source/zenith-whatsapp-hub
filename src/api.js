@@ -358,6 +358,14 @@ export function buildApp() {
     if (r.task) await act(req, r.task.account_id || b.account, `Created bulk send "${b.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);
     res.json(r);
   }));
+  // Approve all drafts: { account?, task? } — omitted = every number
+  api.post('/outbox/approve-all', wrap(async (req, res) => {
+    const b = req.body || {};
+    const account = b.account ? (await manager.resolve(b.account)).id : null;
+    const r = await outbox.approveAll({ account, taskId: b.task || null });
+    for (const [a, n] of Object.entries(r.perAccount)) await act(req, a, `Approved all ${n} drafts${b.task ? ` of task #${b.task}` : ''}`);
+    res.json(r);
+  }));
   api.post('/outbox/:id/approve', wrap(async (req, res) => {
     const r = await outbox.approve(req.params.id, req.body || {});
     await act(req, r.account_id, `Approved draft #${r.id} to ${r.to_jid.split('@')[0]}${req.body?.text ? ' (edited)' : ''}`);

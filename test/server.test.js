@@ -159,6 +159,22 @@ test('AI send in approve mode becomes a draft; approving sends it', async () => 
   assert.equal((await call('POST', `/api/outbox/${id}/approve`, {})).status, 400);
 });
 
+test('approve all drafts at once: one number only, or every number', async () => {
+  for (const to of ['919811110001', '919811110002']) await mcp('send_message', { account: 'hiring', to, text: 'Batch draft' });
+  await mcp('send_message', { account: 'hotel', to: '919811110003', text: 'Hotel draft' });
+  const drafts = async (acc) => (await query(`SELECT count(*)::int n FROM outbox WHERE status = 'draft' AND account_id = $1`, [acc]))[0].n;
+  assert.ok((await drafts('hiring')) >= 2);
+  const r = await call('POST', '/api/outbox/approve-all', { account: 'hiring' });
+  assert.equal(r.status, 200);
+  assert.ok(r.data.approved >= 2);
+  assert.equal(await drafts('hiring'), 0);
+  assert.equal(await drafts('hotel'), 1, 'other numbers keep their drafts');
+  assert.match(await mcp('recent_activity', { account: 'hiring', who: 'script' }), /Approved all \d+ drafts/);
+  assert.equal((await call('POST', '/api/outbox/approve-all', {})).data.approved, 1);
+  assert.equal(await drafts('hotel'), 0);
+  await until(async () => (await query(`SELECT count(*)::int n FROM outbox WHERE to_jid LIKE '91981111000%' AND status = 'sent'`))[0].n === 3, 15000);
+});
+
 test('bulk_send: personalises, skips invalid/duplicate/opted-out/recently-contacted, waits for approval, then sends', async () => {
   await query(`INSERT INTO contacts (account_id, jid, phone, tags) VALUES ('hiring','919822222222@s.whatsapp.net','919822222222','{opted-out}')`);
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hiring','919833333333@s.whatsapp.net','OLD1',true, extract(epoch from now())::bigint - 3*86400, 'text','earlier msg')`);

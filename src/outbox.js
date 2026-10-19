@@ -154,6 +154,24 @@ export async function approveTask(taskId) {
   return { approved: rows.length };
 }
 
+/** Approve every draft at once — optionally only one number's or one task's. Saved text is sent as it is. */
+export async function approveAll({ account, taskId } = {}) {
+  const p = [];
+  const where = [`status = 'draft'`];
+  if (account) { p.push(account); where.push(`account_id = $${p.length}`); }
+  if (taskId) { p.push(taskId); where.push(`task_id = $${p.length}`); }
+  const rows = await query(
+    `UPDATE outbox SET status = 'queued', scheduled_at = GREATEST(scheduled_at, now())
+     WHERE ${where.join(' AND ')} RETURNING account_id, task_id`,
+    p,
+  );
+  for (const t of new Set(rows.map((r) => r.task_id).filter(Boolean))) await refreshTask(t);
+  const perAccount = {};
+  for (const r of rows) perAccount[r.account_id] = (perAccount[r.account_id] || 0) + 1;
+  for (const a of Object.keys(perAccount)) wake(a);
+  return { approved: rows.length, perAccount };
+}
+
 export async function reject(id) {
   const [row] = await query(
     `UPDATE outbox SET status = 'rejected' WHERE id = $1 AND status IN ('draft','queued') RETURNING *`,

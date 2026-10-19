@@ -880,12 +880,28 @@
               r.sent_at ? h('p', { class: 'muted', style: 'margin:0' }, 'Sent ', new Date(r.sent_at).toLocaleString()) : null),
       );
     });
+    const drafts = rows.filter((r) => r.status === 'draft');
+    const approveAllBar = drafts.length > 1 ? h('div', { class: 'card row', style: 'max-width:640px;margin-bottom:16px;align-items:center' },
+      h('span', { class: 'grow' }, `${drafts.length}${rows.length >= 200 ? '+' : ''} drafts${acc ? ' from ' + labelOf(acc) : ''}${state.outboxTask ? ` in task #${state.outboxTask}` : ''}`),
+      h('button', { class: 'btn primary', onclick: guard(async () => {
+        const per = {};
+        for (const r of drafts) per[r.account_id] = (per[r.account_id] || 0) + 1;
+        const pace = Object.entries(per).map(([id, n]) => {
+          const cap = state.accounts.find((a) => a.id === id)?.settings?.dailyCap || 35;
+          return `${labelOf(id)}: ${n} messages, ${cap} a day → about ${Math.ceil(n / cap)} day${n > cap ? 's' : ''}`;
+        }).join('\n');
+        if (!confirm(`Approve and send all ${drafts.length} drafts as they are?\n\n${pace}\n\nThey still go out one by one with the random gap and daily limit. Text you edited below but did not approve is not used.`)) return;
+        const r = await api('/api/outbox/approve-all', { body: { account: acc || undefined, task: state.outboxTask || undefined } });
+        toast(`Approved ${r.approved} — queued`);
+        viewOutbox();
+      }) }, `Approve all ${drafts.length}${rows.length >= 200 ? '+' : ''}`)) : null;
     shell([
       h('h1', {}, 'Drafts & outbox'),
       state.outboxTask ? h('p', {}, `Showing messages of task #${state.outboxTask} · `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); state.outboxTask = null; viewOutbox(); } }, 'show all')) : null,
       h('p', { class: 'sub' }, 'Messages written by AI or campaigns wait here when a number is in approval mode. Edit, approve or reject.'),
       numberPick,
       tabs,
+      approveAllBar,
       h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr))' }, items.length ? items : [h('p', { class: 'muted' }, 'Nothing here.')]),
     ]);
   }
