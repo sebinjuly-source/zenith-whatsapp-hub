@@ -157,6 +157,31 @@ export function buildApp() {
     setTimeout(() => req.app.locals.shutdown?.('api'), 200);
   }));
 
+  // ---- Meta Cloud API
+  // What is set up (never the secrets themselves) + each Cloud number's health
+  api.get('/meta/status', wrap(async (req, res) => {
+    const has = (k) => !!process.env[k];
+    const numbers = manager.list().filter((a) => a.provider === 'cloud').map((a) => ({ id: a.id, label: a.label, status: a.status, cloud: a.cloud, error: manager.get(a.id).lastError || null }));
+    const [last] = await query(`SELECT created_at, text FROM events WHERE text LIKE 'Meta webhook%' ORDER BY id DESC LIMIT 1`);
+    res.json({
+      env: { META_TOKEN: has('META_TOKEN'), META_APP_SECRET: has('META_APP_SECRET'), META_VERIFY_TOKEN: has('META_VERIFY_TOKEN'), META_PIN: has('META_PIN'), META_PHONE_NUMBER_ID: process.env.META_PHONE_NUMBER_ID || null, META_WABA_ID: process.env.META_WABA_ID || null },
+      numbers, lastWebhookEvent: last || null, webhookUrl: config.publicUrl ? `${config.publicUrl}/meta/webhook` : null,
+    });
+  }));
+  // Meta templates of a Cloud number (?sync=1 fetches fresh from Meta first)
+  api.get('/accounts/:id/wa-templates', wrap(async (req, res) => {
+    const s = manager.get(req.params.id);
+    if (!s.isCloud) return res.json([]);
+    const { syncTemplates, listWaTemplates } = await import('./wa/cloud-templates.js');
+    if (req.query.sync === '1') await syncTemplates(s.wabaId);
+    res.json(await listWaTemplates(s.wabaId, { approvedOnly: req.query.approved === '1' }));
+  }));
+  // Can this chat get a free-form message right now? (Cloud numbers: 24 h after their last message)
+  api.get('/accounts/:id/chats/:jid/window', wrap(async (req, res) => {
+    const s = manager.get(req.params.id);
+    res.json(s.isCloud ? { cloud: true, ...(await s.windowFor(req.params.jid)) } : { cloud: false, open: true });
+  }));
+
   // ---- Chats, messages, contacts
   api.get('/accounts/:id/chats', wrap(async (req, res) => {
     const { q, kind, tag, limit, offset, waiting, state } = req.query;
@@ -312,9 +337,18 @@ export function buildApp() {
 
   // ---- Sending
   api.post('/send', wrap(async (req, res) => {
-    const { account, to, wait = true, template, vars, replyTo } = req.body || {};
+    const { account, to, wait = true, template, vars, replyTo, waTemplate } = req.body || {};
     let { text, attachment } = req.body || {};
     if (!to) throw new Error('Missing "to" (phone number or chat id)');
+    if (waTemplate) {
+      // Meta template (Cloud API numbers): { name, language?, params: [...] }
+      const row = await outbox.enqueue({ account, to, payload: { waTemplate }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key') });
+      if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent Meta template "${waTemplate.name}" to ${row.to_jid.split('@')[0]}`);
+      if (!wait) return res.json(row);
+      const result = await outbox.waitFor(row.id);
+      if (!result) return res.status(202).json({ ...row, note: 'Still queued' });
+      return res.status(result.status === 'sent' ? 200 : 502).json(result);
+    }
     if (template) {
       const s = await manager.resolve(account);
       const r = await outbox.renderTemplate(s.id, store.toJid(to), template, vars || {});

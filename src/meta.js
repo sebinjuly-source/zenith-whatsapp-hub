@@ -9,6 +9,7 @@
 import crypto from 'crypto';
 import logger from './logger.js';
 import { logEvent } from './db.js';
+import { manager } from './wa/manager.js';
 
 function signatureOk(req) {
   const secret = process.env.META_APP_SECRET;
@@ -50,8 +51,61 @@ export function mountMetaWebhook(app) {
       logger.warn('Meta webhook: bad signature');
       return res.sendStatus(401);
     }
-    res.sendStatus(200);
-    const s = summarize(req.body);
-    logger.info(s, 'Meta webhook event');
+    // Store first, then answer: if storing fails (database hiccup, server just starting) Meta gets a 500 and
+    // delivers again later — duplicates are ignored. Storing takes well under Meta's time limit.
+    logger.debug(summarize(req.body), 'Meta webhook event');
+    const work = dispatch(req.body);
+    const slow = new Promise((r) => setTimeout(() => r('slow'), 8000));
+    Promise.race([work, slow])
+      .then((r) => res.sendStatus(200) && r === 'slow' && logger.warn('Meta webhook took over 8 s — answered, still finishing'))
+      .catch((err) => {
+        logger.error({ err: err?.stack || err }, 'Meta webhook handling failed — Meta will retry');
+        res.sendStatus(500);
+      });
   });
+}
+
+const unknownNoted = new Set();
+
+/** Hand each change to the Cloud number it belongs to (by phone number id). */
+export async function dispatch(body) {
+  if (body?.object !== 'whatsapp_business_account') return;
+  for (const entry of body.entry || []) {
+    for (const ch of entry.changes || []) {
+      const v = ch.value || {};
+      if (ch.field === 'messages') {
+        const pid = v.metadata?.phone_number_id;
+        const s = findCloudSession(pid);
+        if (!s && !manager.sessions.size) throw new Error('Hub still starting'); // 500 → Meta delivers again shortly
+        if (!s) {
+          if (!unknownNoted.has(pid)) {
+            unknownNoted.add(pid);
+            await logEvent(null, 'warn', `Meta sent messages for phone number id ${pid}, which isn't added in the hub (Numbers → Add → Meta Cloud API)`);
+          }
+          continue;
+        }
+        // In order with this number's other work, but errors reach us (so Meta is told to retry).
+        const run = s.work.then(() => s.onWebhook(v));
+        s.work = run.catch(() => {});
+        await run;
+      } else if (ch.field === 'message_template_status_update') {
+        const s = findCloudSession(null, entry.id);
+        await logEvent(s?.id || null, v.event === 'APPROVED' ? 'info' : 'warn', `Meta template "${v.message_template_name}" (${v.message_template_language}): ${String(v.event).toLowerCase()}${v.reason && v.reason !== 'NONE' ? ` — ${v.reason}` : ''}`);
+        if (s) await import('./wa/cloud-templates.js').then((t) => t.syncTemplates(s.wabaId)).catch(() => {});
+      } else if (ch.field === 'phone_number_quality_update' || ch.field === 'account_update' || ch.field === 'phone_number_name_update') {
+        const s = findCloudSession(null, entry.id);
+        await logEvent(s?.id || null, 'warn', `Meta ${ch.field.replace(/_/g, ' ')}: ${JSON.stringify(v).slice(0, 300)}`);
+        if (s) await s.refreshHealth().catch(() => {});
+      }
+    }
+  }
+}
+
+function findCloudSession(phoneNumberId, wabaId) {
+  for (const s of manager.sessions.values()) {
+    if (!s.isCloud) continue;
+    if (phoneNumberId && s.phoneNumberId === String(phoneNumberId)) return s;
+    if (!phoneNumberId && wabaId && s.wabaId === String(wabaId)) return s;
+  }
+  return null;
 }

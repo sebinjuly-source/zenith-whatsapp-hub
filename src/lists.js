@@ -35,6 +35,23 @@ export function decodeMessage(text) {
 
 const DEFAULT_FOLLOWUP = { enabled: false, afterDays: 2, max: 1, text: '', template: '', quietDaysOnly: true };
 
+/**
+ * What to send one person from this number. A Meta Cloud API number may send free text only within 24 h of the
+ * person's last message; otherwise the Meta template given for this step is used (filled per person), and without
+ * one the person is skipped with the reason. Linked numbers always send the text.
+ */
+async function payloadFor(session, jid, text, waTemplate, vars, extra = {}) {
+  if (session?.isCloud && (!text || !(await session.windowFor(jid)).open)) {
+    if (!waTemplate?.name) return { skip: 'Meta number: more than 24 h since they wrote, and no Meta template is set for this step' };
+    try {
+      return { payload: await outbox.withTemplatePreview(session, { waTemplate: outbox.fillWaTemplate(waTemplate, vars) }) };
+    } catch (err) {
+      return { skip: err.message };
+    }
+  }
+  return { payload: { text, ...extra } };
+}
+
 /** Funnel stages (set by you or the AI). Closed ones are never messaged again from the list. */
 export const STAGES = ['interested', 'date_given', 'visited', 'trial', 'selected', 'joined', 'no_show', 'not_interested', 'rejected'];
 export const CLOSED_STAGES = ['joined', 'not_interested', 'rejected'];
@@ -302,16 +319,22 @@ export async function runPipeline() {
     if (!(await listNumbers(list)).some((id) => manager.sessions.get(id)?.status === 'open')) continue;
     try {
       const woke = new Set();
-      const send = async (m, text, note) => {
+      // true = queued, false = number offline (try again later), 'manual' = can't message now (Meta 24 h rule) → task for you
+      const send = async (m, text, note, waTemplate) => {
         const acc = await chatAccountFor(list, m.jid);
         const session = manager.sessions.get(acc);
         if (session?.status !== 'open') return false;
         const approve = !p.autoSend && session.settings.aiMode === 'approve';
         const first = (m.name || '').trim().split(/\s+/)[0];
-        const body = fillTemplate(text, { ...m.fields, name: m.name, first_name: first, phone: m.phone, visit_date: m.visit_at ? fmtVisit(m.visit_at) : '' });
+        const vars = { ...m.fields, name: m.name, first_name: first, phone: m.phone, visit_date: m.visit_at ? fmtVisit(m.visit_at) : '' };
+        const r = await payloadFor(session, m.jid, fillTemplate(text, vars), waTemplate, vars);
+        if (r.skip) {
+          await createTask({ account: acc, title: `Message ${m.name || m.phone} yourself (${note})`, details: `${list.name}: ${r.skip}. Call or message +${m.phone}.`, createdBy: 'rule', role: list.role });
+          return 'manual';
+        }
         await query(
           `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, list_id) VALUES ($1,$2,$3,'campaign',$4,5,$5,$6)`,
-          [acc, m.jid, JSON.stringify({ text: body }), approve ? 'draft' : 'queued', note, list.id],
+          [acc, m.jid, JSON.stringify(r.payload), approve ? 'draft' : 'queued', note, list.id],
         );
         woke.add(acc);
         return true;
@@ -325,7 +348,7 @@ export async function runPipeline() {
       );
       let asked = 0;
       for (const m of ask) {
-        if (!(await send(m, p.askDateText, 'ask-date'))) continue;
+        if (!(await send(m, p.askDateText, 'ask-date', p.askDateWaTemplate))) continue;
         await query('UPDATE list_members SET asked_date_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
         asked++;
       }
@@ -337,7 +360,7 @@ export async function runPipeline() {
       );
       let reminded = 0;
       for (const m of remind) {
-        if (!(await send(m, p.reminderText, 'visit-reminder'))) continue;
+        if (!(await send(m, p.reminderText, 'visit-reminder', p.reminderWaTemplate))) continue;
         reminded++;
         await createTask({ account: list.account_id, title: `Visit: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminder sent to +${m.phone}. Update the stage after the visit.`, dueAt: m.visit_at, createdBy: 'rule', role: list.role });
         await query('UPDATE list_members SET reminded_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
@@ -389,7 +412,8 @@ export async function setFollowup(listId, settings) {
   f.enabled = !!f.enabled;
   f.quietDaysOnly = f.quietDaysOnly !== false;
   f.autoSend = !!f.autoSend;
-  if (f.enabled && !String(f.text || '').trim() && !f.template) throw new Error('Follow-ups need a message or a template');
+  if (f.enabled && !String(f.text || '').trim() && !f.template && !f.waTemplate?.name) throw new Error('Follow-ups need a message or a template');
+  if (f.waTemplate && !f.waTemplate.name) f.waTemplate = null;
   const [u] = await query('UPDATE lists SET followup = $2, updated_at = now() WHERE id = $1 RETURNING *', [listId, JSON.stringify(f)]);
   return u;
 }
@@ -398,7 +422,7 @@ export async function setFollowup(listId, settings) {
  * Message the members with the given statuses (default: new + failed). Each gets their own prepared message
  * from the list (column "message") unless a text/template is given. One board task per call.
  */
-export async function sendToList(listId, { statuses = ['new', 'failed'], text, template, onlyPhones, createdBy = 'you', source = 'campaign' } = {}) {
+export async function sendToList(listId, { statuses = ['new', 'failed'], text, template, waTemplate, onlyPhones, createdBy = 'you', source = 'campaign' } = {}) {
   const list = await getList(listId);
   await refreshList(list.id);
   const session = await manager.resolve(list.account_id);
@@ -420,17 +444,27 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
     const first = (m.name || '').trim().split(/\s+/)[0];
     const vars = { ...m.fields, name: m.name, first_name: first, phone: m.phone };
     const body = text ? fillTemplate(text, vars) : tpl ? fillTemplate(tpl.body, vars) : m.message;
-    if (!body?.trim()) {
+    if (!body?.trim() && !(session.isCloud && waTemplate)) {
       skipped.push({ to: m.phone, reason: 'no message prepared for this person' });
       continue;
     }
-    plan.push({ m, body, attachment: tpl?.attachment || undefined });
+    const r = await payloadFor(session, m.jid, body, waTemplate, vars, { attachment: tpl?.attachment || undefined });
+    if (r.skip) {
+      skipped.push({ to: m.phone, reason: r.skip });
+      continue;
+    }
+    plan.push({ m, payload: r.payload });
   }
-  if (!plan.length) return { task: null, queued: 0, skipped };
+  if (!plan.length) {
+    if (session.isCloud && !waTemplate && skipped.length) {
+      throw new Error(`"${session.account.label}" is a Meta Cloud API number: first messages must use an approved Meta template — choose one (waTemplate)`);
+    }
+    return { task: null, queued: 0, skipped };
+  }
   const task = await createTask({ account: list.account_id, title: `${list.name}: message ${plan.length}`, details: `Statuses: ${statuses.join(', ')}`, kind: 'bulk', createdBy, role: list.role });
   const approve = ['mcp', 'campaign'].includes(source) && session.settings.aiMode === 'approve';
   await insertMany('outbox', ['account_id', 'to_jid', 'payload', 'source', 'status', 'priority', 'note', 'task_id', 'list_id'],
-    plan.map((x) => [list.account_id, x.m.jid, JSON.stringify({ text: x.body, attachment: x.attachment }), source, approve ? 'draft' : 'queued', 0, list.name, task.id, list.id]));
+    plan.map((x) => [list.account_id, x.m.jid, JSON.stringify(x.payload), source, approve ? 'draft' : 'queued', 0, list.name, task.id, list.id]));
   await refreshTask(task.id);
   await refreshList(list.id);
   outbox.wakeAccount(list.account_id);
@@ -502,14 +536,27 @@ export async function runFollowups() {
         const approve = !f.autoSend && st.session.settings.aiMode === 'approve';
         const task = await createTask({ account: acc, title: `${list.name}: follow up ${members.length}`, details: `No reply after ${f.afterDays} day(s)`, kind: 'bulk', createdBy: 'rule', role: list.role });
         const rows = [];
+        const skippedWhy = new Set();
         for (const m of members) {
           const first = (m.name || '').trim().split(/\s+/)[0];
-          const body = fillTemplate(tpl?.body || f.text, { ...m.fields, name: m.name, first_name: first, phone: m.phone });
+          const vars = { ...m.fields, name: m.name, first_name: first, phone: m.phone };
+          const body = fillTemplate(tpl?.body || f.text, vars);
           const [last] = await query(
             `SELECT id FROM messages WHERE account_id = $1 AND chat_jid = $2 AND from_me ORDER BY ts DESC LIMIT 1`,
             [acc, m.jid],
           );
-          rows.push([acc, m.jid, JSON.stringify({ text: body, attachment: tpl?.attachment || undefined, replyTo: last?.id }), 'campaign', approve ? 'draft' : 'queued', -1, 'follow-up', task.id, list.id]);
+          // Meta numbers: they never replied, so the 24 h window is closed — the follow-up's Meta template goes instead.
+          const r = await payloadFor(st.session, m.jid, body, f.waTemplate, vars, { attachment: tpl?.attachment || undefined, replyTo: last?.id });
+          if (r.skip) {
+            skippedWhy.add(r.skip);
+            continue;
+          }
+          rows.push([acc, m.jid, JSON.stringify(r.payload), 'campaign', approve ? 'draft' : 'queued', -1, 'follow-up', task.id, list.id]);
+        }
+        if (skippedWhy.size) await logEvent(acc, 'warn', `Follow-ups for "${list.name}": ${members.length - rows.length} not sent — ${[...skippedWhy].join('; ')}`, 'system', list.role);
+        if (!rows.length) {
+          await query('DELETE FROM tasks WHERE id = $1', [task.id]); // nothing to follow up after all
+          continue;
         }
         await insertMany('outbox', ['account_id', 'to_jid', 'payload', 'source', 'status', 'priority', 'note', 'task_id', 'list_id'], rows);
         await refreshTask(task.id);

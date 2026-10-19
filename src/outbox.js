@@ -32,15 +32,31 @@ const workers = new Map(); // accountId -> { wake }
 export async function assertCanSend(session) {
   if (!session.account.enabled) throw new Error(`Number "${session.account.label}" is paused — resume it in Settings`);
   if (session.status === 'logged_out') throw new Error(`Number "${session.account.label}" is logged out of WhatsApp — re-link it in the dashboard (Numbers → Link number)`);
-  if (session.status === 'stopped' && !(await hasAuthState(session.id))) {
+  if (session.status === 'not_configured') throw new Error(`Meta Cloud API number "${session.account.label}" is not set up: ${session.lastError}`);
+  if (session.status === 'stopped' && !session.isCloud && !(await hasAuthState(session.id))) {
     throw new Error(`Number "${session.account.label}" is not linked yet — link it in the dashboard first`);
+  }
+}
+
+/**
+ * Meta Cloud API numbers may only send free text to someone who wrote in the last 24 hours; anything else needs an
+ * approved Meta template. Your own sends are checked up front so you get the reason at once.
+ */
+async function assertCloudWindow(session, jid, payload) {
+  if (!session.isCloud || payload.waTemplate) return;
+  const w = await session.windowFor(jid);
+  if (!w.open) {
+    throw new Error(w.closesAt
+      ? `The 24-hour reply window with ${jid.split('@')[0]} closed — send an approved Meta template instead`
+      : `${jid.split('@')[0]} hasn't written to this number yet — the first message must be an approved Meta template`);
   }
 }
 
 export async function enqueue({ account, to, payload, source, note, scheduledAt, taskId = null, idemKey = null }) {
   const session = await manager.resolve(account);
-  if (!payload?.text && !payload?.attachment) throw new Error('Nothing to send: give text and/or attachment');
+  if (!payload?.text && !payload?.attachment && !payload?.waTemplate) throw new Error('Nothing to send: give text and/or attachment');
   const jid = toJid(to);
+  if (payload.waTemplate) payload = await withTemplatePreview(session, payload);
   if (idemKey) {
     const [dup] = await query('SELECT * FROM outbox WHERE account_id = $1 AND idem_key = $2', [session.id, String(idemKey)]);
     if (dup) return { ...dup, duplicate: true }; // same request seen before: don't send again
@@ -48,7 +64,10 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
   await assertCanSend(session);
   const automated = AUTOMATED.includes(source);
   // Your own sends go out right away, so check the new-number limit now (automated ones simply wait in the queue).
-  if (!NEEDS_APPROVAL.includes(source) && !automated) await assertNewChatAllowed(session, jid);
+  if (!NEEDS_APPROVAL.includes(source) && !automated) {
+    await assertCloudWindow(session, jid, payload);
+    await assertNewChatAllowed(session, jid);
+  }
   const status = NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued';
   const [row] = await query(
     `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id, idem_key)
@@ -70,16 +89,20 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
  * Send one message (template with {name} etc.) to many people as one task on the board.
  * recipients: [{ to, name?, ...extra fields usable as {field} }] or plain numbers.
  */
-export async function bulkSend({ account, title, details, recipients, text, attachment, template, scheduledAt, source = 'campaign',
+export async function bulkSend({ account, title, details, recipients, text, attachment, template, waTemplate, scheduledAt, source = 'campaign',
   createdBy = 'you', skipIfContactedDays = 30, allowRepeat = false, taskId, idemKey = null }) {
   const session = await manager.resolve(account);
+  if (session.isCloud && !waTemplate) {
+    throw new Error(`"${session.account.label}" is a Meta Cloud API number: messages to many people must use an approved Meta template (waTemplate) — free text only works within 24 h of their last message`);
+  }
+  if (waTemplate && !session.isCloud) waTemplate = null; // linked numbers send the text
   if (template) {
     const t = await getTemplate(session.id, template);
     if (!t) throw new Error(`No template called "${template}"`);
     text = text || t.body || undefined;
     attachment = attachment || t.attachment || undefined;
   }
-  if (!text && !attachment) throw new Error('Give the message text (can use {name}) and/or an attachment');
+  if (!text && !attachment && !waTemplate) throw new Error('Give the message text (can use {name}) and/or an attachment');
   if (idemKey) {
     const [t] = await query('SELECT * FROM tasks WHERE account_id = $1 AND idem_key = $2', [session.id, String(idemKey)]);
     if (t) return { task: t, queued: 0, skipped: [], mode: session.settings.aiMode, duplicate: true };
@@ -94,12 +117,18 @@ export async function bulkSend({ account, title, details, recipients, text, atta
   for (const r of ok) {
     const name = r.vars.name || r.vars.Name;
     const vars = { ...r.vars, name, first_name: r.vars.first_name || (name ? String(name).trim().split(/\s+/)[0] : undefined), phone: r.jid.split('@')[0] };
-    const body = text ? fillTemplate(r.vars.text || text, vars) : undefined;
-    const att = attachment ? { ...attachment, caption: attachment.caption ? fillTemplate(attachment.caption, vars) : undefined } : undefined;
+    let payload;
+    if (waTemplate) {
+      payload = await withTemplatePreview(session, { waTemplate: fillWaTemplate(waTemplate, vars) });
+    } else {
+      const body = text ? fillTemplate(r.vars.text || text, vars) : undefined;
+      const att = attachment ? { ...attachment, caption: attachment.caption ? fillTemplate(attachment.caption, vars) : undefined } : undefined;
+      payload = { text: body, attachment: att };
+    }
     await query(
       `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id)
        VALUES ($1,$2,$3,$4,$5,0,$6,COALESCE($7::timestamptz, now()),$8)`,
-      [session.id, r.jid, JSON.stringify({ text: body, attachment: att }), source,
+      [session.id, r.jid, JSON.stringify(payload), source,
         NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued',
         title || null, scheduledAt || null, task.id],
     );
@@ -108,6 +137,16 @@ export async function bulkSend({ account, title, details, recipients, text, atta
   await refreshTask(task.id);
   wake(session.id);
   return { task, queued: n, skipped, mode: session.settings.aiMode };
+}
+
+/** Fill hub placeholders ({name}, {first_name}, list columns…) inside a Meta template's values for one person. */
+export function fillWaTemplate(waTemplate, vars) {
+  const f = (v) => (typeof v === 'string' ? fillTemplate(v, vars) : v);
+  const params = Array.isArray(waTemplate.params)
+    ? waTemplate.params.map(f)
+    : Object.fromEntries(Object.entries(waTemplate.params || {}).map(([k, v]) => [k, f(v)]));
+  const header = typeof waTemplate.header === 'string' ? f(waTemplate.header) : waTemplate.header;
+  return { ...waTemplate, params, ...(header !== undefined ? { header } : {}), ...(waTemplate.buttons ? { buttons: waTemplate.buttons.map(f) } : {}) };
 }
 
 /** Resolve when the outbox row is sent or failed (or null after timeoutMs). */
@@ -130,7 +169,10 @@ export async function approve(id, { text } = {}) {
   if (!row) throw new Error('Draft not found');
   if (row.status !== 'draft') throw new Error(`Item is ${row.status}, not a draft`);
   const payload = { ...row.payload };
-  if (typeof text === 'string' && text.trim()) {
+  if (typeof text === 'string' && text.trim() && payload.waTemplate && text.trim() !== (payload.text || '').trim()) {
+    throw new Error('This is a Meta template message — its wording is fixed by Meta. Reject it and send another template, or reply freely once they write back');
+  }
+  if (typeof text === 'string' && text.trim() && !payload.waTemplate) {
     if (payload.attachment && !payload.text) payload.attachment = { ...payload.attachment, caption: text };
     else payload.text = text;
   }
@@ -193,6 +235,20 @@ export async function rejectMany(ids) {
  */
 export async function moveToAccount(ids, account) {
   const target = await manager.resolve(account);
+  // A Meta Cloud API number can't send free text to people outside the 24 h window: leave those where they are.
+  let kept = 0;
+  if (target.isCloud) {
+    const rows = await query(`SELECT id, to_jid, payload FROM outbox WHERE id = ANY($1::bigint[]) AND status IN ('draft','queued')`, [ids.map(Number)]);
+    const ok = [];
+    for (const r of rows) {
+      if (r.payload?.waTemplate || (await target.windowFor(r.to_jid)).open) ok.push(r.id);
+      else kept++;
+    }
+    if (!ok.length && kept) {
+      throw new Error(`None moved: "${target.account.label}" is a Meta API number and these people haven't written to it in the last 24 hours — it can only send them an approved Meta template`);
+    }
+    ids = ok;
+  }
   const rows = await query(
     `UPDATE outbox o SET account_id = $2, idem_key = NULL, scheduled_at = now()
      FROM outbox old WHERE old.id = o.id AND o.id = ANY($1::bigint[]) AND o.status IN ('draft','queued') AND o.account_id <> $2
@@ -211,7 +267,7 @@ export async function moveToAccount(ids, account) {
   await afterBatchChange(rows);
   if (rows.some((r) => r.status === 'queued')) wake(target.id);
   return {
-    moved: rows.length, to: target.id, toLabel: target.account.label, from: countBy(rows, 'from_account'),
+    moved: rows.length, kept, to: target.id, toLabel: target.account.label, from: countBy(rows, 'from_account'),
     drafts: rows.filter((r) => r.status === 'draft').length, approved: rows.filter((r) => r.status === 'queued').length,
   };
 }
@@ -381,7 +437,23 @@ export async function renderTemplate(accountId, jid, templateRef, vars = {}) {
   return { payload, missing, template: t };
 }
 
-async function buildContent(payload) {
+/**
+ * A Meta template message: check it now (exists, approved, every {{n}} filled) and keep the text the person will
+ * see as payload.text — drafts show it, and a linked number it is moved to sends that text instead.
+ */
+export async function withTemplatePreview(session, payload) {
+  if (!payload.waTemplate?.name) throw new Error('waTemplate needs the Meta template name');
+  if (!session.isCloud) {
+    if (!payload.text) throw new Error(`"${session.account.label}" is a linked number — Meta templates are only for Meta Cloud API numbers; send text instead`);
+    return payload;
+  }
+  const { buildTemplateMessage } = await import('./wa/cloud-templates.js');
+  const t = await buildTemplateMessage(session.wabaId, payload.waTemplate);
+  return { ...payload, text: t.preview, waTemplate: { ...payload.waTemplate, language: t.template.language.code } };
+}
+
+async function buildContent(payload, session) {
+  if (payload.waTemplate && session?.isCloud) return { waTemplate: payload.waTemplate };
   if (!payload.attachment) return { text: payload.text };
   const a = payload.attachment;
   const file = await loadOutgoing(a);
@@ -534,7 +606,7 @@ function startWorker(accountId) {
     let sent;
     let sendError;
     try {
-      const content = await buildContent(row.payload);
+      const content = await buildContent(row.payload, session);
       const textLen = (row.payload.text || '').length;
       // "typing…" is for AI/bulk messages; your own and Apps Script sends go out straight away
       const typingMs = automated && s.typing ? Math.min(6000, Math.max(1500, textLen * 40)) : 0;

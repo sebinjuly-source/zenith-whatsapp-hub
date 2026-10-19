@@ -19,7 +19,7 @@
     for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
     return el;
   }
-  const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
+  const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
   async function api(path, opts = {}) {
     const res = await fetch(path, {
       method: opts.method || (opts.body ? 'POST' : 'GET'),
@@ -49,7 +49,65 @@
       ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : d.toLocaleDateString([], { day: '2-digit', month: 'short', year: d.getFullYear() === today.getFullYear() ? undefined : '2-digit' });
   };
-  const statusText = { open: 'Connected', qr: 'Waiting for scan', connecting: 'Connecting…', stopped: 'Not linked', logged_out: 'Logged out', replaced: 'Running elsewhere', elsewhere: 'Running on another server' };
+  const statusText = { open: 'Connected', qr: 'Waiting for scan', connecting: 'Connecting…', stopped: 'Not linked', logged_out: 'Logged out', replaced: 'Running elsewhere', elsewhere: 'Running on another server', not_configured: 'Not set up', error: 'Meta problem' };
+  const isCloud = (id) => state.accounts.find((a) => a.id === id)?.provider === 'cloud';
+
+  /**
+   * Picker for a Meta-approved template (Meta Cloud API numbers): template + one box per {{1}}, {{2}} …
+   * Boxes may use {first_name}, {name} or list columns — filled per person. el.value() → { name, language, params, header } | null.
+   */
+  function waTemplateField(accountId, current, { label = 'Meta template', hint } = {}) {
+    const sel = h('select', { 'aria-label': label }, h('option', { value: '' }, 'Loading Meta templates…'));
+    const boxes = h('div', {});
+    let list = [];
+    const draw = () => {
+      const t = list.find((x) => `${x.name}|${x.language}` === sel.value);
+      fill(boxes, !t ? null : [
+        h('div', { class: 'muted', style: 'white-space:pre-wrap;font-size:13px;margin:6px 0;padding:8px;background:var(--soft, #f5f5f5);border-radius:8px' }, t.body),
+        ['IMAGE', 'DOCUMENT', 'VIDEO'].includes(t.headerFormat) || /\{\{/.test(t.headerText || '')
+          ? h('label', { class: 'field' }, h('span', {}, t.headerFormat === 'TEXT' ? 'Header text' : `Header ${t.headerFormat.toLowerCase()} (public link)`), h('input', { type: 'text', 'data-header': '1', value: current?.header || '' })) : null,
+        t.vars.map((v, i) => h('label', { class: 'field' }, h('span', {}, `{{${v}}}`),
+          h('input', { type: 'text', 'data-var': v, required: true, value: (Array.isArray(current?.params) ? current.params[i] : current?.params?.[v]) || (i === 0 ? '{first_name}' : '') }))),
+      ]);
+    };
+    sel.onchange = draw;
+    api(`/api/accounts/${encodeURIComponent(accountId)}/wa-templates?approved=1`).then((rows) => {
+      list = rows;
+      fill(sel, h('option', { value: '' }, rows.length ? '— choose an approved template —' : 'No approved templates yet (WhatsApp Manager → Message templates)'),
+        rows.map((t) => h('option', { value: `${t.name}|${t.language}`, selected: current?.name === t.name }, `${t.name} (${t.language}, ${t.category.toLowerCase()})`)));
+      draw();
+    }).catch((e) => fill(sel, h('option', { value: '' }, e.message)));
+    const el = h('div', { class: 'field' }, h('span', {}, label), sel, hint ? h('em', {}, hint) : null, boxes);
+    el.value = () => {
+      if (!sel.value) return null;
+      const [name, language] = sel.value.split('|');
+      const t = list.find((x) => x.name === name && x.language === language);
+      const vals = [...boxes.querySelectorAll('input[data-var]')].map((i) => [i.dataset.var, i.value.trim()]);
+      const header = boxes.querySelector('input[data-header]')?.value.trim() || undefined;
+      return { name, language, params: t?.named ? Object.fromEntries(vals) : vals.map(([, v]) => v), ...(header ? { header } : {}) };
+    };
+    return el;
+  }
+
+  /** Dialog: choose a Meta template and its fill-ins. Resolves to the waTemplate, or null if cancelled. */
+  function askTemplate(accountId, title, hint) {
+    return new Promise((resolve) => {
+      const field = waTemplateField(accountId, null, { hint });
+      const done = (v) => { back.remove(); resolve(v); };
+      const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && done(null) },
+        h('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title, onsubmit: (e) => {
+          e.preventDefault();
+          const v = field.value();
+          if (!v) return toast('Choose a template');
+          done(v);
+        } },
+          h('h2', {}, title), field,
+          h('div', { class: 'row', style: 'justify-content:flex-end;margin-top:10px' },
+            h('button', { class: 'btn', type: 'button', onclick: () => done(null) }, 'Cancel'),
+            h('button', { class: 'btn primary', type: 'submit' }, 'Continue'))));
+      document.body.append(back);
+    });
+  }
   const nice = (n) => (n == null ? '–' : Number(n).toLocaleString());
   const guard = (fn) => async (...a) => {
     try {
@@ -127,7 +185,42 @@
     );
   }
 
+  const QUALITY = { GREEN: '🟢 High', YELLOW: '🟡 Medium', RED: '🔴 Low — sends may be limited', UNKNOWN: 'Not rated yet' };
+  const TIER = { TIER_250: '250 new people / 24 h', TIER_1K: '1,000 / 24 h', TIER_2K: '2,000 / 24 h', TIER_10K: '10,000 / 24 h', TIER_100K: '100,000 / 24 h', TIER_UNLIMITED: 'Unlimited' };
+  function cloudCard(a) {
+    const st = a.stats || {};
+    const c = a.cloud || {};
+    return h('div', { class: 'card' },
+      h('div', { class: 'row' },
+        h('div', { class: 'grow' }, h('h3', {}, a.label, h('span', { class: 'tag', style: 'margin-left:6px' }, 'Meta API'), a.isDefault ? h('span', { class: 'tag', style: 'margin-left:6px' }, 'default') : null),
+          h('div', { class: 'meta' }, a.purpose || 'No purpose set')),
+        h('span', { class: `pill ${a.status}` }, statusText[a.status] || a.status),
+      ),
+      a.error && a.status !== 'open' ? h('p', { style: 'color:var(--bad);margin:6px 0' }, a.error) : null,
+      h('dl', { class: 'kv' },
+        h('dt', {}, 'Number'), h('dd', {}, a.phone ? '+' + a.phone : c.displayPhone || '–'),
+        h('dt', {}, 'Name customers see'), h('dd', {}, c.verifiedName || '–', c.nameStatus && c.nameStatus !== 'APPROVED' ? h('span', { class: 'muted' }, ` (${String(c.nameStatus).toLowerCase().replace(/_/g, ' ')})`) : ''),
+        h('dt', {}, 'Quality (Meta)'), h('dd', { style: c.quality === 'RED' ? 'color:var(--bad);font-weight:600' : '' }, QUALITY[c.quality] || c.quality || '–'),
+        h('dt', {}, 'Meta limit'), h('dd', {}, TIER[c.tier] || c.tier || '–'),
+        h('dt', {}, 'Account id'), h('dd', { class: 'mono' }, a.id),
+        h('dt', {}, 'Stored'), h('dd', {}, `${nice(st.chats)} chats · ${nice(st.contacts)} contacts · ${nice(st.messages)} messages`),
+        h('dt', {}, 'AI sending'), h('dd', {}, a.settings.aiMode === 'auto' ? 'Automatic' : 'Drafts for approval'),
+        a.newChats ? h('dt', {}, 'New numbers (24 h)') : null,
+        a.newChats ? h('dd', {}, `${a.newChats.count} of ${a.newChats.limit} (hub limit)`) : null,
+        h('dt', {}, 'Rule'), h('dd', { class: 'muted' }, 'Free messages only within 24 h of the person\'s last message; first messages and follow-ups use Meta-approved templates.'),
+      ),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn small', onclick: () => { state.inbox.account = a.id; location.hash = 'inbox'; } }, 'Open inbox'),
+        h('button', { class: 'btn small', onclick: () => { location.hash = 'templates'; } }, 'Meta templates'),
+        h('button', { class: 'btn small', title: 'Check the number with Meta again (registration, webhook, quality)', onclick: guard(async () => { await api(`/api/accounts/${a.id}/link`, { body: {} }); toast('Checked with Meta'); route(); }) }, 'Re-check with Meta'),
+        h('button', { class: 'btn small', onclick: () => { state.settingsFor = a.id; location.hash = 'settings'; } }, 'Settings'),
+        !a.isDefault ? h('button', { class: 'btn small', onclick: guard(async () => { await api(`/api/accounts/${a.id}`, { method: 'PATCH', body: { isDefault: true } }); route(); }) }, 'Make default') : null,
+      ),
+    );
+  }
+
   function accountCard(a) {
+    if (a.provider === 'cloud') return cloudCard(a);
     const st = a.stats || {};
     return h('div', { class: 'card' },
       h('div', { class: 'row' },
@@ -184,12 +277,23 @@
     const form = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
       const f = e.target;
-      const acc = await api('/api/accounts', { body: { id: f.id.value, label: f.label.value || f.id.value, purpose: f.purpose.value } });
-      toast(`Added "${acc.label}". Now link it.`);
+      const cloud = f.kind.value === 'cloud';
+      const acc = await api('/api/accounts', { body: { id: f.id.value, label: f.label.value || f.id.value, purpose: f.purpose.value,
+        ...(cloud ? { provider: 'cloud', cloud: { phoneNumberId: f.pnid.value.trim() || undefined, wabaId: f.waba.value.trim() || undefined } } : {}) } });
+      toast(cloud ? `Added "${acc.label}" — checking it with Meta…` : `Added "${acc.label}". Now link it.`);
       await route();
-      openLink({ ...acc, status: 'stopped' });
+      if (!cloud) openLink({ ...acc, status: 'stopped' });
+      else setTimeout(route, 4000);
     }) },
       h('h2', {}, 'Add a number'),
+      h('p', { style: 'margin:0 0 6px' }, h('b', {}, 'Type of number')),
+      h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'kind', value: 'phone', checked: true, onchange: (e) => { e.target.form.querySelector('.cloudonly').hidden = true; } }),
+        h('span', {}, 'Linked phone', h('em', {}, 'A normal WhatsApp / WhatsApp Business app number, linked by QR or code.'))),
+      h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'kind', value: 'cloud', onchange: (e) => { e.target.form.querySelector('.cloudonly').hidden = false; } }),
+        h('span', {}, 'Meta Cloud API number', h('em', {}, 'Official API number from Meta (WhatsApp Manager). Nothing to scan; the keys are in Render.'))),
+      h('div', { class: 'cloudonly', hidden: true },
+        h('label', { class: 'field' }, h('span', {}, 'Phone number ID (optional)'), h('input', { type: 'text', name: 'pnid', inputmode: 'numeric', placeholder: 'Empty = META_PHONE_NUMBER_ID from Render' })),
+        h('label', { class: 'field' }, h('span', {}, 'WhatsApp Business account ID (optional)'), h('input', { type: 'text', name: 'waba', inputmode: 'numeric', placeholder: 'Empty = META_WABA_ID from Render' }))),
       h('label', { class: 'field' }, h('span', {}, 'Short id'), h('input', { type: 'text', name: 'id', required: true, placeholder: 'hiring', pattern: '[A-Za-z0-9 _-]{2,32}' }), h('em', {}, 'Used by AI and Apps Script to pick this number, e.g. "hiring" or "guests".')),
       h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { type: 'text', name: 'label', placeholder: 'Hiring (Airtel SIM)' })),
       h('label', { class: 'field' }, h('span', {}, 'Purpose'), h('input', { type: 'text', name: 'purpose', placeholder: 'Contacting job candidates' })),
@@ -387,7 +491,7 @@
               toast('Reopened'); viewInbox();
             }) }, 'Reopen')
           : null,
-        h('button', { class: 'btn small', title: 'Ask the phone for older messages', onclick: guard(async () => {
+        isCloud(ib.account) ? null : h('button', { class: 'btn small', title: 'Ask the phone for older messages', onclick: guard(async () => {
           const r = await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/older`, { body: { count: 50 } });
           toast(r.note);
         }) }, 'Fetch older from phone'),
@@ -446,8 +550,47 @@
       );
       const sendBtn = h('button', { class: 'btn primary', type: 'submit' }, 'Send');
       composer.append(sendBtn);
-      thread.replaceChildren(header, h('div', { style: 'display:flex;flex-direction:column;min-height:0' }, contactPanel, msgs), composer);
+      // Meta Cloud API number: free text only within 24 h of their last message, otherwise an approved template.
+      const cloudBar = h('div', { style: 'display:none;padding:6px 12px;font-size:13px;border-top:1px solid var(--line)' });
+      const checkWindow = async () => {
+        if (!isCloud(ib.account) || c.is_group) return;
+        const w = await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/window`).catch(() => null);
+        if (!w) return;
+        cloudBar.style.display = 'block';
+        const tplPanel = h('div', { hidden: true, style: 'margin-top:6px' });
+        const openTpl = h('button', { type: 'button', class: 'btn small', onclick: () => {
+          tplPanel.hidden = !tplPanel.hidden;
+          if (!tplPanel.hidden && !tplPanel.firstChild) {
+            const field = waTemplateField(ib.account, null, { label: 'Send a Meta template', hint: '{first_name} / {name} are filled from this contact.' });
+            tplPanel.append(field, h('button', { class: 'btn small primary', type: 'button', onclick: guard(async (e) => {
+              const waTemplate = field.value();
+              if (!waTemplate) return toast('Choose a template first');
+              e.target.disabled = true;
+              try {
+                const ct = (await api(`/api/accounts/${ib.account}/contacts/${encodeURIComponent(c.jid)}`).catch(() => null)) || {};
+                const name = (ct.name || ct.notify || '').trim();
+                const sub = (v) => String(v).replace(/\{name\}/g, name || 'there').replace(/\{first_name\}/g, name.split(/\s+/)[0] || 'there');
+                waTemplate.params = Array.isArray(waTemplate.params) ? waTemplate.params.map(sub) : Object.fromEntries(Object.entries(waTemplate.params).map(([k, v]) => [k, sub(v)]));
+                await api('/api/send', { body: { account: ib.account, to: c.jid, waTemplate, source: 'dashboard' } });
+                toast('Template sent');
+                tplPanel.hidden = true;
+                setTimeout(() => { loadMsgs(); checkWindow(); }, 800);
+              } finally {
+                e.target.disabled = false;
+              }
+            }) }, 'Send template'));
+          }
+        } }, 'Meta template…');
+        fill(cloudBar,
+          w.open
+            ? h('span', {}, '🟢 Reply window open until ', new Date(w.closesAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }), ' — free messages allowed. ')
+            : h('span', { style: 'color:var(--bad)' }, w.closesAt ? '⛔ Reply window closed (24 h since their last message). ' : '⛔ They haven\'t written to this number yet. ', 'Only a Meta-approved template can be sent. '),
+          openTpl, tplPanel);
+        ta.placeholder = w.open ? 'Type a message' : 'Free text is blocked until they write again — use "Meta template…"';
+      };
+      thread.replaceChildren(header, h('div', { style: 'display:flex;flex-direction:column;min-height:0' }, contactPanel, msgs), h('div', {}, cloudBar, composer));
       thread.style.gridTemplateRows = 'auto 1fr auto';
+      checkWindow();
 
       async function loadContact() {
         const ct = (await api(`/api/accounts/${ib.account}/contacts/${encodeURIComponent(c.jid)}`)) || {};
@@ -519,7 +662,7 @@
           msgs.scrollTop = msgs.scrollHeight;
         }
       }
-      state.reloadThread = (chatJid) => chatJid === c.jid && loadMsgs();
+      state.reloadThread = (chatJid) => chatJid === c.jid && (loadMsgs(), checkWindow());
       await loadMsgs();
     }
 
@@ -596,6 +739,7 @@
       h('button', { class: 'btn primary', type: 'submit' }, 'Add to board'),
     );
     const tplList = await api(`/api/templates?account=${encodeURIComponent(b.account)}`).catch(() => []);
+    const bulkWa = isCloud(b.account) ? waTemplateField(b.account, null, { label: 'Meta template (required for a Meta API number)', hint: 'Boxes may use {first_name}, {name} or any column you add after the name.' }) : null;
     const bulkTpl = h('select', { name: 'tpl' }, h('option', { value: '' }, '— none: write the message below —'), tplList.map((t) => h('option', { value: t.id }, t.name)));
     const bulk = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
@@ -604,8 +748,10 @@
         const [to, ...rest] = l.split(/[,\t;]/);
         return { to: to.trim(), name: rest.join(' ').trim() || undefined };
       });
-      if (!f.text.value.trim() && !f.tpl.value) return toast('Write a message or pick a template');
-      const r = await api('/api/bulk', { body: { account: b.account, title: f.title.value, text: f.text.value || undefined, template: f.tpl.value || undefined, recipients,
+      const waTemplate = bulkWa?.value() || undefined;
+      if (bulkWa && !waTemplate) return toast('Meta API number: choose an approved Meta template');
+      if (!bulkWa && !f.text?.value.trim() && !f.tpl?.value) return toast('Write a message or pick a template');
+      const r = await api('/api/bulk', { body: { account: b.account, title: f.title.value, text: f.text?.value || undefined, template: f.tpl?.value || undefined, waTemplate, recipients,
         scheduledAt: f.when.value ? new Date(f.when.value).toISOString() : undefined } });
       alert(r.task
         ? `${r.queued} messages ${r.mode === 'approve' ? 'saved for approval (see "Waiting for approval")' : 'queued'}.` + (r.skipped.length ? `\n\nSkipped ${r.skipped.length}:\n` + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n') : '')
@@ -614,9 +760,11 @@
     }) },
       h('h2', {}, 'Bulk send'),
       h('label', { class: 'field' }, h('span', {}, 'Task title'), h('input', { type: 'text', name: 'title', required: true, placeholder: 'Chef candidates – WorkIndia' })),
-      h('label', { class: 'field' }, h('span', {}, 'Use a saved template (optional)'), bulkTpl),
-      h('label', { class: 'field' }, h('span', {}, 'Message'), h('textarea', { name: 'text', rows: 4, placeholder: 'Hi {name}, we have an opening for a Chef at Zenith Suites, Bengaluru. Interested?' }),
-        h('em', {}, '{name} is replaced by each person\'s name ("there" if missing).')),
+      bulkWa || [
+        h('label', { class: 'field' }, h('span', {}, 'Use a saved template (optional)'), bulkTpl),
+        h('label', { class: 'field' }, h('span', {}, 'Message'), h('textarea', { name: 'text', rows: 4, placeholder: 'Hi {name}, we have an opening for a Chef at Zenith Suites, Bengaluru. Interested?' }),
+          h('em', {}, '{name} is replaced by each person\'s name ("there" if missing).')),
+      ],
       h('label', { class: 'field' }, h('span', {}, 'People — one per line: number, name'), h('textarea', { name: 'list', rows: 5, required: true, placeholder: '9876543210, Ravi Kumar\n919812345678, Anita' }),
         h('em', {}, 'Skips duplicates, opted-out contacts and anyone messaged in the last 30 days. Uses this number\'s delay, daily limit and hours.')),
       h('label', { class: 'field' }, h('span', {}, 'Start at (optional)'), h('input', { type: 'datetime-local', name: 'when' })),
@@ -692,16 +840,23 @@
     const tabs = h('div', { class: 'seg', style: 'max-width:720px;margin:10px 0' },
       [['', `All ${sel.total}`], ['new', `Not messaged ${sel.new}`], ['sent', `No reply ${sel.sent}`], ['replied', `Replied ${sel.replied}`], ['failed', `Failed ${sel.failed}`], ['queued', `Queued ${sel.queued}`]].map(([k, l]) =>
         h('button', { class: filter === k ? 'on' : '', onclick: () => { state.listFilter = k; viewLists(); } }, l)));
+    const cloudList = isCloud(sel.account_id);
     const sendBtn = h('button', { class: 'btn primary', disabled: !(sel.new + sel.failed), onclick: guard(async () => {
-      if (!confirm(`Message the ${sel.new + sel.failed} people not messaged yet or failed, each with their own prepared message?`)) return;
-      const r = await api(`/api/lists/${sel.id}/send`, { body: { statuses: ['new', 'failed'] } });
+      let waTemplate;
+      if (cloudList) {
+        waTemplate = await askTemplate(sel.account_id, `Message ${sel.new + sel.failed} people from a Meta API number`, 'First messages must be a Meta-approved template. Boxes may use {first_name}, {name} or list columns.');
+        if (!waTemplate) return;
+      } else if (!confirm(`Message the ${sel.new + sel.failed} people not messaged yet or failed, each with their own prepared message?`)) return;
+      const r = await api(`/api/lists/${sel.id}/send`, { body: { statuses: ['new', 'failed'], waTemplate } });
       alert(`${r.queued} messages ${r.mode === 'approve' ? 'saved for approval on the Board (Waiting for approval)' : 'queued'}.` + (r.skipped.length ? `\nSkipped: ${r.skipped.map((x) => x.to + ' – ' + x.reason).join(', ')}` : ''));
       viewLists();
     }) }, `Message not-messaged + failed (${sel.new + sel.failed})`);
+    const fuWa = cloudList ? waTemplateField(sel.account_id, f.waTemplate, { label: 'Meta template for follow-ups', hint: 'Meta API number: people who never replied can only get an approved template.' }) : null;
     const fuForm = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
       const x = e.target;
-      await api(`/api/lists/${sel.id}/followup`, { method: 'PATCH', body: { enabled: x.enabled.checked, quietDaysOnly: x.quiet.checked, autoSend: x.autoSend.checked, afterDays: Number(x.afterDays.value), max: Number(x.max.value), text: x.text.value } });
+      await api(`/api/lists/${sel.id}/followup`, { method: 'PATCH', body: { enabled: x.enabled.checked, quietDaysOnly: x.quiet.checked, autoSend: x.autoSend.checked, afterDays: Number(x.afterDays.value), max: Number(x.max.value), text: x.text.value,
+        ...(fuWa ? { waTemplate: fuWa.value() } : {}) } });
       toast('Follow-up settings saved');
       viewLists();
     }) },
@@ -712,7 +867,8 @@
       h('div', { class: 'row' },
         h('label', { class: 'field grow' }, h('span', {}, 'After (days without reply)'), h('input', { type: 'number', name: 'afterDays', min: 0.5, step: 0.5, value: f.afterDays ?? 2 })),
         h('label', { class: 'field grow' }, h('span', {}, 'At most (follow-ups per person)'), h('input', { type: 'number', name: 'max', min: 0, max: 5, value: f.max ?? 1 }))),
-      h('label', { class: 'field' }, h('span', {}, 'Follow-up message'), h('textarea', { name: 'text', rows: 3, value: f.text || '', placeholder: 'Namaste {first_name} ji, kya aap abhi bhi interested hain? Reply karein ya call karein. - Zenith Suites HR' })),
+      h('label', { class: 'field' }, h('span', {}, cloudList ? 'Follow-up message (used only if they wrote in the last 24 h)' : 'Follow-up message'), h('textarea', { name: 'text', rows: 3, value: f.text || '', placeholder: 'Namaste {first_name} ji, kya aap abhi bhi interested hain? Reply karein ya call karein. - Zenith Suites HR' })),
+      fuWa,
       h('button', { class: 'btn primary', type: 'submit' }, 'Save follow-ups'));
     // ---- funnel strip + upcoming visits
     const STAGE_LABEL = { interested: 'Interested', date_given: 'Date given', visited: 'Visited', trial: 'Trial', selected: 'Selected', joined: 'Joined', no_show: 'No-show', not_interested: 'Not interested', rejected: 'Rejected' };
@@ -740,10 +896,13 @@
         m.notes ? h('div', { class: 'muted', style: 'font-size:12px' }, m.notes) : null);
     }) : h('p', { class: 'muted' }, 'Nobody here.'));
     const p = { remindHoursBefore: 18, askDateAfterHours: 4, enabled: true, ...(sel.pipeline || {}) };
+    const askWa = cloudList ? waTemplateField(sel.account_id, p.askDateWaTemplate, { label: 'Meta template: ask for a date' }) : null;
+    const remWa = cloudList ? waTemplateField(sel.account_id, p.reminderWaTemplate, { label: 'Meta template: visit reminder', hint: '{visit_date} fills in their date.' }) : null;
     const pipeForm = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
       const x = e.target;
-      await api(`/api/lists/${sel.id}/pipeline`, { method: 'PATCH', body: { enabled: x.enabled.checked, autoSend: x.autoSend.checked, remindHoursBefore: Number(x.hours.value), askDateAfterHours: Number(x.askAfter.value), askDateText: x.askText.value || undefined, reminderText: x.remText.value || undefined } });
+      await api(`/api/lists/${sel.id}/pipeline`, { method: 'PATCH', body: { enabled: x.enabled.checked, autoSend: x.autoSend.checked, remindHoursBefore: Number(x.hours.value), askDateAfterHours: Number(x.askAfter.value), askDateText: x.askText.value || undefined, reminderText: x.remText.value || undefined,
+        ...(askWa ? { askDateWaTemplate: askWa.value(), reminderWaTemplate: remWa.value() } : {}) } });
       toast('Pipeline settings saved');
       viewLists();
     }) },
@@ -755,6 +914,8 @@
         h('label', { class: 'field grow' }, h('span', {}, 'Ask for a date after (hours)'), h('input', { type: 'number', name: 'askAfter', min: 1, value: p.askDateAfterHours }))),
       h('label', { class: 'field' }, h('span', {}, 'Ask-for-date message'), h('textarea', { name: 'askText', rows: 2, value: p.askDateText || '', placeholder: 'Default: Namaste {first_name} ji, aap kis din aa sakte hain? …' })),
       h('label', { class: 'field' }, h('span', {}, 'Visit reminder ({visit_date} = their date)'), h('textarea', { name: 'remText', rows: 2, value: p.reminderText || '', placeholder: 'Default: Namaste {first_name} ji, yaad dila rahe hain: aap {visit_date} ko …' })),
+      askWa ? h('p', { class: 'muted', style: 'font-size:12px' }, 'Meta API number: the texts above go only if the person wrote in the last 24 h. Otherwise these templates are used — without one, a Board task asks you to call them.') : null,
+      askWa, remWa,
       h('button', { class: 'btn primary', type: 'submit' }, 'Save pipeline'));
     shell([
       h('h1', {}, 'Lists'),
@@ -796,9 +957,31 @@
         t.id ? h('button', { class: 'btn danger', type: 'button', onclick: guard(async () => { if (!confirm(`Delete "${t.name}"?`)) return; await api(`/api/templates/${t.id}`, { method: 'DELETE' }); viewTemplates(); }) }, 'Delete') : null),
     );
     const editor = h('div', {}, form());
+    // Meta-approved templates of each Meta API number (created in WhatsApp Manager, read-only here)
+    const cloudAccs = state.accounts.filter((a) => a.provider === 'cloud');
+    const metaCards = await Promise.all(cloudAccs.map(async (a) => {
+      const box = h('div', {});
+      const load = async (sync) => {
+        const ts = await api(`/api/accounts/${a.id}/wa-templates${sync ? '?sync=1' : ''}`);
+        const badge = (s) => h('span', { class: 'tag', style: s === 'APPROVED' ? 'background:var(--accent-soft)' : s === 'REJECTED' ? 'background:var(--bad-soft)' : '' }, s.toLowerCase());
+        fill(box, ts.length ? ts.map((t) => h('div', { style: 'border-top:1px solid var(--line);padding:8px 0' },
+          h('div', { class: 'row' }, h('b', { class: 'grow mono' }, t.name), h('span', { class: 'tag' }, t.language), h('span', { class: 'tag' }, t.category.toLowerCase()), badge(t.status)),
+          h('div', { class: 'muted', style: 'white-space:pre-wrap;font-size:13px' }, t.headerText ? t.headerText + '\n' : '', t.body, t.footer ? '\n— ' + t.footer : ''),
+          t.vars.length ? h('div', { class: 'muted', style: 'font-size:12px' }, 'Fill-ins: ', t.vars.map((v) => `{{${v}}}`).join(' ')) : null))
+          : h('p', { class: 'muted' }, 'No templates yet.'));
+      };
+      await load(false).catch((e) => fill(box, h('p', { class: 'muted' }, e.message)));
+      return h('div', { class: 'card' },
+        h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, `Meta templates — ${a.label}`),
+          h('button', { class: 'btn small', onclick: guard(async () => { await load(true); toast('Synced with Meta'); }) }, 'Sync from Meta'),
+          h('a', { class: 'btn small', href: 'https://business.facebook.com/wa/manage/message-templates/', target: '_blank', rel: 'noopener' }, 'Create in WhatsApp Manager')),
+        h('p', { class: 'muted', style: 'font-size:12px' }, 'A Meta API number can message someone who hasn\'t written in 24 hours only with one of these approved templates. New ones are created and approved in WhatsApp Manager (usually minutes); this list updates by itself.'),
+        box);
+    }));
     shell([
       h('h1', {}, 'Templates'),
       h('p', { class: 'sub' }, 'Saved messages you, bulk sends and the AI can reuse. Pick one in the inbox ("Template…") or in a bulk send.'),
+      metaCards.length ? h('div', { class: 'settings-grid', style: 'margin-bottom:16px' }, metaCards) : null,
       h('div', { class: 'settings-grid' },
         h('div', { class: 'card' }, h('h2', {}, `Saved (${rows.length})`),
           rows.length ? rows.map((t) => h('div', { style: 'border-top:1px solid var(--line);padding:8px 0' },
@@ -914,11 +1097,12 @@
     };
     const moveTo = async (ids, to) => {
       const r = await api('/api/outbox/move', { body: { ids, account: to } });
-      toast(r.moved ? `Moved ${r.moved} to ${r.toLabel}${r.approved ? ` — ${r.approved} go out from there by themselves` : ''}${r.drafts ? ` — ${r.drafts} drafts still need your approval` : ''}` : 'Nothing to move: they are already on that number');
+      toast(r.moved ? `Moved ${r.moved} to ${r.toLabel}${r.approved ? ` — ${r.approved} go out from there by themselves` : ''}${r.drafts ? ` — ${r.drafts} drafts still need your approval` : ''}${r.kept ? ` — ${r.kept} stayed: a Meta API number can only send them a template` : ''}` : 'Nothing to move: they are already on that number');
       viewOutbox();
     };
     const items = rows.map((r) => {
-      const ta = h('textarea', { rows: 3, value: r.payload.text || r.payload.attachment?.caption || '' });
+      const ta = h('textarea', { rows: 3, value: r.payload.text || r.payload.attachment?.caption || '', readonly: !!r.payload.waTemplate,
+        title: r.payload.waTemplate ? 'Meta template wording is fixed by Meta' : undefined });
       let cb = null;
       if (movable(r)) {
         cb = h('input', { type: 'checkbox', 'aria-label': `Select ${r.to_name || r.to_jid.split('@')[0]}`, onchange: (e) => { if (e.target.checked) sel.add(r.id); else sel.delete(r.id); refreshSel(); } });
@@ -936,10 +1120,11 @@
           h('b', { class: 'grow' }, r.to_name || '+' + r.to_jid.split('@')[0]),
           from, h('span', { class: 'tag' }, { mcp: 'AI', campaign: 'bulk', api: 'script', dashboard: 'you' }[r.source] || r.source), h('span', { class: 'muted' }, new Date(r.created_at).toLocaleString())),
         r.note ? h('p', { class: 'muted', style: 'margin:6px 0' }, 'Why: ', r.note) : null,
+        r.payload.waTemplate ? h('p', { style: 'margin:6px 0' }, h('span', { class: 'tag' }, `Meta template: ${r.payload.waTemplate.name}`)) : null,
         r.payload.attachment ? h('p', { class: 'muted', style: 'margin:6px 0' }, '📎 ', r.payload.attachment.fileName || r.payload.attachment.url || 'file') : null,
         r.status === 'draft'
           ? h('div', {}, ta, h('div', { class: 'row', style: 'margin-top:8px' },
-              h('button', { class: 'btn primary small', onclick: guard(async () => { await api(`/api/outbox/${r.id}/approve`, { body: { text: ta.value } }); toast('Approved — queued'); viewOutbox(); }) }, 'Approve & send'),
+              h('button', { class: 'btn primary small', onclick: guard(async () => { await api(`/api/outbox/${r.id}/approve`, { body: r.payload.waTemplate ? {} : { text: ta.value } }); toast('Approved — queued'); viewOutbox(); }) }, 'Approve & send'),
               h('button', { class: 'btn small danger', onclick: guard(async () => { await api(`/api/outbox/${r.id}/reject`, { method: 'POST' }); viewOutbox(); }) }, 'Reject')))
           : h('div', {}, h('p', { style: 'white-space:pre-wrap;margin:6px 0' }, r.payload.text || r.payload.attachment?.caption || ''),
               r.error ? h('p', { style: 'color:var(--bad);margin:0' }, r.error) : null,

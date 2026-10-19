@@ -4,6 +4,7 @@
 import { EventEmitter } from 'events';
 import { query, logEvent } from '../db.js';
 import { Session } from './session.js';
+import { CloudSession } from './cloud.js';
 import { hasAuthState, clearAuthState } from './auth-state.js';
 import { normalizeSettings } from '../settings.js';
 
@@ -33,7 +34,7 @@ class Manager extends EventEmitter {
         Object.assign(s.account, acc);
         if (s.status !== 'open') s.sync = { ...(acc.sync || {}) }; // another server runs it: show its progress
       }
-      if (acc.enabled && s.status === 'stopped' && !s.sock && !s.stopping && (await hasAuthState(acc.id))) {
+      if (acc.enabled && s.status === 'stopped' && !s.sock && !s.stopping && !s.starting && (await s.canAutoStart())) {
         s.start().catch((err) => logEvent(acc.id, 'error', `Start failed: ${err.message}`));
       }
     }
@@ -45,7 +46,7 @@ class Manager extends EventEmitter {
   }
 
   attach(account) {
-    const s = new Session(account);
+    const s = account.provider === 'cloud' ? new CloudSession(account) : new Session(account);
     s.on('change', (info) => this.emit('change', info));
     s.on('incoming', (row) => this.emit('incoming', { account: account.id, ...row }));
     this.sessions.set(account.id, s);
@@ -80,7 +81,20 @@ class Manager extends EventEmitter {
     throw new Error(`Unknown account "${idOrPhone}"`);
   }
 
-  async create({ id, label, purpose = '', settings = {} }) {
+  /**
+   * provider 'cloud' = a Meta Cloud API number (cloud: { phoneNumberId, wabaId }; defaults from META_PHONE_NUMBER_ID /
+   * META_WABA_ID). It starts by itself — nothing to scan.
+   */
+  async create({ id, label, purpose = '', settings = {}, provider = 'baileys', cloud }) {
+    if (!['baileys', 'cloud'].includes(provider)) throw new Error('provider must be "baileys" (linked phone) or "cloud" (Meta Cloud API)');
+    const cloudCfg = provider === 'cloud'
+      ? { phoneNumberId: String(cloud?.phoneNumberId || process.env.META_PHONE_NUMBER_ID || '').replace(/\D/g, ''), wabaId: String(cloud?.wabaId || process.env.META_WABA_ID || '').replace(/\D/g, '') }
+      : {};
+    if (provider === 'cloud') {
+      if (!cloudCfg.phoneNumberId) throw new Error('Give the Meta phone number ID (or set META_PHONE_NUMBER_ID in Render)');
+      const [dup] = await query(`SELECT id FROM accounts WHERE provider = 'cloud' AND cloud->>'phoneNumberId' = $1`, [cloudCfg.phoneNumberId]);
+      if (dup) throw new Error(`That Meta number is already added as "${dup.id}"`);
+    }
     const slug = String(id || label || '')
       .toLowerCase()
       .trim()
@@ -91,11 +105,12 @@ class Manager extends EventEmitter {
     if (this.sessions.has(slug)) throw new Error(`Account "${slug}" already exists`);
     const first = this.sessions.size === 0;
     const rows = await query(
-      `INSERT INTO accounts (id, label, purpose, is_default, settings) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [slug, label || slug, purpose, first, JSON.stringify(normalizeSettings(settings))],
+      `INSERT INTO accounts (id, label, purpose, is_default, settings, provider, cloud) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [slug, label || slug, purpose, first, JSON.stringify(normalizeSettings(settings)), provider, JSON.stringify(cloudCfg)],
     );
-    this.attach(rows[0]);
-    await logEvent(slug, 'info', `Account created${first ? ' (default)' : ''}`);
+    const s = this.attach(rows[0]);
+    await logEvent(slug, 'info', `Account created${first ? ' (default)' : ''}${provider === 'cloud' ? ' — Meta Cloud API number' : ''}`);
+    if (provider === 'cloud') s.start().catch(() => {});
     return rows[0];
   }
 
@@ -111,13 +126,19 @@ class Manager extends EventEmitter {
     );
     Object.assign(s.account, rows[0]);
     if (enabled === false && s.status !== 'stopped') await s.stop();
-    if (enabled === true && s.status === 'stopped' && (await hasAuthState(id))) await s.start();
+    if (enabled === true && s.status === 'stopped' && (await s.canAutoStart())) await s.start();
     this.emit('change', s.info());
     return rows[0];
   }
 
   async link(id, { pairPhone, history } = {}) {
     const s = this.get(id);
+    if (s.isCloud) {
+      // Nothing to scan: "link" re-runs the Meta setup (register, subscribe, health) — handy after fixing a setting.
+      await s.stop();
+      await s.start();
+      return s.info();
+    }
     if (s.status === 'open') throw new Error('Already connected');
     if (history) await this.update(id, { settings: { historyMode: history } });
     if (s.sock) await s.stop();
@@ -127,6 +148,7 @@ class Manager extends EventEmitter {
   }
 
   async unlink(id) {
+    if (this.get(id).isCloud) throw new Error('A Meta Cloud API number is removed in WhatsApp Manager, not here — or pause it in Settings');
     await this.get(id).logout();
     await logEvent(id, 'info', 'Unlinked from WhatsApp (stored chats kept)');
   }
@@ -147,6 +169,7 @@ class Manager extends EventEmitter {
   list() {
     return [...this.sessions.values()].map((s) => ({
       ...s.info(),
+      provider: s.account.provider || 'baileys',
       label: s.account.label,
       purpose: s.account.purpose,
       isDefault: s.account.is_default,

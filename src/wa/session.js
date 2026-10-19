@@ -60,6 +60,15 @@ export class Session extends EventEmitter {
     return normalizeSettings(this.account.settings);
   }
 
+  get isCloud() {
+    return false;
+  }
+
+  /** May the manager start this number by itself? Linked numbers: only with a saved login (never show QR codes unasked). */
+  async canAutoStart() {
+    return hasAuthState(this.id);
+  }
+
   get myJid() {
     return this.sock?.user?.id ? jidNormalizedUser(this.sock.user.id) : null;
   }

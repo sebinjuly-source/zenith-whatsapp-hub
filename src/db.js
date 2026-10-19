@@ -256,6 +256,21 @@ CREATE TABLE IF NOT EXISTS events (
 -- who did it: 'you' (dashboard/REST), 'ai' (MCP), 'system'
 ALTER TABLE events ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT 'system';
 ALTER TABLE events ADD COLUMN IF NOT EXISTS role TEXT;
+
+-- Meta WhatsApp Cloud API numbers (provider = 'cloud'): { phoneNumberId, wabaId } + last known number health
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cloud JSONB NOT NULL DEFAULT '{}';
+-- Message templates approved by Meta (synced from the WhatsApp Business account)
+CREATE TABLE IF NOT EXISTS wa_templates (
+  waba_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  language TEXT NOT NULL,
+  status TEXT NOT NULL,
+  category TEXT,
+  components JSONB NOT NULL DEFAULT '[]',
+  meta_id TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (waba_id, name, language)
+);
 `;
 
 function makePgDriver() {

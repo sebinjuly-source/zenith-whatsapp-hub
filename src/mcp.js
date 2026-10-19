@@ -48,6 +48,14 @@ const safe = (fn) => async (args) => {
 };
 
 const accountArg = z.string().optional().describe('Account id (e.g. "hiring") or its phone number. Omit for the default account.');
+// Meta Cloud API numbers: messages to someone who hasn't written in 24 h must be an approved Meta template.
+const waTemplateArg = z.object({
+  name: z.string().describe('Meta template name (see list_meta_templates)'),
+  language: z.string().optional().describe('e.g. en, en_US, hi — default: the approved one'),
+  params: z.union([z.array(z.string()), z.record(z.string(), z.string())]).optional()
+    .describe('Values for {{1}}, {{2}}… in order (or {name: value} for named ones). May use {name}, {first_name} and list fields — filled per person'),
+  header: z.string().optional().describe('Header text value, or a public file link for image/document headers'),
+}).optional();
 const chatArg = z.string().describe('Chat: phone number (e.g. 919876543210 or 9876543210), chat id (…@s.whatsapp.net / …@g.us), or a chat/contact name');
 
 async function resolveChat(accountId, chat) {
@@ -106,7 +114,7 @@ function buildServer(playbook = '') {
       const imported = mode === 'full' ? phases.FULL : mode === 'recent' ? phases.RECENT : phases.INITIAL_BOOTSTRAP;
       const nc = await outbox.newChatsStatus(a.id, normalizeSettings(a.settings));
       lines.push(
-        `${a.id}${a.isDefault ? ' (default)' : ''} | ${a.label} | purpose: ${a.purpose || '-'} | +${a.phone || '?'} | ${a.status} | ai:${a.settings.aiMode} | ` +
+        `${a.id}${a.isDefault ? ' (default)' : ''} | ${a.label} | ${a.provider === 'cloud' ? `META CLOUD API (quality ${a.cloud?.quality || '?'}, name ${a.cloud?.nameStatus || '?'}, tier ${a.cloud?.tier || '?'}; first messages & follow-ups need a Meta template — list_meta_templates) | ` : 'linked phone | '}purpose: ${a.purpose || '-'} | +${a.phone || '?'} | ${a.status} | ai:${a.settings.aiMode} | ` +
           `${st.chats} chats (${st.groups} groups), ${st.contacts} contacts, ${st.messages} msgs since ${fmtTime(st.oldest_ts)} | history chosen at link: ${HISTORY_MODES[mode]} (${imported === 'complete' ? 'imported' : 'importing'})` +
           (bf ? ` | deep history #${bf.id}: ${bf.status}${bf.result ? ' — ' + bf.result : ''}` : '') +
           ` | new numbers last 24h: ${nc.count}/${nc.limit}${nc.nextFreeAt ? ' (limit reached)' : ''}` +
@@ -320,10 +328,22 @@ function buildServer(playbook = '') {
       vars: z.record(z.string(), z.string()).optional().describe('Values for other {fields} in the template, e.g. {"role":"Chef"}'),
       reply_to_message_id: z.string().optional().describe('Quote this message (id from get_messages) in the reply'),
       idempotency_key: z.string().optional().describe('Optional unique key; retrying with the same key never sends twice'),
+      wa_template: waTemplateArg.describe('Meta Cloud API numbers only: send this approved Meta template (required when the person has not written in the last 24 h)'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
       const jid = await resolveChat(s.id, a.to);
+      if (s.isCloud && !a.wa_template) {
+        const w = await s.windowFor(jid);
+        if (!w.open) return `"${s.id}" is a Meta Cloud API number and ${jid.split('@')[0]} ${w.closesAt ? 'last wrote over 24 h ago' : 'has never written'} — free text is not allowed. Use wa_template (see list_meta_templates).`;
+      }
+      if (a.wa_template) {
+        const vars = await import('./templates.js').then((t) => t.contactFields(s.id, jid));
+        const row = await outbox.enqueue({ account: s.id, to: jid, payload: { waTemplate: outbox.fillWaTemplate(a.wa_template, vars) }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key });
+        if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
+        await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} Meta template "${a.wa_template.name}" #${row.id} to ${jid.split('@')[0]}${a.note ? ` — ${a.note}` : ''}`);
+        return `${row.status === 'draft' ? 'Draft' : 'Queued'} #${row.id} (Meta template "${a.wa_template.name}"): "${trim(row.payload.text, 200)}"`;
+      }
       let attachment = a.attachment_url ? { url: a.attachment_url, fileName: a.file_name, as: a.send_as } : undefined;
       let text = a.text;
       if (a.template) {
@@ -421,7 +441,20 @@ function buildServer(playbook = '') {
       : 'No templates yet.';
   });
 
-  tool('save_template', 'Create or update a saved message template. Use {name}, {first_name}, {phone} (filled from the contact) and any other {field}.', {
+  tool('list_meta_templates', 'Meta-approved message templates of a Meta Cloud API number: name | language | status | category | fill-ins | text. Only APPROVED ones can be sent (wa_template=). New templates are created by the owner in WhatsApp Manager.', {
+    account: accountArg, sync: z.boolean().optional().describe('Fetch fresh from Meta first'),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    if (!s.isCloud) return `"${s.id}" is a linked phone number — it sends normal text; Meta templates are only for Meta Cloud API numbers.`;
+    const t = await import('./wa/cloud-templates.js');
+    if (a.sync) await t.syncTemplates(s.wabaId);
+    const rows = await t.listWaTemplates(s.wabaId);
+    return rows.length
+      ? rows.map((r) => `${r.name} | ${r.language} | ${r.status} | ${r.category} | ${r.vars.length ? r.vars.map((v) => `{{${v}}}`).join(' ') : 'no fill-ins'}${r.headerFormat && r.headerFormat !== 'TEXT' ? ` | header: ${r.headerFormat}` : ''} | ${trim(r.body, 160)}`).join('\n')
+      : 'No Meta templates yet — the owner creates them in WhatsApp Manager → Message templates.';
+  });
+
+  tool('save_template','Create or update a saved message template. Use {name}, {first_name}, {phone} (filled from the contact) and any other {field}.', {
     id: z.number().int().optional().describe('Give to update an existing template'),
     account: z.string().optional().describe('Number it belongs to; omit for all numbers'),
     name: z.string(), body: z.string(),
@@ -540,9 +573,10 @@ function buildServer(playbook = '') {
   tool('send_to_list', 'Message the people on a list with the given statuses (default new + failed). Each gets their own prepared message from the list, unless text/template is given. Follows the number\'s approval mode, delay, daily cap and hours. Use only_phones to pick specific people.', {
     list: listArg, statuses: z.array(z.enum(['new', 'failed', 'sent', 'replied'])).optional(),
     text: z.string().optional(), template: z.string().optional(), only_phones: z.array(z.string()).optional(),
+    wa_template: waTemplateArg.describe('Meta Cloud API numbers: the approved Meta template for people who have not written in 24 h (all first messages)'),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, onlyPhones: a.only_phones, createdBy: 'ai', source: 'mcp' });
+    const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, waTemplate: a.wa_template, onlyPhones: a.only_phones, createdBy: 'ai', source: 'mcp' });
     await ai(l.account_id, `List "${l.name}": ${r.queued} messages ${r.mode === 'approve' ? 'drafted' : 'queued'}`, l.role);
     const skipped = r.skipped.length ? ` Skipped: ${r.skipped.map((x) => x.to + ' (' + x.reason + ')').join('; ')}` : '';
     return r.task ? `Task #${r.task.id}: ${r.queued} messages ${r.mode === 'approve' ? 'saved as drafts — waiting for approval on the board' : 'queued'}.${skipped}` : `Nothing to send.${skipped}`;
@@ -553,9 +587,10 @@ function buildServer(playbook = '') {
     text: z.string().optional().describe('Follow-up message; may use {first_name}, {name}'), template: z.string().optional(),
     quiet_days_only: z.boolean().optional().describe('Default true: follow-ups only on days this number sends no first messages to new people'),
     auto_send: z.boolean().optional().describe('Send follow-ups without approval (owner allowed). Timing/daily max come from the number settings (default after 21:00, max 5/day).'),
+    wa_template: waTemplateArg.describe('Meta Cloud API numbers: follow-ups go to people who never replied, so they need an approved Meta template'),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    const u = await lists.setFollowup(l.id, { enabled: a.enabled, afterDays: a.after_days, max: a.max, text: a.text, template: a.template, quietDaysOnly: a.quiet_days_only, autoSend: a.auto_send });
+    const u = await lists.setFollowup(l.id, { enabled: a.enabled, afterDays: a.after_days, max: a.max, text: a.text, template: a.template, waTemplate: a.wa_template, quietDaysOnly: a.quiet_days_only, autoSend: a.auto_send });
     await ai(l.account_id, `Follow-ups for "${l.name}": ${u.followup.enabled ? 'on' : 'off'}`, l.role);
     return `Follow-ups for "${l.name}": ${u.followup.enabled ? `on — after ${u.followup.afterDays} day(s) without reply, up to ${u.followup.max}` : 'off'}.`;
   });
@@ -595,9 +630,11 @@ function buildServer(playbook = '') {
     list: listArg, enabled: z.boolean().optional(), auto_send: z.boolean().optional().describe('Send these without approval'),
     remind_hours_before: z.number().optional(), ask_date_after_hours: z.number().optional(),
     reminder_text: z.string().optional(), ask_date_text: z.string().optional(),
+    reminder_wa_template: waTemplateArg.describe('Meta numbers: template for the visit reminder when the person has not written in 24 h (may use {visit_date})'),
+    ask_date_wa_template: waTemplateArg.describe('Meta numbers: template for asking a date when the 24 h window has closed'),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    const u = await lists.setPipeline(l.id, { enabled: a.enabled, autoSend: a.auto_send, remindHoursBefore: a.remind_hours_before, askDateAfterHours: a.ask_date_after_hours, reminderText: a.reminder_text, askDateText: a.ask_date_text });
+    const u = await lists.setPipeline(l.id, { enabled: a.enabled, autoSend: a.auto_send, remindHoursBefore: a.remind_hours_before, askDateAfterHours: a.ask_date_after_hours, reminderText: a.reminder_text, askDateText: a.ask_date_text, reminderWaTemplate: a.reminder_wa_template, askDateWaTemplate: a.ask_date_wa_template });
     await ai(l.account_id, `Pipeline settings for "${l.name}" updated`, l.role);
     const p = u.pipeline;
     return `Pipeline for "${l.name}": ${p.enabled ? 'on' : 'off'}, ${p.autoSend ? 'sends automatically' : 'drafts for approval'}, reminder ${p.remindHoursBefore}h before visits, ask for a date after ${p.askDateAfterHours}h.`;
@@ -690,10 +727,11 @@ function buildServer(playbook = '') {
       schedule_at: z.string().optional().describe('ISO datetime to start (default now)'),
       skip_if_contacted_days: z.number().int().min(0).optional().describe('Default 30; 0 = do not skip'),
       idempotency_key: z.string().optional().describe('Optional unique key, e.g. sheet name + date; repeating it never creates a second bulk send'),
+      wa_template: waTemplateArg.describe('Required on Meta Cloud API numbers: the approved Meta template (params may use {name} etc.)'),
     },
     async (a) => {
       const r = await outbox.bulkSend({
-        account: a.account, title: a.title, details: a.details, text: a.text, template: a.template, recipients: a.recipients,
+        account: a.account, title: a.title, details: a.details, text: a.text, template: a.template, waTemplate: a.wa_template, recipients: a.recipients,
         attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : undefined,
         scheduledAt: a.schedule_at, source: 'mcp', createdBy: 'ai',
         skipIfContactedDays: a.skip_if_contacted_days ?? 30, allowRepeat: a.skip_if_contacted_days === 0, idemKey: a.idempotency_key,
