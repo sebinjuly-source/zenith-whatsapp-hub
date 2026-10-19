@@ -37,6 +37,7 @@ const EXPLAIN = {
   131053: 'Could not upload the file to Meta (type or size not allowed)',
   131056: 'Too many messages to this one person in a short time — wait a bit',
   131057: 'The WhatsApp account is in maintenance mode',
+  131058: 'Meta\'s sample "hello_world" template only works from test numbers — use one of your own approved templates',
   132000: 'The template\'s fill-in values don\'t match the template (count of {{1}}, {{2}} …)',
   132001: 'This template doesn\'t exist in that language, or isn\'t approved yet',
   132005: 'The filled-in template text is too long',

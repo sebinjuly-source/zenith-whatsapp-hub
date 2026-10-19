@@ -176,6 +176,15 @@ export function buildApp() {
     if (req.query.sync === '1') await syncTemplates(s.wabaId);
     res.json(await listWaTemplates(s.wabaId, { approvedOnly: req.query.approved === '1' }));
   }));
+  // Submit a new Meta template for review: { name, language?, category: UTILITY|MARKETING, body, examples, header?, footer?, buttons? }
+  api.post('/accounts/:id/wa-templates', wrap(async (req, res) => {
+    const s = manager.get(req.params.id);
+    if (!s.isCloud) throw new Error('Meta templates are only for Meta Cloud API numbers');
+    const { createTemplate } = await import('./wa/cloud-templates.js');
+    const r = await createTemplate(s.wabaId, req.body || {});
+    await act(req, s.id, `Submitted Meta template "${r.name}" (${r.category || req.body?.category}) for review — ${String(r.status || 'pending').toLowerCase()}`);
+    res.json(r);
+  }));
   // Can this chat get a free-form message right now? (Cloud numbers: 24 h after their last message)
   api.get('/accounts/:id/chats/:jid/window', wrap(async (req, res) => {
     const s = manager.get(req.params.id);

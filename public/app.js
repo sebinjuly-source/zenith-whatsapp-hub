@@ -975,8 +975,30 @@
         h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, `Meta templates — ${a.label}`),
           h('button', { class: 'btn small', onclick: guard(async () => { await load(true); toast('Synced with Meta'); }) }, 'Sync from Meta'),
           h('a', { class: 'btn small', href: 'https://business.facebook.com/wa/manage/message-templates/', target: '_blank', rel: 'noopener' }, 'Create in WhatsApp Manager')),
-        h('p', { class: 'muted', style: 'font-size:12px' }, 'A Meta API number can message someone who hasn\'t written in 24 hours only with one of these approved templates. New ones are created and approved in WhatsApp Manager (usually minutes); this list updates by itself.'),
-        box);
+        h('p', { class: 'muted', style: 'font-size:12px' }, 'A Meta API number can message someone who hasn\'t written in 24 hours only with one of these approved templates. Meta usually reviews new ones within minutes; this list updates by itself.'),
+        box,
+        h('details', { style: 'margin-top:10px' }, h('summary', {}, 'Submit a new template to Meta'),
+          h('form', { onsubmit: guard(async (e) => {
+            e.preventDefault();
+            const f = e.target;
+            const r = await api(`/api/accounts/${a.id}/wa-templates`, { body: {
+              name: f.tname.value, category: f.category.value, language: f.lang.value || 'en', body: f.tbody.value,
+              examples: f.examples.value.split('|').map((x) => x.trim()).filter(Boolean), footer: f.footer.value || undefined,
+              buttons: f.buttons.value.split('|').map((x) => x.trim()).filter(Boolean),
+            } });
+            toast(`Submitted "${r.name}" — ${String(r.status || 'pending').toLowerCase()}`);
+            await load(true);
+          }) },
+            h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'tname', required: true, placeholder: 'chef_job_invite', pattern: '[a-z0-9_]+' })),
+            h('div', { class: 'row' },
+              h('label', { class: 'field grow' }, h('span', {}, 'Category'), h('select', { name: 'category' }, h('option', { value: 'UTILITY' }, 'Utility (about something they asked for / applied to)'), h('option', { value: 'MARKETING' }, 'Marketing (promotional)'))),
+              h('label', { class: 'field' }, h('span', {}, 'Language'), h('input', { name: 'lang', value: 'en', style: 'width:80px' }))),
+            h('label', { class: 'field' }, h('span', {}, 'Text'), h('textarea', { name: 'tbody', rows: 4, required: true, placeholder: 'Namaste {{1}} ji, Zenith Suites ko {{2}} chahiye. Interested hain to reply karein. – Zenith Suites HR' }),
+              h('em', {}, '{{1}}, {{2}} … are filled per person. Not at the very start or end.')),
+            h('label', { class: 'field' }, h('span', {}, 'Example values, separated by |'), h('input', { name: 'examples', placeholder: 'Ravi | Chef' })),
+            h('label', { class: 'field' }, h('span', {}, 'Footer (optional)'), h('input', { name: 'footer', placeholder: 'Zenith Suites, Bengaluru' })),
+            h('label', { class: 'field' }, h('span', {}, 'Quick-reply buttons (optional, |-separated, max 3)'), h('input', { name: 'buttons', placeholder: 'Haan, interested | Nahi' })),
+            h('button', { class: 'btn primary', type: 'submit' }, 'Submit for review'))));
     }));
     shell([
       h('h1', {}, 'Templates'),

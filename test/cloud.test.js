@@ -40,6 +40,10 @@ fakeGraph.post('/v24.0/111/register', (req, res) => {
 });
 fakeGraph.post('/v24.0/222/subscribed_apps', (req, res) => res.json({ success: true }));
 fakeGraph.get('/v24.0/222/message_templates', (req, res) => res.json({ data: templates, paging: { cursors: {} } }));
+fakeGraph.post('/v24.0/222/message_templates', (req, res) => {
+  templates.push({ id: 'tnew', ...req.body, status: 'PENDING' });
+  res.json({ id: 'tnew', status: 'PENDING', category: req.body.category });
+});
 fakeGraph.get('/v24.0/app', (req, res) => res.json({ id: '999' }));
 fakeGraph.get('/v24.0/999/subscriptions', (req, res) => res.json({ data: appSubscribed ? [appSubscribed] : [] }));
 fakeGraph.post('/v24.0/999/subscriptions', (req, res) => {
@@ -357,4 +361,20 @@ test('moving plain-text drafts to a Meta number: only people inside the 24 h win
   r = await call('POST', '/api/outbox/move', { ids: [a.id, b.id], account: 'api' });
   assert.equal(r.data.moved, 1, 'Ravi wrote recently, so his draft moves');
   assert.equal(r.data.kept, 1);
+});
+
+test('submitting a new Meta template: checked first, sent with examples and buttons, then listed as pending', async () => {
+  let r = await call('POST', '/api/accounts/api/wa-templates', { name: 'Bad', body: '{{1}} come to Zenith', examples: ['Ravi'] });
+  assert.match(r.data.error, /start or end with a fill-in/);
+  r = await call('POST', '/api/accounts/api/wa-templates', { name: 'job_followup', body: 'Namaste {{1}} ji, the {{2}} job is open. – Zenith Suites HR', examples: ['Ravi'] });
+  assert.match(r.data.error, /example value for each fill-in/);
+  r = await call('POST', '/api/accounts/api/wa-templates', { name: 'Job Followup', category: 'marketing', body: 'Namaste {{1}} ji, the {{2}} job is open. – Zenith Suites HR', examples: ['Ravi', 'Chef'], buttons: ['Haan, interested', 'Nahi'] });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const sentT = graphCalls.filter((c) => c.method === 'POST' && c.path === '/v24.0/222/message_templates').at(-1).body;
+  assert.equal(sentT.name, 'job_followup');
+  assert.equal(sentT.category, 'MARKETING');
+  assert.deepEqual(sentT.components[0].example, { body_text: [['Ravi', 'Chef']] });
+  assert.deepEqual(sentT.components[1].buttons.map((b) => b.text), ['Haan, interested', 'Nahi']);
+  const list = await call('GET', '/api/accounts/api/wa-templates');
+  assert.equal(list.data.find((t) => t.name === 'job_followup').status, 'PENDING');
 });

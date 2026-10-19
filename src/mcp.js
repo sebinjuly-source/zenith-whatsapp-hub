@@ -441,7 +441,7 @@ function buildServer(playbook = '') {
       : 'No templates yet.';
   });
 
-  tool('list_meta_templates', 'Meta-approved message templates of a Meta Cloud API number: name | language | status | category | fill-ins | text. Only APPROVED ones can be sent (wa_template=). New templates are created by the owner in WhatsApp Manager.', {
+  tool('list_meta_templates', 'Meta-approved message templates of a Meta Cloud API number: name | language | status | category | fill-ins | text. Only APPROVED ones can be sent (wa_template=). New ones: create_meta_template (owner\'s request only).', {
     account: accountArg, sync: z.boolean().optional().describe('Fetch fresh from Meta first'),
   }, async (a) => {
     const s = await manager.resolve(a.account);
@@ -454,7 +454,20 @@ function buildServer(playbook = '') {
       : 'No Meta templates yet — the owner creates them in WhatsApp Manager → Message templates.';
   });
 
-  tool('save_template','Create or update a saved message template. Use {name}, {first_name}, {phone} (filled from the contact) and any other {field}.', {
+  tool('create_meta_template', 'Submit a new message template to Meta for approval (Meta Cloud API numbers). Only when the owner asked for it. Use {{1}}, {{2}} for fill-ins (not at the very start or end) and give one example value each. UTILITY = about something they asked for/applied to (cheaper); MARKETING = promotional. Approval usually takes minutes; check with list_meta_templates.', {
+    account: accountArg, name: z.string().describe('lowercase_with_underscores'), body: z.string(), examples: z.array(z.string()).optional(),
+    category: z.enum(['UTILITY', 'MARKETING']).optional(), language: z.string().optional().describe('Default en'),
+    footer: z.string().optional(), buttons: z.array(z.string()).max(3).optional().describe('Quick-reply buttons, e.g. ["Haan, interested","Nahi"]'),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    if (!s.isCloud) return `"${s.id}" is a linked phone number — templates are only for Meta Cloud API numbers.`;
+    const t = await import('./wa/cloud-templates.js');
+    const r = await t.createTemplate(s.wabaId, { name: a.name, body: a.body, examples: a.examples || [], category: a.category, language: a.language, footer: a.footer, buttons: a.buttons });
+    await ai(s.id, `Submitted Meta template "${r.name}" for review (${r.status || 'pending'})`);
+    return `Submitted "${r.name}" (${r.category || a.category || 'UTILITY'}) — status ${r.status || 'PENDING'}. Meta usually decides within minutes; it then appears in list_meta_templates.`;
+  });
+
+  tool('save_template', 'Create or update a saved message template. Use {name}, {first_name}, {phone} (filled from the contact) and any other {field}.', {
     id: z.number().int().optional().describe('Give to update an existing template'),
     account: z.string().optional().describe('Number it belongs to; omit for all numbers'),
     name: z.string(), body: z.string(),

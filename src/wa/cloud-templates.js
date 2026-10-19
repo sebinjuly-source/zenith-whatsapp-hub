@@ -40,6 +40,28 @@ export async function syncTemplates(wabaId) {
   return all;
 }
 
+/**
+ * Submit a new template to Meta for review (usually minutes). body uses {{1}}, {{2}} …; examples = one sample value
+ * per variable (Meta requires them). buttons: quick-reply texts (max 3). Returns Meta's { id, status, category }.
+ */
+export async function createTemplate(wabaId, { name, language = 'en', category = 'UTILITY', body, examples = [], header, footer, buttons = [] }) {
+  name = String(name || '').toLowerCase().trim().replace(/[^a-z0-9_]+/g, '_').replace(/^_|_$/g, '');
+  if (!name) throw new Error('Template name needed (lowercase letters, digits, _)');
+  if (!body?.trim()) throw new Error('Template text needed');
+  const vars = [...new Set([...body.matchAll(VAR)].map((m) => m[1]))];
+  if (vars.some((v) => !/^\d+$/.test(v))) throw new Error('Use numbered fill-ins: {{1}}, {{2}} …');
+  if (examples.length < vars.length) throw new Error(`Give an example value for each fill-in (${vars.map((v) => `{{${v}}}`).join(', ')})`);
+  if (/^\s*\{\{|\}\}\s*[.!?]?\s*$/.test(body)) throw new Error('Meta rejects templates that start or end with a fill-in — add a word before/after it');
+  const components = [];
+  if (header) components.push({ type: 'HEADER', format: 'TEXT', text: header });
+  components.push({ type: 'BODY', text: body, ...(vars.length ? { example: { body_text: [examples.slice(0, vars.length).map(String)] } } : {}) });
+  if (footer) components.push({ type: 'FOOTER', text: footer });
+  if (buttons.length) components.push({ type: 'BUTTONS', buttons: buttons.slice(0, 3).map((text) => ({ type: 'QUICK_REPLY', text: String(text).slice(0, 25) })) });
+  const r = await graph(`${wabaId}/message_templates`, { method: 'POST', idempotent: true, json: { name, language, category: String(category).toUpperCase(), components } });
+  await syncTemplates(wabaId).catch(() => {});
+  return { name, language, ...r };
+}
+
 export async function listWaTemplates(wabaId, { approvedOnly = false } = {}) {
   const rows = await query(
     `SELECT name, language, status, category, components, updated_at FROM wa_templates WHERE waba_id = $1
