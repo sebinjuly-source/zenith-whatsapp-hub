@@ -212,12 +212,23 @@ Save. Render restarts by itself.
 7. Tests for all of it, then a live test with your own phone.
 
 ### 4.9 Connect the webhook and go Live (10 min, together)
-1. App → **Use cases → Customize → Connect on WhatsApp → Configuration → Webhook → Edit**:
-   Callback URL = `https://zenith-whatsapp-hub.onrender.com/meta/webhook`, Verify token = `META_VERIFY_TOKEN`
-   → Verify and save → **Webhook fields → subscribe `messages`**.
-2. **App settings → Basic:** privacy policy URL `https://zenith-whatsapp-hub.onrender.com/privacy`, app icon,
-   category Business → Save → switch **App mode: Live**. While the app is in development mode, Meta sends no
-   real incoming messages to the webhook.
+The hub already answers at `/meta/webhook` (live since 20 Oct). It accepts Meta's check only when the verify
+token matches `META_VERIFY_TOKEN` in Render, so the order matters:
+1. On **Use cases → Customize → Connect on WhatsApp → Step 2. Production setup → Configure Webhooks**, copy
+   the **Verify token** Meta pre-fills (or type your own random word; letters and digits, no spaces).
+2. **Render → zenith-whatsapp-hub → Environment → Add environment variable**: `META_VERIFY_TOKEN` = that
+   exact word. Also add `META_APP_SECRET` (App settings → Basic → App secret → Show). **Save, rebuild and
+   deploy**, and wait about 3 minutes until the Events tab says *Deploy live*.
+3. Back on Meta: **Callback URL** = `https://zenith-whatsapp-hub.onrender.com/meta/webhook`; the verify token
+   is the same word → **Verify and save**. Success: the button greys out and a **Webhook fields** list appears.
+   "The callback URL or verify token couldn't be validated" means the word differs from Render, Render was
+   still deploying, or the hub was asleep; wait a minute and try again.
+4. In **Webhook fields**, find `messages` → **Subscribe** (only this one is needed).
+5. Leave "Attach a client certificate" **off**.
+6. The orange note "only test webhooks… until the app has been published" is expected. **App settings →
+   Basic:** privacy policy URL `https://zenith-whatsapp-hub.onrender.com/privacy`, app icon, category Business
+   → Save → switch **App mode: Live** (do this after step 4.8 builds the `/privacy` page). Until then, Meta
+   sends no real incoming messages to the webhook.
 
 ### 4.10 First templates (I draft them, you submit; approval usually takes minutes to a few hours)
 WhatsApp Manager → **Message templates → Create template**:
