@@ -125,6 +125,17 @@ Candidates reply to the new number. Their replies show up in the same hub inbox,
 35/day officially (250 people/day at once, 2,000 after verification). The phone numbers you rely on for
 guests and staff are never put at risk.
 
+### Status (20 Oct 2026)
+- Done: app ZenithWAHub (published / Live), business portfolio renamed **Zenith Suites**, business verification
+  submitted (in review), number **+91 98801 39926** registered on the Cloud API (display name "Zenith Suites",
+  tier 250/day), WhatsApp profile (address, email, website), privacy page, webhook connected, system-user token
+  and secrets in Render (names listed in Notion → Secrets), hub number **`zenith-api`** live.
+- Templates submitted for review: `chef_job_invite` and `job_followup` (Marketing), `visit_date_request` and
+  `visit_reminder` (Utility). Meta's `hello_world` sample can't be sent from a real number (error 131058).
+- Open: payment method (Meta locked retries for 24 h; use a card with auto-debit if UPI fails again), app icon.
+- In the hub: Numbers → "Zenith Suites (Meta API)"; Inbox shows the 24 h window and a "Meta template…" button;
+  lists / bulk / follow-ups ask for a Meta template on this number; Templates page lists and submits Meta templates.
+
 ### 4.0 Have this ready before you start (about 10 minutes)
 - [ ] **A new SIM** (Jio/Airtel/Vi) in any phone, able to receive **SMS or calls**, and **never used on WhatsApp**.
       Keep it recharged: you need it again if Meta ever asks you to re-verify. Don't install WhatsApp with it.
