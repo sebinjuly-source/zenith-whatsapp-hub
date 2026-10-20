@@ -257,6 +257,9 @@ CREATE TABLE IF NOT EXISTS events (
 ALTER TABLE events ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT 'system';
 ALTER TABLE events ADD COLUMN IF NOT EXISTS role TEXT;
 
+-- Sent as a reply to someone who wrote in the last 24 h: goes out at once and isn't counted in the automated cap
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_reply BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- Meta WhatsApp Cloud API numbers (provider = 'cloud'): { phoneNumberId, wabaId } + last known number health
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cloud JSONB NOT NULL DEFAULT '{}';
 -- Message templates approved by Meta (synced from the WhatsApp Business account)

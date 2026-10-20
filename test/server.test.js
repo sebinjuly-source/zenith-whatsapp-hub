@@ -1045,3 +1045,27 @@ test('Meta webhook: answers the verify check only with the right token, checks t
     delete process.env.META_APP_SECRET;
   }
 });
+
+test('approved replies to people who wrote in the last 24 h go out at once, even with the daily cap full; cold messages wait', async () => {
+  await manager.create({ id: 'rp', label: 'Replies' });
+  await manager.update('rp', { settings: { sendStart: '00:00', sendEnd: '23:59', sendDays: [0, 1, 2, 3, 4, 5, 6], aiMode: 'approve', dailyCap: 1, delayMinSec: 600, delayMaxSec: 900 } });
+  fake('rp');
+  const now = Math.floor(Date.now() / 1000);
+  // cap already used up by one automated send
+  await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, sent_at) VALUES ('rp', '919800000900@s.whatsapp.net', '{"text":"x"}', 'campaign', 'sent', now())`);
+  // a candidate wrote back an hour ago
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('rp', '919800000901@s.whatsapp.net', 'R1', true, $1, 'text', 'invite'), ('rp', '919800000901@s.whatsapp.net', 'R2', false, $2, 'text', 'Im interested')`, [now - 7200, now - 3600]);
+  const cold = await outbox.enqueue({ account: 'rp', to: '919800000902', payload: { text: 'cold invite' }, source: 'campaign' });
+  await outbox.approve(cold.id);
+  const reply = await outbox.enqueue({ account: 'rp', to: '919800000901', payload: { text: 'When can you come?' }, source: 'mcp' });
+  assert.equal(reply.status, 'draft');
+  await outbox.approve(reply.id);
+  await until(async () => (await query(`SELECT status FROM outbox WHERE id = $1`, [reply.id]))[0].status === 'sent', 8000);
+  const [r] = await query(`SELECT is_reply FROM outbox WHERE id = $1`, [reply.id]);
+  assert.equal(r.is_reply, true);
+  await sleep(300);
+  assert.equal((await query(`SELECT status FROM outbox WHERE id = $1`, [cold.id]))[0].status, 'queued', 'cold outreach still waits for the cap');
+  const st = await outbox.queueStatus('rp');
+  assert.equal(st.automated24h, 1, 'the reply is not counted in the cap');
+  await manager.remove('rp');
+});

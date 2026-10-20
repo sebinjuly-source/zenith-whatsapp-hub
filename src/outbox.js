@@ -361,11 +361,14 @@ export async function followupsToday(accountId) {
   return r.n;
 }
 
-/** Automated messages sent in the last 24 hours (rolling — a midnight reset let 48 new numbers through in 24 h). */
+/**
+ * Automated messages sent in the last 24 hours (rolling — a midnight reset let 48 new numbers through in 24 h).
+ * Replies to people who wrote in the last 24 h don't count: they aren't outreach and go out at once.
+ */
 async function automatedSentToday(accountId) {
   const [r] = await query(
     `SELECT count(*)::int AS n FROM outbox
-     WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND sent_at > now() - interval '24 hours'`,
+     WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND NOT is_reply AND sent_at > now() - interval '24 hours'`,
     [accountId, AUTOMATED],
   );
   return r.n;
@@ -373,6 +376,10 @@ async function automatedSentToday(accountId) {
 
 // A chat with no message at all in it yet = a NEW number for this WhatsApp account.
 const IS_NEW_CHAT = (acc, jid) => `NOT EXISTS (SELECT 1 FROM messages x WHERE x.account_id = ${acc} AND x.chat_jid = ${jid})`;
+// They wrote to this number in the last 24 hours: our message is a reply (not outreach). Approved replies skip the
+// automated daily cap and the random gap, and go before queued bulk messages. The new-number limit is unaffected.
+const IS_REPLY = (acc, jid) => `EXISTS (SELECT 1 FROM messages y WHERE y.account_id = ${acc} AND y.chat_jid = ${jid} AND NOT y.from_me
+  AND y.ts > extract(epoch FROM now())::bigint - 86400)`;
 
 /**
  * New numbers this account started a chat with in the last 24 hours (rolling), from any source — the hub, the
@@ -484,14 +491,14 @@ export async function queueStatus(accountId) {
   const [q] = await query(
     `SELECT count(*) FILTER (WHERE status = 'queued')::int AS queued,
             count(*) FILTER (WHERE status = 'draft')::int AS drafts,
-            count(*) FILTER (WHERE status = 'queued' AND source = ANY($2))::int AS queued_automated,
+            count(*) FILTER (WHERE status = 'queued' AND source = ANY($2) AND NOT ${IS_REPLY('$1', 'o.to_jid')})::int AS queued_automated,
             count(*) FILTER (WHERE status = 'queued' AND to_jid NOT LIKE '%@g.us' AND ${IS_NEW_CHAT('$1', 'o.to_jid')})::int AS queued_new
      FROM outbox o WHERE account_id = $1 AND status IN ('queued','draft')`,
     [accountId, AUTOMATED],
   );
   const [a] = await query(
     `SELECT count(*)::int AS n, min(sent_at) AS oldest FROM outbox
-     WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND sent_at > now() - interval '24 hours'`,
+     WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND NOT is_reply AND sent_at > now() - interval '24 hours'`,
     [accountId, AUTOMATED],
   );
   const nc = await newChatsStatus(accountId, s);
@@ -585,12 +592,12 @@ function startWorker(accountId) {
     if (!newChatsAllowed) await noteNewChatHold(accountId, blocked ? session.reachout : null, nc);
     // Claim one row atomically, so two servers can never pick the same message.
     const [row] = await query(
-      `UPDATE outbox SET status = 'sending', sent_at = now() WHERE id = (
+      `UPDATE outbox SET status = 'sending', sent_at = now(), is_reply = ${IS_REPLY('outbox.account_id', 'outbox.to_jid')} WHERE id = (
          SELECT id FROM outbox WHERE account_id = $1 AND status = 'queued' AND scheduled_at <= now()
-           AND ($2 OR source <> ALL($3))
+           AND ($2 OR source <> ALL($3) OR ${IS_REPLY('$1', 'outbox.to_jid')})
            AND (note IS DISTINCT FROM 'follow-up' OR $4)
            AND ($5 OR to_jid LIKE '%@g.us' OR NOT ${IS_NEW_CHAT('$1', 'outbox.to_jid')})
-         ORDER BY priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED)
+         ORDER BY ${IS_REPLY('$1', 'outbox.to_jid')} DESC, priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED)
        RETURNING *`,
       [accountId, automatedAllowed, AUTOMATED, followupsAllowed, newChatsAllowed],
     );
@@ -630,7 +637,7 @@ function startWorker(accountId) {
     done.emit(String(row.id), result);
     if (row.task_id) await refreshTask(row.task_id).catch(() => {});
     if (row.list_id) import('./lists.js').then((l) => l.refreshList(row.list_id)).catch(() => {});
-    if (automated) nextAutomatedAt = Date.now() + randomDelayMs(s) * config.timeScale;
+    if (automated && !row.is_reply) nextAutomatedAt = Date.now() + randomDelayMs(s) * config.timeScale;
     await sleep(MIN_DELAY_SEC * 1000 * config.timeScale); // never two messages from one number within 5 s
   }
 }
