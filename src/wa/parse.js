@@ -69,7 +69,8 @@ function contextInfoOf(content, type) {
 export function parseMessage(msg) {
   const content = normalizeMessageContent(msg.message);
   if (!content) return { kind: 'skip' };
-  const type = getContentType(content);
+  // WhatsApp's call-log field is spelt "callLogMesssage" (3 s), so Baileys' getContentType never finds it
+  const type = getContentType(content) || (content.callLogMesssage ? 'callLogMesssage' : undefined);
   if (!type) return { kind: 'skip' };
 
   if (type === 'protocolMessage') {
@@ -115,6 +116,17 @@ export function parseMessage(msg) {
     mtype = 'location';
     const l = content[type];
     body = `Location: ${l.name ? l.name + ' ' : ''}${l.address ? l.address + ' ' : ''}(${l.degreesLatitude}, ${l.degreesLongitude})`;
+  } else if (type === 'callLogMesssage' || type === 'callLogMessage') {
+    // Call log synced to linked devices: outcome + duration (answered calls carry real conversation)
+    mtype = 'call';
+    const l = content[type] || {};
+    const secs = Number(l.durationSecs || 0);
+    const outcome = String(l.callOutcome ?? '').toUpperCase();
+    const answered = secs > 0 || outcome === 'CONNECTED' || outcome === '0';
+    const kind = l.isVideo ? 'video' : 'voice';
+    body = answered
+      ? `📞 ${kind[0].toUpperCase()}${kind.slice(1)} call — answered, ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
+      : `📞 Missed ${kind} call`;
   } else if (type === 'pollCreationMessage' || type === 'pollCreationMessageV3' || type === 'pollCreationMessageV2') {
     mtype = 'poll';
     const p = content[type];

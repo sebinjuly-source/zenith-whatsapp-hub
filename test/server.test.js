@@ -1122,3 +1122,22 @@ test('board: candidate replies, visit dates and chat reminders all appear as car
   await call('PATCH', '/api/accounts/hiring/chats/919800001002@s.whatsapp.net/state', { state: 'open' });
   assert.ok(!(await call('GET', '/api/tasks?kind=reminder')).data.find((t) => t.ref === 'remind:hiring:919800001002@s.whatsapp.net'));
 });
+
+test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {
+  const s = manager.get('hiring');
+  const t0 = Date.now() - 600000;
+  await s.onCalls([
+    { id: 'C1', from: '919800002001@s.whatsapp.net', chatId: '919800002001@s.whatsapp.net', status: 'offer', date: new Date(t0) },
+    { id: 'C1', from: '919800002001@s.whatsapp.net', chatId: '919800002001@s.whatsapp.net', status: 'accept', date: new Date(t0 + 5000) },
+    { id: 'C1', from: '919800002001@s.whatsapp.net', chatId: '919800002001@s.whatsapp.net', status: 'terminate', date: new Date(t0 + 5000 + 192000) },
+    { id: 'C2', from: '919800002002@s.whatsapp.net', chatId: '919800002002@s.whatsapp.net', status: 'offer', date: new Date(t0) },
+    { id: 'C2', from: '919800002002@s.whatsapp.net', chatId: '919800002002@s.whatsapp.net', status: 'timeout', date: new Date(t0 + 30000) },
+  ]);
+  const rows = Object.fromEntries((await query(`SELECT chat_jid, type, body FROM messages WHERE account_id = 'hiring' AND id IN ('call-C1','call-C2')`)).map((r) => [r.chat_jid, r]));
+  assert.equal(rows['919800002001@s.whatsapp.net'].body, '📞 Voice call — answered, 3:12');
+  assert.equal(rows['919800002001@s.whatsapp.net'].type, 'call');
+  assert.equal(rows['919800002002@s.whatsapp.net'].body, '📞 Missed voice call');
+  const { parseMessage } = await import('../src/wa/parse.js');
+  const p = parseMessage({ key: { id: 'L1', remoteJid: '919800002003@s.whatsapp.net' }, messageTimestamp: 1, message: { callLogMesssage: { isVideo: false, callOutcome: 0, durationSecs: 75 } } });
+  assert.equal(p.row.body, '📞 Voice call — answered, 1:15');
+});

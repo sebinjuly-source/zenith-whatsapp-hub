@@ -416,6 +416,15 @@ export function buildApp() {
     // Each message's price (Meta numbers; linked phones are free), shown on the draft cards and summed in approvals
     const p = await priceRows(rows, manager);
     rows.forEach((r, i) => Object.assign(r, { price: p.items[i].price, price_category: p.items[i].category, price_note: p.items[i].note, currency: p.currency }));
+    // Picture the person will get: a Meta template's header image, or an attached photo (shown on the draft card)
+    const headers = new Map((await query(`SELECT name, header_link FROM wa_templates WHERE header_link IS NOT NULL`)).map((t) => [t.name, t.header_link]));
+    for (const r of rows) {
+      const a = r.payload?.attachment;
+      const t = r.payload?.waTemplate;
+      const isImg = (x) => /^image\//.test(x?.mimetype || '') || x?.as === 'image' || /\.(jpe?g|png|webp|gif)(\?|$)/i.test(x?.url || x?.fileName || '');
+      if (t) r.preview_image = (typeof t.header === 'string' ? t.header : t.header?.link) || headers.get(t.name) || null;
+      else if (a && isImg(a)) r.preview_image = a.url || (a.base64 && a.base64.length < 2_000_000 ? (a.base64.startsWith('data:') ? a.base64 : `data:${a.mimetype || 'image/jpeg'};base64,${a.base64}`) : null);
+    }
     res.json(rows);
   }));
   // Cost before sending: { account, count, waTemplate? } → per message and total

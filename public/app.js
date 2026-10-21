@@ -1209,6 +1209,8 @@
           h('span', { class: 'muted', style: 'font-size:12px;white-space:nowrap', title: r.price_note || '' }, r.price ? money(r.price, r.currency) : (r.price_category === 'free' ? 'free' : money(0, r.currency)))),
         r.note ? h('p', { class: 'muted', style: 'margin:6px 0' }, 'Why: ', r.note) : null,
         r.payload.waTemplate ? h('p', { style: 'margin:6px 0' }, h('span', { class: 'tag' }, `Meta template: ${r.payload.waTemplate.name}`)) : null,
+        r.preview_image ? h('a', { href: r.preview_image.startsWith('data:') ? undefined : r.preview_image, target: '_blank', rel: 'noopener', title: 'Image the person will receive' },
+          h('img', { src: r.preview_image, alt: 'Image in this message', loading: 'lazy', style: 'display:block;max-width:100%;max-height:220px;border-radius:8px;margin:6px 0;object-fit:contain;background:#111' })) : null,
         r.payload.attachment ? h('p', { class: 'muted', style: 'margin:6px 0' }, '📎 ', r.payload.attachment.fileName || r.payload.attachment.url || 'file') : null,
         r.status === 'draft'
           ? h('div', {}, ta, h('div', { class: 'row', style: 'margin-top:8px' },

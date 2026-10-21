@@ -306,6 +306,9 @@ export class CloudSession extends Session {
       await this.useUploadedHeader(t.template);
       Object.assign(msg, { type: 'template', template: t.template });
       row = { type: 'text', body: t.preview };
+      // An image header is kept with the stored message, so the Inbox shows the picture that was sent
+      const hp = t.template.components?.find((c) => c.type === 'header')?.parameters?.[0];
+      if (hp?.type === 'image' && hp.image?.id) row = { type: 'image', body: t.preview, media: { kind: 'imageMessage', mimetype: 'image/jpeg', fileName: 'poster.jpg', cloudId: hp.image.id } };
     } else {
       const w = await this.windowFor(jid);
       if (!w.open) {

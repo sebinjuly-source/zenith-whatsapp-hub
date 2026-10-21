@@ -207,6 +207,8 @@ export class Session extends EventEmitter {
       this.enqueue(() => this.ingest(messages, { live: type === 'notify' })),
     );
     sock.ev.on('messages.update', (updates) => this.enqueue(() => this.onMessagesUpdate(updates)));
+    // WhatsApp voice/video calls (as a linked device sees them): stored in the chat as a "call" line with the outcome
+    sock.ev.on('call', (calls) => this.enqueue(() => this.onCalls(calls)));
     // These can arrive as thousands of tiny events right after linking — collect them into batches.
     sock.ev.on('contacts.upsert', (c) => this.collect('contacts', c, (l) => this.saveContacts(l)));
     sock.ev.on('contacts.update', (c) => this.collect('contacts', c, (l) => this.saveContacts(l)));
@@ -667,6 +669,45 @@ export class Session extends EventEmitter {
     if (rows[0]?.task_id) await refreshTask(rows[0].task_id);
     const url = this.settings.webhookUrl;
     if (url) postWebhook(url, { event: 'message.failed', account: this.id, to, id: key.id, ts: Math.floor(Date.now() / 1000) });
+  }
+
+  /**
+   * Call events: offer/ringing → accept (answered, possibly on the phone) → terminate; or timeout/reject (missed).
+   * When a call ends, one line goes into the chat: "📞 Voice call — answered, 3:12" or "📞 Missed voice call".
+   * So anyone drafting a reply can see a real conversation happened (and ask the owner what was said).
+   */
+  async onCalls(calls) {
+    this.calls ||= new Map();
+    for (const c of calls || []) {
+      if (!c?.id) continue;
+      this.log.info({ call: c.id, status: c.status, from: c.from, chat: c.chatId, video: c.isVideo }, 'call event');
+      const cur = this.calls.get(c.id) || { start: c.date ? new Date(c.date) : new Date(), from: c.from, chat: c.chatId || c.from, video: !!c.isVideo, group: !!c.isGroup };
+      if (c.status === 'accept' && !cur.accepted) cur.accepted = c.date ? new Date(c.date) : new Date();
+      this.calls.set(c.id, cur);
+      if (!['terminate', 'timeout', 'reject'].includes(c.status)) continue;
+      this.calls.delete(c.id);
+      if (cur.group) continue;
+      const end = c.date ? new Date(c.date) : new Date();
+      const secs = cur.accepted ? Math.max(0, Math.round((end - cur.accepted) / 1000)) : 0;
+      const kind = cur.video ? 'video' : 'voice';
+      const answered = !!cur.accepted && secs > 0;
+      const body = answered
+        ? `📞 ${kind[0].toUpperCase()}${kind.slice(1)} call — answered, ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
+        : `📞 ${c.status === 'reject' ? 'Declined' : 'Missed'} ${kind} call`;
+      const chatJid = await store.canonicalJid(this.id, cur.chat);
+      if (!chatJid) continue;
+      const fromMe = !!(this.myJid && cur.from && jidNormalizedUser(cur.from) === this.myJid);
+      const row = {
+        id: `call-${c.id}`, fromMe, ts: Math.floor(cur.start.getTime() / 1000), chatJid, senderJid: fromMe ? this.myJid : chatJid,
+        senderName: fromMe ? 'me' : null, type: 'call', body, quotedId: null, quotedBody: null, forwarded: false,
+        media: null, vcards: null, status: null, fromHistory: false,
+      };
+      await store.insertMessages(this.id, [row]);
+      if (!fromMe) {
+        const board = await import('../board.js');
+        await board.noteIncoming(this.id, row).catch(() => {});
+      }
+    }
   }
 
   async onMessagesUpdate(updates) {
