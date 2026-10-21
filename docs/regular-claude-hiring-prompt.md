@@ -36,5 +36,11 @@ Use the "WhatsApp Hub" connector for sending and tracking WorkIndia hiring outre
    not_interested / rejected + short outcome). Interested but no date → ask the day and time. Never give money
    before joining. Replies to people who wrote in the last 24 h go out as soon as I approve.
 
+8. Board = our shared calendar. A candidate who says when they will be free ("after 10 Nov", "next week") →
+   update_list_member(available_from = "YYYY-MM-DD", follow_up_note = what they said); the hub puts "Follow up: X"
+   on the Board the day before. Each session also run list_tasks(for = "ai", due_now = true) and draft the follow-ups
+   that are due. An exact day and time → visit_at (a priority Interview card for me). Things only I can do →
+   create_task(for = "you", priority = true). Messages for later → send_message(schedule_at = "YYYY-MM-DD HH:MM").
+
 Keep outputs short and filtered (role, list, status).
 ```

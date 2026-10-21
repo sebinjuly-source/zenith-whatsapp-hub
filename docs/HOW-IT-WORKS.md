@@ -44,7 +44,8 @@ Drafts (with price) ──you approve──► Queue ──► Meta ──► ca
 Incoming message ─► Inbox  +  Board card "Reply to X"  (+ rule: instant "which day?" reply & call task)
    │ you / AI reply (approved replies to people who wrote in 24 h go out at once)
    ▼
-Funnel stage: interested → date_given (visit date ⇒ Board card "Visit: X" + reminder message before the visit)
+Funnel stage: interested → date_given (visit date ⇒ priority Board card "Interview: X" for you + reminder message before)
+             "free after 10 Nov" ⇒ available_from ⇒ Board card "Follow up: X" for the AI, due the day before at 10:00
             → visited / trial → selected → joined     (or no_show / not_interested / rejected)
    │ silent people: one follow-up template after 2 days (on days without new outreach)
    ▼
@@ -60,7 +61,7 @@ reminders always go from the number that has their chat.
 
 | Page | What it's for |
 |---|---|
-| **Board** | Everything that needs you, all numbers together (or one). Cards the hub makes by itself: **💬 Reply needed** (a candidate wrote, nobody answered — "Open chat to reply"), **📅 Visit** (from the moment a date is set), **⏰ Reminder** (chat reminders), bulk sends with progress, follow-ups, your to-dos. Cards close themselves when done (reply sent, visit marked, chat reopened). New to-do and Bulk send forms at the bottom. |
+| **Board** | The shared calendar of you and the AI, all numbers together (or one). **📅 Coming up** at the top lists every dated card by day (Overdue / Today / Tomorrow / …). Every card says who does it — **👤 You** or **🤖 AI** — and must-dos carry **⭐ Priority** (flag/unflag on the card; filter Everyone / Mine / AI). Cards the hub makes by itself: **💬 Reply needed** (AI), **🔁 Follow-up** (AI; the day before the date a candidate gave), **🎯 Interview** (you, priority), **🕒 Scheduled** (a message going out later), **⏰ Reminder** (you), "Did X come?" and call tasks (you, priority), bulk sends with progress. Cards close themselves when done (reply sent, follow-up sent, interview marked, message sent, chat reopened). New to-do (who + priority) and Bulk send forms at the bottom. |
 | **Numbers** | Each number's status. Linked phones: Link (QR or phone-number code), history, deep history. Meta number: name, quality, Meta limit, **Health check** (everything Meta-side in one click), Re-check with Meta. |
 | **Inbox** | All chats per number; reply, quote, files, templates, "Remind me", Done. On the Meta number: the 24 h window and a **Meta template…** button when the window is closed. |
 | **Drafts** | Messages waiting for approval, queued, sent, failed. Price on each card (Meta number), totals when approving, Move to another number, Approve all / selected, status box per number (what waits, why, until when). |
@@ -109,9 +110,9 @@ Useful asks: "who replied today?", "draft replies to the chefs who wrote", "move
 "run a health check on the Meta number", "what happened to the message to 98xxxxxxx?", "schedule batch 8 for 9 am".
 
 AI tools: `list_accounts, list_chats, get_messages, search_messages, get_contact, update_contact, find_person,
-send_message (text, files, buttons, wa_template), bulk_send, list_outbox, approve_draft, reject_draft, move_messages,
-approve_task, list_tasks (kind=reply|visit|reminder), create_task, update_task, list_lists, list_members, import_list,
-send_to_list (wa_template, schedule_at), set_followup, update_list_member, pipeline, set_pipeline, known_candidates,
+send_message (text, files, buttons, wa_template, schedule_at), bulk_send, list_outbox, approve_draft, reject_draft, move_messages,
+approve_task, list_tasks (kind=reply|followup|visit|scheduled|reminder, for=you|ai, due_now), create_task / update_task (for, priority), list_lists, list_members, import_list,
+send_to_list (wa_template, schedule_at), set_followup, update_list_member (visit_at, available_from, follow_up_at), pipeline, set_pipeline, known_candidates,
 list_templates, save_template, list_meta_templates, create_meta_template, meta_health_check, message_timeline,
 list_rules, save_rule, set_chat_state, get_playbook, save_playbook, recent_activity, save_media,
 fetch_older_messages, backfill_history, list_shared_contacts, find_followups`.
@@ -126,9 +127,19 @@ draft. It adds a "Call notes needed" task and asks the owner what was said.
 **Images.** Draft cards show the picture that will go out: a file you attach, or the poster in an image template's
 header. Image templates keep their picture in the inbox after sending.
 
-**Scheduled AI run.** The routine "Zenith hub – draft replies to candidates" runs at 10:00, 14:00, 18:00 and 22:00 IST
-on Haiku, with only the hub tools. It works through the reply cards and leaves drafts for approval; it never sends.
-Manage it at https://claude.ai/code/routines.
+**Follow-ups at the right time.** When a candidate says when they will be free ("after 10 Nov", "next week"), the AI
+calls `update_list_member(available_from=…, follow_up_note=…)`. The hub sets the follow-up for the day before at
+10:00 and puts "Follow up: X" on the Board for the AI. When it comes due the AI drafts a message asking for the exact
+interview day and time; once a message goes out from 12 h before the due time, the card closes by itself. A visit
+date replaces a pending follow-up. You can also set a follow-up date per person on the Lists page.
+
+**Messages for later.** `send_message(schedule_at="YYYY-MM-DD HH:MM")`, `POST /api/send` with `scheduleAt`, or ⏰ in
+the inbox composer. Each shows on the Board as "Scheduled: …" until it is sent (drafts still need your approval).
+
+**Scheduled AI run.** The routine "Zenith hub – replies & follow-ups" runs in the cloud (environment "Whatsapp") at
+10:00, 14:00, 18:00 and 22:00 IST on Haiku, with only the hub tools. Each run answers the reply cards, records
+interview dates and follow-up dates, drafts the follow-ups that are due, and asks you for call notes. It never sends;
+everything waits for your approval. Manage it at https://claude.ai/code/routines.
 
 ---
 
@@ -136,11 +147,11 @@ Manage it at https://claude.ai/code/routines.
 
 Numbers `GET/POST /api/accounts`, `PATCH/DELETE /api/accounts/:id`, `POST …/link|unlink` · Chats
 `GET /api/accounts/:id/chats`, `…/chats/:jid/messages`, `…/chats/:jid/window`, `PATCH …/chats/:jid/state` ·
-Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate) · Bulk `POST /api/bulk` · Lists
-`GET /api/lists`, `POST /api/lists/import`, `GET/PATCH /api/lists/:id/members[/:phone]`, `PATCH …/followup|pipeline`,
+Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleAt) · Bulk `POST /api/bulk` · Lists
+`GET /api/lists`, `POST /api/lists/import`, `GET/PATCH /api/lists/:id/members[/:phone]` (stage, visitAt, outcome, notes, followupAt, availableFrom, followupNote), `PATCH …/followup|pipeline`,
 `POST /api/lists/:id/send` (waTemplate, scheduledAt) · Drafts `GET /api/outbox`, `/outbox/count`, `/outbox/status`,
 `POST /outbox/estimate|approve-all|approve-selected|reject-selected|move`, `/outbox/:id/approve|reject` · Board
-`GET/POST /api/tasks` (`?kind=reply`), `PATCH /api/tasks/:id`, `POST /api/board/sync` · Meta
+`GET/POST /api/tasks` (`?kind=reply|followup|visit|scheduled|reminder|bulk|todo`, `?for=you|ai`, `?due_now=1`; POST/PATCH take `assignee` and `priority`), `PATCH /api/tasks/:id`, `POST /api/board/sync` · Meta
 `GET /api/meta/status`, `GET/POST /api/accounts/:id/wa-templates`, `GET …/meta-health`, `GET …/meta-timeline?q=`,
 `GET/PUT /api/pricing` · Others: templates, rules, playbook, alerts, people, search, events, media, `/webhook`
 (old form-bot format), `/health`.
