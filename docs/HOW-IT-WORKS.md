@@ -111,7 +111,7 @@ Useful asks: "who replied today?", "draft replies to the chefs who wrote", "move
 
 AI tools: `list_accounts, list_chats, get_messages, search_messages, get_contact, update_contact, find_person,
 send_message (text, files, buttons, wa_template, schedule_at), bulk_send, list_outbox, approve_draft, reject_draft, move_messages,
-approve_task, list_tasks (kind=reply|followup|visit|scheduled|reminder, for=you|ai, due_now), create_task / update_task (for, priority), list_lists, list_members, import_list,
+approve_task, list_tasks (kind=reply|followup|visit|scheduled|reminder, for=you|ai, due_now), create_task / update_task (for, priority), add_task_note, task_history, list_lists, list_members, import_list,
 send_to_list (wa_template, schedule_at), set_followup, update_list_member (visit_at, available_from, follow_up_at), pipeline, set_pipeline, known_candidates,
 list_templates, save_template, list_meta_templates, create_meta_template, meta_health_check, message_timeline,
 list_rules, save_rule, set_chat_state, get_playbook, save_playbook, recent_activity, save_media,
@@ -133,6 +133,15 @@ calls `update_list_member(available_from=…, follow_up_note=…)`. The hub sets
 interview day and time; once a message goes out from 12 h before the due time, the card closes by itself. A visit
 date replaces a pending follow-up. You can also set a follow-up date per person on the Lists page.
 
+**Card history & notes.** Every card keeps a history: created, moved, re-dated, flagged, and closed by the hub with
+the reason ("Done by the hub — a reply went out", "Cancelled by the hub — interview date set instead"). Open
+**History & notes** on a card to read it or add a note. Call notes go here: write what was discussed on the "Call
+notes needed" card and the AI drafts the reply from it. AI: `add_task_note`, `task_history`; REST:
+`GET /api/tasks/:id/log`, `POST /api/tasks/:id/notes`.
+
+**Safety net.** An "interested" candidate with no interview date, no follow-up date, no open card and no message
+either way for 3 days gets a "Follow up" card due now (history: "Added by the safety net"), at most 20 per check.
+
 **Messages for later.** `send_message(schedule_at="YYYY-MM-DD HH:MM")`, `POST /api/send` with `scheduleAt`, or ⏰ in
 the inbox composer. Each shows on the Board as "Scheduled: …" until it is sent (drafts still need your approval).
 
@@ -151,7 +160,7 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
 `GET /api/lists`, `POST /api/lists/import`, `GET/PATCH /api/lists/:id/members[/:phone]` (stage, visitAt, outcome, notes, followupAt, availableFrom, followupNote), `PATCH …/followup|pipeline`,
 `POST /api/lists/:id/send` (waTemplate, scheduledAt) · Drafts `GET /api/outbox`, `/outbox/count`, `/outbox/status`,
 `POST /outbox/estimate|approve-all|approve-selected|reject-selected|move`, `/outbox/:id/approve|reject` · Board
-`GET/POST /api/tasks` (`?kind=reply|followup|visit|scheduled|reminder|bulk|todo`, `?for=you|ai`, `?due_now=1`; POST/PATCH take `assignee` and `priority`), `PATCH /api/tasks/:id`, `POST /api/board/sync` · Meta
+`GET /api/tasks/:id/log`, `POST /api/tasks/:id/notes` · `GET/POST /api/tasks` (`?kind=reply|followup|visit|scheduled|reminder|bulk|todo`, `?for=you|ai`, `?due_now=1`; POST/PATCH take `assignee` and `priority`), `PATCH /api/tasks/:id`, `POST /api/board/sync` · Meta
 `GET /api/meta/status`, `GET/POST /api/accounts/:id/wa-templates`, `GET …/meta-health`, `GET …/meta-timeline?q=`,
 `GET/PUT /api/pricing` · Others: templates, rules, playbook, alerts, people, search, events, media, `/webhook`
 (old form-bot format), `/health`.
@@ -172,10 +181,13 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
 
 ## 9. Safety nets
 
-- Nothing waits unseen: unanswered candidate replies, visits and reminders are Board cards; a re-check every 10
-  minutes catches anything missed.
+- Nothing waits unseen: unanswered replies, follow-ups, interviews, scheduled messages and reminders are Board
+  cards; a re-check every 10 minutes catches anything missed, and interested candidates with nothing planned for 3
+  days get a follow-up card. `/health` shows when that check last ran (`board.at`, `ok`, `error`, `late`) and
+  whether the database answers (`dbOk`).
+- Every card's history says who changed it and why — the first place to look when a card "disappeared".
 - A sent message is never sent twice (idempotency keys, atomic queue claims, one server per number).
 - Failures are shown with a plain reason (WhatsApp/Meta error codes translated); Meta's actual delivery events are
   kept 14 days.
 - Alerts by WhatsApp when a number is logged out or offline 15+ minutes.
-- Tests: `npm test` (78 end-to-end tests, including a fake Meta server).
+- Tests: `npm test` (81 end-to-end tests, including a fake Meta server).
