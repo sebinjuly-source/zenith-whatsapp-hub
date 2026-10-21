@@ -21,6 +21,7 @@
   }
   const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
   async function api(path, opts = {}) {
+    if (opts.body || (opts.method && opts.method !== 'GET')) state.accountsAt = 0; // a change → next page reloads the numbers
     const res = await fetch(path, {
       method: opts.method || (opts.body ? 'POST' : 'GET'),
       headers: opts.body ? { 'Content-Type': 'application/json' } : {},
@@ -173,10 +174,13 @@
   }
 
   // ---------- accounts ----------
-  async function loadAccounts() {
-    state.accounts = await api('/api/accounts');
-    const drafts = await api('/api/outbox?status=draft&limit=200');
-    state.draftsCount = drafts.length;
+  // Every page needs the numbers; reuse them for 15 s between page switches (live updates keep statuses fresh).
+  async function loadAccounts(force = false) {
+    if (!force && state.accounts.length && Date.now() - (state.accountsAt || 0) < 15000) return;
+    const [accounts, drafts] = await Promise.all([api('/api/accounts'), api('/api/outbox/count?status=draft').catch(() => ({ n: 0 }))]);
+    state.accounts = accounts;
+    state.draftsCount = drafts.n;
+    state.accountsAt = Date.now();
   }
 
   const MODE_LABEL = { full: 'Full history', recent: 'Recent history', none: 'New messages only' };
@@ -302,7 +306,7 @@
   }
 
   async function viewAccounts() {
-    await loadAccounts();
+    await loadAccounts(true); // the Numbers page always shows fresh connection and history state
     const form = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
       const f = e.target;
@@ -483,6 +487,12 @@
               ))
           : [h('div', { class: 'empty' }, 'No chats yet. History appears here as it syncs.')]),
       );
+      // Arrived from a Board card: open that conversation straight away
+      if (ib.open) {
+        const c = chats.find((x) => x.jid === ib.open);
+        ib.open = null;
+        if (c) openChat(c);
+      }
     }
 
     async function openChat(c) {
@@ -704,13 +714,18 @@
     await loadAccounts();
     const accs = state.accounts;
     if (!accs.length) return shell([h('h1', {}, 'Board'), h('p', { class: 'sub' }, 'Add and link a number first.')]);
-    const b = (state.board ||= { account: (accs.find((a) => a.isDefault) || accs[0]).id, past: false });
-    if (!accs.find((a) => a.id === b.account)) b.account = accs[0].id;
-    const [active, past] = await Promise.all([
-      api(`/api/tasks?account=${encodeURIComponent(b.account)}${b.role ? '&role=' + encodeURIComponent(b.role) : ''}`),
-      b.past ? api(`/api/tasks?account=${encodeURIComponent(b.account)}&past=1${b.role ? '&role=' + encodeURIComponent(b.role) : ''}`) : Promise.resolve([]),
+    // Default: every number together, so a card can't hide on another number's tab
+    const b = (state.board ||= { account: '', past: false });
+    if (b.account && !accs.find((a) => a.id === b.account)) b.account = '';
+    const formAccount = b.account || (accs.find((a) => a.isDefault) || accs[0]).id;
+    const q = (extra) => `/api/tasks?${new URLSearchParams({ ...(b.account ? { account: b.account } : {}), ...(b.role ? { role: b.role } : {}), ...extra })}`;
+    const [active, past, boardRoles, tplList] = await Promise.all([
+      api(q({})),
+      b.past ? api(q({ past: '1' })) : Promise.resolve([]),
+      roleChips(b.role, (r) => { b.role = r; viewBoard(); }),
+      api(`/api/templates?account=${encodeURIComponent(formAccount)}`).catch(() => []),
     ]);
-    const boardRoles = await roleChips(b.role, (r) => { b.role = r; viewBoard(); });
+    const labelOf = (id) => accs.find((a) => a.id === id)?.label || id;
     const cols = [
       ['upcoming', 'Upcoming'],
       ['in_progress', 'In progress'],
@@ -731,8 +746,19 @@
         h('option', { value: '' }, 'Move…'),
         ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'].filter((s) => s !== t.status).map((s) => h('option', { value: s }, s.replace('_', ' '))),
       );
-      return h('div', { class: 'card taskcard' },
-        h('div', { class: 'row' }, h('b', { class: 'grow' }, t.title), h('span', { class: 'tag' }, { ai: 'AI', rule: 'Rule' }[t.created_by] || 'You')),
+      // Cards the hub made for a chat (reply needed, visit, reminder) open that chat directly
+      const [refKind, refA, refB] = String(t.ref || '').split(':');
+      const chatAcc = refKind === 'visit' ? t.account_id : refA;
+      const chatJid = refKind === 'visit' ? refB : refB;
+      const openChat = t.ref && chatJid ? h('button', { class: 'btn small primary', onclick: () => {
+        Object.assign(state.inbox, { account: chatAcc, q: chatJid.split('@')[0], chat: null, state: refKind === 'reminder' ? 'snoozed' : 'open', waiting: false, kind: 'all', open: chatJid });
+        location.hash = 'inbox';
+      } }, refKind === 'reply' ? 'Open chat to reply' : 'Open chat') : null;
+      const kindTag = { reply: '💬 Reply needed', visit: '📅 Visit', reminder: '⏰ Reminder' }[t.kind];
+      return h('div', { class: 'card taskcard', style: t.kind === 'reply' ? 'border-left:4px solid var(--bad)' : t.kind === 'visit' ? 'border-left:4px solid var(--accent)' : '' },
+        h('div', { class: 'row' }, h('b', { class: 'grow' }, t.title),
+          kindTag ? h('span', { class: 'tag' }, kindTag) : h('span', { class: 'tag' }, { ai: 'AI', rule: 'Rule' }[t.created_by] || 'You'),
+          !b.account ? h('span', { class: 'tag' }, labelOf(t.account_id)) : null),
         t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, t.details) : null,
         t.total
           ? h('div', { style: 'margin:8px 0' },
@@ -744,6 +770,7 @@
         t.due_at ? h('div', { class: 'muted', style: 'font-size:12px' }, 'Due ', new Date(t.due_at).toLocaleString([], { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })) : null,
         t.completed_at ? h('div', { class: 'muted', style: 'font-size:12px' }, `${t.status === 'cancelled' ? 'Cancelled' : 'Done'} `, new Date(t.completed_at).toLocaleString()) : null,
         h('div', { class: 'row', style: 'margin-top:8px' },
+          openChat,
           t.drafts ? h('button', { class: 'btn small primary', onclick: guard(async () => {
             if (!confirm(`Approve and start sending ${t.drafts} messages?`)) return;
             await api(`/api/tasks/${t.id}/approve`, { method: 'POST' });
@@ -758,7 +785,7 @@
     const newTask = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
       const f = e.target;
-      await api('/api/tasks', { body: { account: b.account, title: f.title.value, details: f.details.value || undefined, dueAt: f.due.value ? new Date(f.due.value).toISOString() : undefined } });
+      await api('/api/tasks', { body: { account: formAccount, title: f.title.value, details: f.details.value || undefined, dueAt: f.due.value ? new Date(f.due.value).toISOString() : undefined } });
       viewBoard();
     }) },
       h('h2', {}, 'New to-do'),
@@ -767,12 +794,11 @@
       h('label', { class: 'field' }, h('span', {}, 'Due'), h('input', { type: 'datetime-local', name: 'due' })),
       h('button', { class: 'btn primary', type: 'submit' }, 'Add to board'),
     );
-    const tplList = await api(`/api/templates?account=${encodeURIComponent(b.account)}`).catch(() => []);
     const bulkCost = h('p', { style: 'font-weight:600;margin:4px 0' });
     const peopleCount = () => (bulkForm?.list?.value || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean).length;
-    const updateBulkCost = async () => { const v = bulkWa?.value(); bulkCost.textContent = v ? await costLine(b.account, peopleCount(), v) : ''; };
+    const updateBulkCost = async () => { const v = bulkWa?.value(); bulkCost.textContent = v ? await costLine(formAccount, peopleCount(), v) : ''; };
     let bulkForm = null;
-    const bulkWa = isCloud(b.account) ? waTemplateField(b.account, null, { label: 'Meta template (required for a Meta API number)', hint: 'Boxes may use {first_name}, {name} or any column you add after the name.', onChange: updateBulkCost }) : null;
+    const bulkWa = isCloud(formAccount) ? waTemplateField(formAccount, null, { label: 'Meta template (required for a Meta API number)', hint: 'Boxes may use {first_name}, {name} or any column you add after the name.', onChange: updateBulkCost }) : null;
     const bulkTpl = h('select', { name: 'tpl' }, h('option', { value: '' }, '— none: write the message below —'), tplList.map((t) => h('option', { value: t.id }, t.name)));
     const bulk = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
@@ -784,7 +810,7 @@
       const waTemplate = bulkWa?.value() || undefined;
       if (bulkWa && !waTemplate) return toast('Meta API number: choose an approved Meta template');
       if (!bulkWa && !f.text?.value.trim() && !f.tpl?.value) return toast('Write a message or pick a template');
-      const r = await api('/api/bulk', { body: { account: b.account, title: f.title.value, text: f.text?.value || undefined, template: f.tpl?.value || undefined, waTemplate, recipients,
+      const r = await api('/api/bulk', { body: { account: formAccount, title: f.title.value, text: f.text?.value || undefined, template: f.tpl?.value || undefined, waTemplate, recipients,
         scheduledAt: f.when.value ? new Date(f.when.value).toISOString() : undefined } });
       alert(r.task
         ? `${r.queued} messages ${r.mode === 'approve' ? 'saved for approval (see "Waiting for approval")' : 'queued'}.` + (r.cost?.total ? `\nEstimated Meta cost: ${money(r.cost.total, r.cost.currency)} (${r.cost.count} × ${money(r.cost.perMessage, r.cost.currency)})` : '') + (r.skipped.length ? `\n\nSkipped ${r.skipped.length}:\n` + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n') : '')
@@ -812,7 +838,7 @@
       ),
       h('p', { class: 'sub' }, 'What each number is doing and what\'s coming up. Bulk sends and follow-ups move between columns by themselves.'),
       h('div', { class: 'seg', style: 'max-width:640px;margin-bottom:10px' },
-        accs.map((a) => h('button', { class: a.id === b.account ? 'on' : '', onclick: () => { b.account = a.id; viewBoard(); } }, a.label))),
+        [['', 'All numbers'], ...accs.map((a) => [a.id, a.label])].map(([id, l]) => h('button', { class: id === b.account ? 'on' : '', onclick: () => { b.account = id; viewBoard(); } }, l))),
       boardRoles,
       h('div', { class: 'board' },
         cols.map(([k, label]) => {
@@ -1490,6 +1516,8 @@ ${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel
     let t;
     es.addEventListener('account', (e) => {
       const info = JSON.parse(e.data);
+      const known = state.accounts.find((a) => a.id === info.id);
+      if (known) Object.assign(known, info); // keep the cached list current without reloading it
       drawLink(info);
       if (state.route === 'accounts') {
         clearTimeout(t);

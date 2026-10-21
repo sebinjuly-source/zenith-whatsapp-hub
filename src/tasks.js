@@ -41,6 +41,39 @@ export async function createTask({ account, title, details, kind = 'todo', dueAt
   return row;
 }
 
+/**
+ * Cards the hub keeps in step by itself (one open card per ref): create it, or update the open one in place.
+ * Reopens nothing that was done — a new event makes a new card.
+ */
+export async function upsertRefTask(ref, { account, title, details, kind = 'todo', dueAt = null, role = null, createdBy = 'rule' }) {
+  const [open] = await query(`SELECT id FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled') ORDER BY id DESC LIMIT 1`, [ref]);
+  if (open) {
+    const [row] = await query(
+      `UPDATE tasks SET title = $2, details = $3, due_at = $4, account_id = $5, role = COALESCE($6, role), updated_at = now() WHERE id = $1 RETURNING *`,
+      [open.id, title, details || null, dueAt, account, role],
+    );
+    return row;
+  }
+  const [row] = await query(
+    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, role, ref)
+     VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8) RETURNING *`,
+    [account, title, details || null, kind, dueAt, createdBy, role, ref],
+  );
+  return row;
+}
+
+/** Close the open card(s) for these refs (status done or cancelled). */
+export async function closeRefTasks(refs, status = 'done') {
+  const list = (Array.isArray(refs) ? refs : [refs]).filter(Boolean);
+  if (!list.length) return 0;
+  const rows = await query(
+    `UPDATE tasks SET status = $2, completed_at = now(), updated_at = now()
+     WHERE ref = ANY($1::text[]) AND status NOT IN ('done','cancelled') RETURNING id`,
+    [list, status],
+  );
+  return rows.length;
+}
+
 export async function updateTask(id, { title, details, status, dueAt }) {
   if (status && !COLUMNS.includes(status)) throw new Error(`Status must be one of ${COLUMNS.join(', ')}`);
   const [row] = await query(

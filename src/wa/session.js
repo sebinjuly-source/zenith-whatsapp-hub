@@ -596,6 +596,10 @@ export class Session extends EventEmitter {
     }
     // A message from them brings a snoozed / done chat back to the open list.
     await store.reopenOnIncoming(this.id, r.chatJid);
+    // A candidate on a list wrote: "Reply to …" on the board until someone answers (so no reply goes unseen).
+    const board = await import('../board.js');
+    await board.noteIncoming(this.id, r).catch((err) => this.log.warn({ err: err.message }, 'board card failed'));
+    await board.syncReminder(this.id, r.chatJid, { state: 'open' }).catch(() => {});
     // Opt-out replies ("stop", "not interested" …) tag the contact so campaigns skip them.
     if (r.body && !isJidGroup(r.chatJid)) {
       const text = r.body.trim().toLowerCase();

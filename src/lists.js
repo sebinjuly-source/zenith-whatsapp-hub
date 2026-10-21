@@ -265,6 +265,16 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
       visit === undefined ? 'keep' : visit === null ? 'clear' : 'set', visit ? visit.toISOString() : null],
   );
   if (!m) throw new Error('Not on this list');
+  // The board shows every visit from the moment the date is set (not only the day before), and drops it when
+  // the person moves on; a closed stage also clears any "Reply to …" card for them.
+  const [l] = await query('SELECT id, account_id, name, role FROM lists WHERE id = $1', [listId]);
+  const board = await import('./board.js');
+  await board.syncVisit(l, m).catch(() => {});
+  if (['joined', 'not_interested', 'rejected'].includes(m.stage) || /^\s*(rejected|not[\s-]?interested|hired|joined|do[\s-]?not[\s-]?contact)/i.test(m.outcome || '')) {
+    const { closeRefTasks } = await import('./tasks.js');
+    const accs = await query(`SELECT DISTINCT account_id FROM messages WHERE chat_jid = $1`, [jid]);
+    await closeRefTasks(accs.map((a) => `reply:${a.account_id}:${jid}`), 'done').catch(() => {});
+  }
   return m;
 }
 
@@ -362,7 +372,10 @@ export async function runPipeline() {
       for (const m of remind) {
         if (!(await send(m, p.reminderText, 'visit-reminder', p.reminderWaTemplate))) continue;
         reminded++;
-        await createTask({ account: list.account_id, title: `Visit: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminder sent to +${m.phone}. Update the stage after the visit.`, dueAt: m.visit_at, createdBy: 'rule', role: list.role });
+        // the visit card already exists (made when the date was set) — just note the reminder on it
+        const { upsertRefTask } = await import('./tasks.js');
+        await upsertRefTask(`visit:${list.id}:${m.jid}`, { account: list.account_id, kind: 'visit', role: list.role, dueAt: new Date(m.visit_at).toISOString(),
+          title: `Visit: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminder sent to +${m.phone}. Update the stage after the visit.` });
         await query('UPDATE list_members SET reminded_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
       }
       // 3. visit time passed, stage not updated → ask you

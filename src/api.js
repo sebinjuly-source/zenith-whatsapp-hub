@@ -114,15 +114,28 @@ export function buildApp() {
   api.use((req, res, next) => (authed(req) ? next() : res.status(401).json({ error: 'Unauthorized' })));
 
   // ---- Accounts
+  // Every page loads this: the per-number checks run in parallel, and message/chat counts (they scan the big
+  // tables) are cached for a minute — they don't need to be exact to the second.
+  const statsCache = new Map();
+  const cachedStats = async (id) => {
+    const hit = statsCache.get(id);
+    if (hit && Date.now() - hit.at < 60000) return hit.v;
+    const v = await store.accountStats(id);
+    statsCache.set(id, { v, at: Date.now() });
+    return v;
+  };
   api.get('/accounts', wrap(async (req, res) => {
     await manager.refresh();
     const list = manager.list();
-    for (const a of list) {
-      a.stats = await store.accountStats(a.id);
-      a.backfill = await outbox.backfillStatus(a.id);
-      a.newChats = await outbox.newChatsStatus(a.id, a.settings);
-    }
+    await Promise.all(list.map(async (a) => {
+      [a.stats, a.backfill, a.newChats] = await Promise.all([cachedStats(a.id), outbox.backfillStatus(a.id), outbox.newChatsStatus(a.id, a.settings)]);
+    }));
     res.json(list);
+  }));
+  // Cheap counter for the navigation badge (instead of downloading every draft)
+  api.get('/outbox/count', wrap(async (req, res) => {
+    const [r] = await query(`SELECT count(*)::int AS n FROM outbox WHERE status = ANY($1)`, [String(req.query.status || 'draft').split(',')]);
+    res.json(r);
   }));
   api.post('/accounts', wrap(async (req, res) => {
     const acc = await manager.create(req.body || {});
@@ -422,7 +435,16 @@ export function buildApp() {
   }));
 
   // ---- Task board
-  api.get('/tasks', wrap(async (req, res) => res.json(await tasks.listTasks({ account: req.query.account, past: req.query.past === '1', role: req.query.role }))));
+  // ?kind=reply → only "Reply to …" cards (candidates waiting for an answer); also visit, reminder, bulk, todo
+  api.get('/tasks', wrap(async (req, res) => {
+    const rows = await tasks.listTasks({ account: req.query.account, past: req.query.past === '1', role: req.query.role });
+    res.json(req.query.kind ? rows.filter((t) => t.kind === req.query.kind) : rows);
+  }));
+  // Re-check the board now (unanswered replies, visits, reminders) instead of waiting for the 10-minute check
+  api.post('/board/sync', wrap(async (req, res) => {
+    const { syncBoard } = await import('./board.js');
+    res.json(await syncBoard());
+  }));
   api.post('/tasks', wrap(async (req, res) => {
     const { account, title, details, dueAt } = req.body || {};
     const s = await manager.resolve(account);

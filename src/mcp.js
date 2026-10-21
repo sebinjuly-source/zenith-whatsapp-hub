@@ -744,11 +744,13 @@ function buildServer(playbook = '') {
       t.details ? `— ${trim(t.details, 160)}` : null,
     ].filter(Boolean).join(' | ');
 
-  tool('list_tasks', 'Show the task board: what each number is doing or will do (bulk sends with progress, follow-ups, visits, to-dos). Filter by job role. Past tasks only if past=true.', {
+  tool('list_tasks', 'Show the task board: what each number is doing or will do (bulk sends with progress, follow-ups, visits, to-dos). The hub adds cards by itself: "Reply to X" (a candidate wrote and nobody answered — work these first), "Visit: X" (visit dates), "Reminder" (chat reminders). kind=reply shows only the unanswered candidates. Past tasks only if past=true.', {
     account: z.string().optional(), past: z.boolean().optional(), role: z.string().optional(),
+    kind: z.enum(['reply', 'visit', 'reminder', 'bulk', 'todo']).optional(),
   }, async (a) => {
-    const rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role });
-    return rows.length ? rows.map(taskLine).join('\n') : 'No tasks.';
+    let rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role });
+    if (a.kind) rows = rows.filter((t) => t.kind === a.kind);
+    return rows.length ? rows.map((t) => `${taskLine(t)}${t.ref?.startsWith('reply:') ? ` | chat ${t.ref.split(':')[2]} on ${t.account_id}` : ''}`).join('\n') : 'No tasks.';
   });
 
   tool('create_task', 'Add a card to the task board, e.g. "Follow up tomorrow with the 10 candidates who showed interest". Put the who/what in details so a later session can act on it.', {

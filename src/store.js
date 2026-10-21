@@ -241,9 +241,18 @@ export async function insertMessages(accountId, rows) {
        last_ts = GREATEST(chats.last_ts, EXCLUDED.last_ts),
        updated_at = now()`,
   );
+  await afterInsert(accountId, list);
 }
 
 const preview = (r) => (r.body ? r.body.slice(0, 120) : `[${r.type}]`);
+
+/** After storing messages: anything we sent (live, not history) answers that chat's "Reply to …" board card. */
+async function afterInsert(accountId, list) {
+  const answered = list.filter((r) => r.fromMe && !r.fromHistory).map((r) => r.chatJid);
+  if (!answered.length) return;
+  const { noteSent } = await import('./board.js');
+  await noteSent(accountId, answered).catch(() => {});
+}
 
 async function refreshChatLast(accountId, chatJid) {
   await query(
@@ -266,6 +275,9 @@ export async function setChatState(accountId, jid, state, { until, note } = {}) 
     [accountId, jid, state, state === 'snoozed' ? until : null, state === 'snoozed' ? note || null : null],
   );
   if (!rows[0]) throw new Error('Chat not found');
+  // A reminder date belongs on the board too (closes when the chat is reopened or done).
+  const { syncReminder } = await import('./board.js');
+  await syncReminder(accountId, jid, { state, until, note }).catch(() => {});
   return rows[0];
 }
 

@@ -17,9 +17,12 @@ async function main() {
   await startOutbox();
   // Automatic follow-ups (and fresh list statuses) every 10 minutes
   const { runFollowups, runPipeline } = await import('./lists.js');
+  const { syncBoard } = await import('./board.js');
   const tick = async () => {
     await runPipeline().catch((err) => logger.error({ err: err.message }, 'pipeline failed')); // warm leads first
     await runFollowups().catch((err) => logger.error({ err: err.message }, 'follow-ups failed'));
+    // Re-check the board: unanswered candidate replies, visit dates, reminders — nothing may wait unseen
+    await syncBoard().catch((err) => logger.error({ err: err.message }, 'board sync failed'));
   };
   setInterval(tick, 10 * 60 * 1000).unref();
   setTimeout(tick, 60 * 1000).unref();

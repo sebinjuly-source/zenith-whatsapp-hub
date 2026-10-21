@@ -257,6 +257,11 @@ CREATE TABLE IF NOT EXISTS events (
 ALTER TABLE events ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT 'system';
 ALTER TABLE events ADD COLUMN IF NOT EXISTS role TEXT;
 
+-- Board cards the hub keeps in step by itself: 'reply:<account>:<jid>' (someone wrote, nobody answered yet),
+-- 'visit:<list>:<jid>' (a visit date), 'remind:<account>:<jid>' (a chat reminder). One open card per ref.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ref TEXT;
+CREATE INDEX IF NOT EXISTS tasks_ref ON tasks (ref) WHERE ref IS NOT NULL;
+
 -- Sent as a reply to someone who wrote in the last 24 h: goes out at once and isn't counted in the automated cap
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_reply BOOLEAN NOT NULL DEFAULT FALSE;
 

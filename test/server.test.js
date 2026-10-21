@@ -1073,3 +1073,52 @@ test('approved replies to people who wrote in the last 24 h go out at once, even
   assert.equal(st.automated24h, 1, 'the reply is not counted in the cap');
   await manager.remove('rp');
 });
+
+test('board: candidate replies, visit dates and chat reminders all appear as cards by themselves, and close by themselves', async () => {
+  const store = await import('../src/store.js');
+  const board = await import('../src/board.js');
+  const imp = await call('POST', '/api/lists/import', { account: 'hiring', name: 'Board batch', role: 'Chef', members: [{ phone: '9800001001', name: 'Kasi Reddy' }, { phone: '9800001002', name: 'Sagar R' }] });
+  assert.equal(imp.status, 200, JSON.stringify(imp.data));
+  const listId = imp.data.list.id;
+  const now = Math.floor(Date.now() / 1000);
+  // our invite, then his reply (the reply arrives while nobody is looking)
+  await store.insertMessages('hiring', [
+    { id: 'BI1', fromMe: true, ts: now - 600, chatJid: '919800001001@s.whatsapp.net', type: 'text', body: 'invite', status: 2, forwarded: false },
+    { id: 'BI2', fromMe: false, ts: now - 100, chatJid: '919800001001@s.whatsapp.net', senderJid: '919800001001@s.whatsapp.net', type: 'text', body: 'Okay location', forwarded: false },
+  ]);
+  await board.syncBoard();
+  let cards = (await call('GET', '/api/tasks?kind=reply')).data;
+  const kasi = cards.find((t) => t.ref === 'reply:hiring:919800001001@s.whatsapp.net');
+  assert.ok(kasi, 'unanswered reply is on the board');
+  assert.match(kasi.title, /Reply to Kasi Reddy: "Okay location"/);
+  // live path: a new message from a list member makes / updates the card at once
+  await manager.get('hiring').afterIncoming({ chatJid: '919800001001@s.whatsapp.net', senderJid: '919800001001@s.whatsapp.net', id: 'BI3', ts: now - 80, type: 'text', body: 'Kahan hai hotel?' });
+  cards = (await call('GET', '/api/tasks?kind=reply')).data;
+  assert.match(cards.find((t) => t.ref === kasi.ref).title, /Kahan hai hotel/);
+  assert.equal(cards.filter((t) => t.ref === kasi.ref).length, 1, 'one card per person');
+  // we answer → the card is done
+  await store.insertMessages('hiring', [{ id: 'BI4', fromMe: true, ts: now - 60, chatJid: '919800001001@s.whatsapp.net', type: 'text', body: 'Amruthahalli', forwarded: false }]);
+  assert.ok(!(await call('GET', '/api/tasks?kind=reply')).data.find((t) => t.ref === kasi.ref), 'answered → off the board');
+  // a card the owner closes by hand stays closed until they write again
+  await sleep(1100);
+  await store.insertMessages('hiring', [{ id: 'BI5', fromMe: false, ts: Math.floor(Date.now() / 1000), chatJid: '919800001001@s.whatsapp.net', type: 'text', body: 'ok', forwarded: false }]);
+  await board.syncBoard();
+  const again = (await call('GET', '/api/tasks?kind=reply')).data.find((t) => t.ref === kasi.ref);
+  assert.ok(again);
+  await call('PATCH', `/api/tasks/${again.id}`, { status: 'done' });
+  await board.syncBoard();
+  assert.ok(!(await call('GET', '/api/tasks?kind=reply')).data.find((t) => t.ref === kasi.ref), 'closed by hand stays closed');
+  // visit date → card right away (not only the day before), done once visited
+  await call('PATCH', `/api/lists/${listId}/members/9800001002`, { visitAt: new Date(Date.now() + 4 * 86400000).toISOString() });
+  let visits = (await call('GET', '/api/tasks?kind=visit')).data;
+  assert.ok(visits.find((t) => t.ref === `visit:${listId}:919800001002@s.whatsapp.net` && t.due_at), 'visit is on the board with its date');
+  await call('PATCH', `/api/lists/${listId}/members/9800001002`, { stage: 'visited' });
+  visits = (await call('GET', '/api/tasks?kind=visit')).data;
+  assert.ok(!visits.find((t) => t.ref === `visit:${listId}:919800001002@s.whatsapp.net`));
+  // chat reminder → card due on that date; reopening the chat closes it
+  await store.upsertChats('hiring', [{ jid: '919800001002@s.whatsapp.net', name: 'Sagar R' }]);
+  await call('PATCH', '/api/accounts/hiring/chats/919800001002@s.whatsapp.net/state', { state: 'snoozed', until: new Date(Date.now() + 2 * 86400000).toISOString(), note: 'call about joining' });
+  assert.match((await call('GET', '/api/tasks?kind=reminder')).data.find((t) => t.ref === 'remind:hiring:919800001002@s.whatsapp.net').title, /Reminder: Sagar R — call about joining/);
+  await call('PATCH', '/api/accounts/hiring/chats/919800001002@s.whatsapp.net/state', { state: 'open' });
+  assert.ok(!(await call('GET', '/api/tasks?kind=reminder')).data.find((t) => t.ref === 'remind:hiring:919800001002@s.whatsapp.net'));
+});
