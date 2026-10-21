@@ -116,6 +116,20 @@ list_templates, save_template, list_meta_templates, create_meta_template, meta_h
 list_rules, save_rule, set_chat_state, get_playbook, save_playbook, recent_activity, save_media,
 fetch_older_messages, backfill_history, list_shared_contacts, find_followups`.
 
+**Calls in chats.** Linked numbers record WhatsApp calls as lines like `📞 Voice call — answered, 2:14` or
+`📞 Missed voice call`. Only calls WhatsApp shows to linked devices are captured; calls before 22 Oct 2026 and
+calls on the Meta number are not. If a call was answered (longer than 0:00) after our last message, the AI must not
+draft. It adds a "Call notes needed" task and asks the owner what was said.
+
+**Location** always means the Google Maps link https://maps.app.goo.gl/22BZBzF5W46LWoKe8, not only the address.
+
+**Images.** Draft cards show the picture that will go out: a file you attach, or the poster in an image template's
+header. Image templates keep their picture in the inbox after sending.
+
+**Scheduled AI run.** The routine "Zenith hub – draft replies to candidates" runs at 10:00, 14:00, 18:00 and 22:00 IST
+on Haiku, with only the hub tools. It works through the reply cards and leaves drafts for approval; it never sends.
+Manage it at https://claude.ai/code/routines.
+
 ---
 
 ## 7. REST API (header `x-api-key`)
