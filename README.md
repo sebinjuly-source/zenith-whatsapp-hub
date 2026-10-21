@@ -9,6 +9,9 @@ per-number rules for delays, daily limits, sending hours and draft-for-approval.
 - **Dashboard:** `/` — task board per number, numbers & QR/pairing-code linking (choose full / recent / no history), inbox, drafts/outbox, per-number settings, activity
 - **REST API:** `/api/*` — see below
 - **MCP for AI agents:** `/mcp/<API_KEY>`
+- **Meta WhatsApp Cloud API numbers** alongside linked phones (templates, 24 h window, prices, health check)
+
+**→ Full guide (numbers, daily flow, every page, sending rules, Meta, AI tools, REST, speed): [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)**
 
 ## Run locally
 
@@ -91,9 +94,8 @@ Phone numbers: `9198…`, `+91 98…`, or 10-digit Indian numbers (91 is added).
 
 ## MCP tools
 
-`list_accounts, list_chats, get_messages, search_messages, list_shared_contacts, find_followups, get_contact,
-update_contact, send_message, bulk_send, list_tasks, create_task, update_task, approve_task, list_outbox,
-approve_draft, reject_draft, save_media, fetch_older_messages`
+See [docs/HOW-IT-WORKS.md §6](docs/HOW-IT-WORKS.md) for the full current list (lists & funnel, Meta templates,
+health check, timeline, move_messages, Board cards via `list_tasks kind=reply`, …).
 
 All return compact one-line-per-item text with small default limits; agents save summaries/tags with
 `update_contact` (+ `mark_reviewed`) so later sessions don't re-read whole chats.

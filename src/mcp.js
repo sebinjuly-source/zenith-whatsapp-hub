@@ -383,7 +383,15 @@ function buildServer(playbook = '') {
       : 'Nothing.';
   });
 
-  tool('approve_draft', 'Approve (and optionally edit) a draft so it gets sent. Only use when the user has explicitly approved it in this conversation.', {
+  tool('move_messages', 'Move unsent messages (drafts or queued, by id from list_outbox) to another number — e.g. when a number is blocked or logged out. Drafts stay drafts, approved ones stay approved. Moving plain text to a Meta API number only moves people who wrote in the last 24 h.', {
+    ids: z.array(z.number().int()).min(1), account: z.string().describe('Number that should send them'),
+  }, async (a) => {
+    const r = await outbox.moveToAccount(a.ids, a.account);
+    for (const [from, n] of Object.entries(r.from)) await ai(from, `Moved ${n} unsent messages to "${r.toLabel}"`);
+    return `Moved ${r.moved} to ${r.toLabel} (${r.approved} already approved, ${r.drafts} drafts)${r.kept ? `; ${r.kept} stayed (Meta number can only send them a template)` : ''}.`;
+  });
+
+  tool('approve_draft','Approve (and optionally edit) a draft so it gets sent. Only use when the user has explicitly approved it in this conversation.', {
     id: z.number().int(), text: z.string().optional(),
   }, async (a) => {
     const r = await outbox.approve(a.id, { text: a.text });
