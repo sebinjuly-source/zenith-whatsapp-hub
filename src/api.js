@@ -25,6 +25,15 @@ import { getPlaybook, savePlaybook } from './playbook.js';
 import * as notify from './notify.js';
 import { logEvent } from './db.js';
 import { normalizeSettings } from './settings.js';
+import { priceRows, getPricing, savePricing } from './pricing.js';
+
+/** Total cost of a task's messages (bulk / list sends), for the reply right after creating them. */
+async function taskCost(taskId) {
+  if (!taskId) return null;
+  const rows = await query(`SELECT account_id, payload FROM outbox WHERE task_id = $1 AND status IN ('draft','queued')`, [taskId]);
+  const p = await priceRows(rows, manager);
+  return { total: Math.round(p.total * 100) / 100, count: rows.length, perMessage: rows.length ? p.items[0].price : 0, currency: p.currency };
+}
 import { describeSettingsChange, HISTORY_MODES } from './describe.js';
 
 /**
@@ -317,6 +326,7 @@ export function buildApp() {
   api.post('/lists/:id/send', wrap(async (req, res) => {
     const l = await lists.getList(req.params.id);
     const r = await lists.sendToList(l.id, { ...(req.body || {}), createdBy: 'you' });
+    r.cost = await taskCost(r.task?.id);
     await act(req, l.account_id, `List "${l.name}": sending to ${r.queued} (${(req.body?.statuses || ['new', 'failed']).join(', ')})`, l.role);
     res.json(r);
   }));
@@ -386,9 +396,30 @@ export function buildApp() {
     res.status(result.status === 'sent' ? 200 : 502).json(result);
   }));
 
-  api.get('/outbox', wrap(async (req, res) => res.json(await outbox.listOutbox({
-    account: req.query.account, status: req.query.status, taskId: req.query.task, limit: parseInt(req.query.limit, 10) || 50,
-  }))));
+  api.get('/outbox', wrap(async (req, res) => {
+    const rows = await outbox.listOutbox({
+      account: req.query.account, status: req.query.status, taskId: req.query.task, limit: parseInt(req.query.limit, 10) || 50,
+    });
+    // Each message's price (Meta numbers; linked phones are free), shown on the draft cards and summed in approvals
+    const p = await priceRows(rows, manager);
+    rows.forEach((r, i) => Object.assign(r, { price: p.items[i].price, price_category: p.items[i].category, price_note: p.items[i].note, currency: p.currency }));
+    res.json(rows);
+  }));
+  // Cost before sending: { account, count, waTemplate? } → per message and total
+  api.post('/outbox/estimate', wrap(async (req, res) => {
+    const { account, count = 1, waTemplate, text } = req.body || {};
+    const s = await manager.resolve(account);
+    const n = Math.max(0, Math.min(10000, parseInt(count, 10) || 0));
+    const p = await priceRows([{ account_id: s.id, payload: waTemplate ? { waTemplate } : { text: text || 'x' } }], manager);
+    const item = p.items[0];
+    res.json({ count: n, perMessage: item.price, total: item.price * n, category: item.category, note: item.note, currency: p.currency });
+  }));
+  api.get('/pricing', wrap(async (req, res) => res.json(await getPricing())));
+  api.put('/pricing', wrap(async (req, res) => {
+    const p = await savePricing(req.body || {});
+    await act(req, null, `Meta prices set: marketing ${p.marketing}, utility ${p.utility}, authentication ${p.authentication} ${p.currency}`);
+    res.json(p);
+  }));
 
   // ---- Task board
   api.get('/tasks', wrap(async (req, res) => res.json(await tasks.listTasks({ account: req.query.account, past: req.query.past === '1', role: req.query.role }))));
@@ -419,6 +450,7 @@ export function buildApp() {
   api.post('/bulk', wrap(async (req, res) => {
     const b = req.body || {};
     const r = await outbox.bulkSend({ ...b, source: b.automated === false ? 'api' : 'campaign', createdBy: 'you', idemKey: b.idempotencyKey || req.get('idempotency-key') });
+    r.cost = await taskCost(r.task?.id);
     if (r.task) await act(req, r.task.account_id || b.account, `Created bulk send "${b.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);
     res.json(r);
   }));

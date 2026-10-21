@@ -23,6 +23,7 @@ import { getPlaybook, savePlaybook } from './playbook.js';
 import { logEvent } from './db.js';
 import { HISTORY_MODES } from './describe.js';
 import { normalizeSettings } from './settings.js';
+import { priceRows, money } from './pricing.js';
 
 const ai = (accountId, text, role = null) => logEvent(accountId, 'info', text, 'ai', role);
 
@@ -56,6 +57,12 @@ const waTemplateArg = z.object({
     .describe('Values for {{1}}, {{2}}… in order (or {name: value} for named ones). May use {name}, {first_name} and list fields — filled per person'),
   header: z.string().optional().describe('Header text value, or a public file link for image/document headers'),
 }).optional();
+/** " Estimated Meta cost: ₹86.31 (100 × ₹0.86)." — empty for free (linked phone) sends. */
+async function taskCostText(taskId) {
+  const rows = await query(`SELECT account_id, payload FROM outbox WHERE task_id = $1 AND status IN ('draft','queued')`, [taskId]);
+  const p = await priceRows(rows, manager);
+  return p.total > 0 ? ` Estimated Meta cost: ${money(p.total, p.currency)} (${rows.length} × ${money(p.items[0].price, p.currency)}) — tell the owner before they approve.` : '';
+}
 const chatArg = z.string().describe('Chat: phone number (e.g. 919876543210 or 9876543210), chat id (…@s.whatsapp.net / …@g.us), or a chat/contact name');
 
 async function resolveChat(accountId, chat) {
@@ -369,8 +376,10 @@ function buildServer(playbook = '') {
     limit: z.number().int().min(1).max(100).optional(),
   }, async (a) => {
     const rows = await outbox.listOutbox({ account: a.account, status: a.status || 'draft,queued,failed', limit: a.limit || 20 });
+    const p = await priceRows(rows, manager);
     return rows.length
-      ? rows.map((r) => `#${r.id} | ${r.account_id} | ${r.status} | ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${trim(r.payload.text || r.payload.attachment?.caption || '[file]', 100)}${r.error ? ` | error: ${r.error}` : ''}`).join('\n')
+      ? rows.map((r, i) => `#${r.id} | ${r.account_id} | ${r.status} | ${money(p.items[i].price, p.currency)} | ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${trim(r.payload.text || r.payload.attachment?.caption || '[file]', 100)}${r.error ? ` | error: ${r.error}` : ''}`).join('\n')
+        + `\nTotal of these: ${money(p.total, p.currency)}`
       : 'Nothing.';
   });
 
@@ -623,7 +632,8 @@ function buildServer(playbook = '') {
     const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, waTemplate: a.wa_template, onlyPhones: a.only_phones, createdBy: 'ai', source: 'mcp' });
     await ai(l.account_id, `List "${l.name}": ${r.queued} messages ${r.mode === 'approve' ? 'drafted' : 'queued'}`, l.role);
     const skipped = r.skipped.length ? ` Skipped: ${r.skipped.map((x) => x.to + ' (' + x.reason + ')').join('; ')}` : '';
-    return r.task ? `Task #${r.task.id}: ${r.queued} messages ${r.mode === 'approve' ? 'saved as drafts — waiting for approval on the board' : 'queued'}.${skipped}` : `Nothing to send.${skipped}`;
+    const cost = r.task ? await taskCostText(r.task.id) : '';
+    return r.task ? `Task #${r.task.id}: ${r.queued} messages ${r.mode === 'approve' ? 'saved as drafts — waiting for approval on the board' : 'queued'}.${cost}${skipped}` : `Nothing to send.${skipped}`;
   });
 
   tool('set_followup', 'Automatic follow-ups for a list: people who were messaged but have not replied after N days get the follow-up message (quoting our last message), up to max times. By default only on days the number sends no first messages to new people (new candidates have priority). Checked every 10 minutes.', {
@@ -784,7 +794,7 @@ function buildServer(playbook = '') {
       const skipped = r.skipped.length ? `\nSkipped ${r.skipped.length}: ${r.skipped.slice(0, 30).map((x) => `${x.to} (${x.reason})`).join('; ')}` : '';
       if (!r.task) return `Nothing queued.${skipped}`;
       await ai(r.task.account_id, `Created bulk send "${a.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);
-      return `Task #${r.task.id}: ${r.queued} messages ${r.mode === 'approve' ? 'saved as drafts — waiting for the owner to approve on the board' : 'queued'}.${skipped}`;
+      return `Task #${r.task.id}: ${r.queued} messages ${r.mode === 'approve' ? 'saved as drafts — waiting for the owner to approve on the board' : 'queued'}.${await taskCostText(r.task.id)}${skipped}`;
     },
   );
 

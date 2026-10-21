@@ -51,12 +51,20 @@
   };
   const statusText = { open: 'Connected', qr: 'Waiting for scan', connecting: 'Connecting…', stopped: 'Not linked', logged_out: 'Logged out', replaced: 'Running elsewhere', elsewhere: 'Running on another server', not_configured: 'Not set up', error: 'Meta problem' };
   const isCloud = (id) => state.accounts.find((a) => a.id === id)?.provider === 'cloud';
+  const money = (n, cur = 'INR') => `${cur === 'INR' ? '₹' : cur + ' '}${Number(n || 0).toFixed(2).replace(/\.00$/, '')}`;
+  /** "Estimated Meta cost: 100 × ₹0.86 = ₹86.31" for count messages of this template (empty for free sends). */
+  async function costLine(accountId, count, waTemplate) {
+    if (!isCloud(accountId) || !count) return '';
+    const e = await api('/api/outbox/estimate', { body: { account: accountId, count, waTemplate } }).catch(() => null);
+    if (!e) return '';
+    return e.total > 0 ? `Estimated Meta cost: ${count} × ${money(e.perMessage, e.currency)} = ${money(e.total, e.currency)} (${e.category})` : `Cost: free (${e.note})`;
+  }
 
   /**
    * Picker for a Meta-approved template (Meta Cloud API numbers): template + one box per {{1}}, {{2}} …
    * Boxes may use {first_name}, {name} or list columns — filled per person. el.value() → { name, language, params, header } | null.
    */
-  function waTemplateField(accountId, current, { label = 'Meta template', hint } = {}) {
+  function waTemplateField(accountId, current, { label = 'Meta template', hint, onChange } = {}) {
     const sel = h('select', { 'aria-label': label }, h('option', { value: '' }, 'Loading Meta templates…'));
     const boxes = h('div', {});
     let list = [];
@@ -70,7 +78,7 @@
           h('input', { type: 'text', 'data-var': v, required: true, value: (Array.isArray(current?.params) ? current.params[i] : current?.params?.[v]) || (i === 0 ? '{first_name}' : '') }))),
       ]);
     };
-    sel.onchange = draw;
+    sel.onchange = () => { draw(); onChange?.(); };
     api(`/api/accounts/${encodeURIComponent(accountId)}/wa-templates?approved=1`).then((rows) => {
       list = rows;
       fill(sel, h('option', { value: '' }, rows.length ? '— choose an approved template —' : 'No approved templates yet (WhatsApp Manager → Message templates)'),
@@ -90,9 +98,13 @@
   }
 
   /** Dialog: choose a Meta template and its fill-ins. Resolves to the waTemplate, or null if cancelled. */
-  function askTemplate(accountId, title, hint) {
+  function askTemplate(accountId, title, hint, count = 0) {
     return new Promise((resolve) => {
-      const field = waTemplateField(accountId, null, { hint });
+      const costEl = h('p', { style: 'font-weight:600;margin:8px 0 0' });
+      const field = waTemplateField(accountId, null, { hint, onChange: async () => {
+        const v = field.value();
+        costEl.textContent = v && count ? await costLine(accountId, count, v) : '';
+      } });
       const done = (v) => { back.remove(); resolve(v); };
       const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && done(null) },
         h('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title, onsubmit: (e) => {
@@ -101,7 +113,7 @@
           if (!v) return toast('Choose a template');
           done(v);
         } },
-          h('h2', {}, title), field,
+          h('h2', {}, title), field, costEl,
           h('div', { class: 'row', style: 'justify-content:flex-end;margin-top:10px' },
             h('button', { class: 'btn', type: 'button', onclick: () => done(null) }, 'Cancel'),
             h('button', { class: 'btn primary', type: 'submit' }, 'Continue'))));
@@ -756,7 +768,11 @@
       h('button', { class: 'btn primary', type: 'submit' }, 'Add to board'),
     );
     const tplList = await api(`/api/templates?account=${encodeURIComponent(b.account)}`).catch(() => []);
-    const bulkWa = isCloud(b.account) ? waTemplateField(b.account, null, { label: 'Meta template (required for a Meta API number)', hint: 'Boxes may use {first_name}, {name} or any column you add after the name.' }) : null;
+    const bulkCost = h('p', { style: 'font-weight:600;margin:4px 0' });
+    const peopleCount = () => (bulkForm?.list?.value || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean).length;
+    const updateBulkCost = async () => { const v = bulkWa?.value(); bulkCost.textContent = v ? await costLine(b.account, peopleCount(), v) : ''; };
+    let bulkForm = null;
+    const bulkWa = isCloud(b.account) ? waTemplateField(b.account, null, { label: 'Meta template (required for a Meta API number)', hint: 'Boxes may use {first_name}, {name} or any column you add after the name.', onChange: updateBulkCost }) : null;
     const bulkTpl = h('select', { name: 'tpl' }, h('option', { value: '' }, '— none: write the message below —'), tplList.map((t) => h('option', { value: t.id }, t.name)));
     const bulk = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
@@ -771,7 +787,7 @@
       const r = await api('/api/bulk', { body: { account: b.account, title: f.title.value, text: f.text?.value || undefined, template: f.tpl?.value || undefined, waTemplate, recipients,
         scheduledAt: f.when.value ? new Date(f.when.value).toISOString() : undefined } });
       alert(r.task
-        ? `${r.queued} messages ${r.mode === 'approve' ? 'saved for approval (see "Waiting for approval")' : 'queued'}.` + (r.skipped.length ? `\n\nSkipped ${r.skipped.length}:\n` + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n') : '')
+        ? `${r.queued} messages ${r.mode === 'approve' ? 'saved for approval (see "Waiting for approval")' : 'queued'}.` + (r.cost?.total ? `\nEstimated Meta cost: ${money(r.cost.total, r.cost.currency)} (${r.cost.count} × ${money(r.cost.perMessage, r.cost.currency)})` : '') + (r.skipped.length ? `\n\nSkipped ${r.skipped.length}:\n` + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n') : '')
         : 'Nothing queued.\n' + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n'));
       viewBoard();
     }) },
@@ -782,11 +798,13 @@
         h('label', { class: 'field' }, h('span', {}, 'Message'), h('textarea', { name: 'text', rows: 4, placeholder: 'Hi {name}, we have an opening for a Chef at Zenith Suites, Bengaluru. Interested?' }),
           h('em', {}, '{name} is replaced by each person\'s name ("there" if missing).')),
       ],
-      h('label', { class: 'field' }, h('span', {}, 'People — one per line: number, name'), h('textarea', { name: 'list', rows: 5, required: true, placeholder: '9876543210, Ravi Kumar\n919812345678, Anita' }),
+      h('label', { class: 'field' }, h('span', {}, 'People — one per line: number, name'), h('textarea', { name: 'list', rows: 5, required: true, placeholder: '9876543210, Ravi Kumar\n919812345678, Anita', oninput: () => { clearTimeout(bulk._t); bulk._t = setTimeout(updateBulkCost, 400); } }),
         h('em', {}, 'Skips duplicates, opted-out contacts and anyone messaged in the last 30 days. Uses this number\'s delay, daily limit and hours.')),
       h('label', { class: 'field' }, h('span', {}, 'Start at (optional)'), h('input', { type: 'datetime-local', name: 'when' })),
+      bulkWa ? bulkCost : null,
       h('button', { class: 'btn primary', type: 'submit' }, 'Create bulk send'),
     );
+    bulkForm = bulk;
     shell([
       h('div', { class: 'row', style: 'margin-bottom:4px' },
         h('h1', { class: 'grow', style: 'margin:0' }, 'Board'),
@@ -861,11 +879,11 @@
     const sendBtn = h('button', { class: 'btn primary', disabled: !(sel.new + sel.failed), onclick: guard(async () => {
       let waTemplate;
       if (cloudList) {
-        waTemplate = await askTemplate(sel.account_id, `Message ${sel.new + sel.failed} people from a Meta API number`, 'First messages must be a Meta-approved template. Boxes may use {first_name}, {name} or list columns.');
+        waTemplate = await askTemplate(sel.account_id, `Message ${sel.new + sel.failed} people from a Meta API number`, 'First messages must be a Meta-approved template. Boxes may use {first_name}, {name} or list columns.', sel.new + sel.failed);
         if (!waTemplate) return;
       } else if (!confirm(`Message the ${sel.new + sel.failed} people not messaged yet or failed, each with their own prepared message?`)) return;
       const r = await api(`/api/lists/${sel.id}/send`, { body: { statuses: ['new', 'failed'], waTemplate } });
-      alert(`${r.queued} messages ${r.mode === 'approve' ? 'saved for approval on the Board (Waiting for approval)' : 'queued'}.` + (r.skipped.length ? `\nSkipped: ${r.skipped.map((x) => x.to + ' – ' + x.reason).join(', ')}` : ''));
+      alert(`${r.queued} messages ${r.mode === 'approve' ? 'saved for approval on the Board (Waiting for approval)' : 'queued'}.` + (r.cost?.total ? `\nEstimated Meta cost: ${money(r.cost.total, r.cost.currency)} (${r.cost.count} × ${money(r.cost.perMessage, r.cost.currency)})` : '') + (r.skipped.length ? `\nSkipped: ${r.skipped.map((x) => x.to + ' – ' + x.reason).join(', ')}` : ''));
       viewLists();
     }) }, `Message not-messaged + failed (${sel.new + sel.failed})`);
     const fuWa = cloudList ? waTemplateField(sel.account_id, f.waTemplate, { label: 'Meta template for follow-ups', hint: 'Meta API number: people who never replied can only get an approved template.' }) : null;
@@ -1129,6 +1147,10 @@
       const a = state.accounts.find((x) => x.id === id);
       return Math.min(a?.settings?.dailyCap ?? 35, a?.settings?.newChatsPer24h ?? 42) || 1;
     };
+    const costText = (list) => {
+      const total = list.reduce((a, r) => a + (r.price || 0), 0);
+      return total > 0 ? `\n\nMeta cost: ${money(total, list[0]?.currency)} for these ${list.length} (${list.filter((r) => r.price).length} paid).` : '\n\nCost: free.';
+    };
     const paceText = (list) => {
       const per = {};
       for (const r of list) per[r.account_id] = (per[r.account_id] || 0) + 1;
@@ -1157,7 +1179,8 @@
         h('div', { class: 'row', style: 'align-items:center' },
           cb,
           h('b', { class: 'grow' }, r.to_name || '+' + r.to_jid.split('@')[0]),
-          from, h('span', { class: 'tag' }, { mcp: 'AI', campaign: 'bulk', api: 'script', dashboard: 'you' }[r.source] || r.source), h('span', { class: 'muted' }, new Date(r.created_at).toLocaleString())),
+          from, h('span', { class: 'tag' }, { mcp: 'AI', campaign: 'bulk', api: 'script', dashboard: 'you' }[r.source] || r.source), h('span', { class: 'muted' }, new Date(r.created_at).toLocaleString()),
+          h('span', { class: 'muted', style: 'font-size:12px;white-space:nowrap', title: r.price_note || '' }, r.price ? money(r.price, r.currency) : (r.price_category === 'free' ? 'free' : money(0, r.currency)))),
         r.note ? h('p', { class: 'muted', style: 'margin:6px 0' }, 'Why: ', r.note) : null,
         r.payload.waTemplate ? h('p', { style: 'margin:6px 0' }, h('span', { class: 'tag' }, `Meta template: ${r.payload.waTemplate.name}`)) : null,
         r.payload.attachment ? h('p', { class: 'muted', style: 'margin:6px 0' }, '📎 ', r.payload.attachment.fileName || r.payload.attachment.url || 'file') : null,
@@ -1196,7 +1219,7 @@ ${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel
           if (!list.length) {
             return toast(sel.size ? 'Those are already approved: queued messages go out by themselves, one by one. Only drafts need approving.' : 'Tick the drafts you want to approve first');
           }
-          if (!confirm(`Approve and send ${list.length} selected drafts as they are?\n\n${paceText(list)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit.`)) return;
+          if (!confirm(`Approve and send ${list.length} selected drafts as they are?\n\n${paceText(list)}${costText(list)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit.`)) return;
           const r = await api('/api/outbox/approve-selected', { body: { ids: list.map((x) => x.id) } });
           toast(`Approved ${r.approved} — queued`);
           viewOutbox();
@@ -1215,7 +1238,7 @@ ${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel
     const approveAllBar = drafts.length > 1 ? h('div', { class: 'card row', style: 'max-width:820px;margin-bottom:16px;align-items:center' },
       h('span', { class: 'grow' }, `${drafts.length}${rows.length >= 200 ? '+' : ''} drafts${acc ? ' from ' + labelOf(acc) : ''}${state.outboxTask ? ` in task #${state.outboxTask}` : ''}`),
       h('button', { class: 'btn primary', onclick: guard(async () => {
-        if (!confirm(`Approve and send all ${drafts.length} drafts as they are?\n\n${paceText(drafts)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit. Text you edited below but did not approve is not used.`)) return;
+        if (!confirm(`Approve and send all ${drafts.length} drafts as they are?\n\n${paceText(drafts)}${costText(drafts)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit. Text you edited below but did not approve is not used.`)) return;
         const r = await api('/api/outbox/approve-all', { body: { account: acc || undefined, task: state.outboxTask || undefined } });
         toast(`Approved ${r.approved} — queued`);
         viewOutbox();
@@ -1259,6 +1282,22 @@ ${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel
       h('h2', {}, 'Connection alerts'),
       h('p', { class: 'muted', style: 'margin-top:0' }, 'A WhatsApp (from another connected number) when a number is logged out or offline for 15+ minutes. Use a personal number that is not one of the hub numbers.'),
       h('div', { class: 'row' }, h('input', { type: 'text', name: 'phones', class: 'grow', style: 'width:auto', value: al.phones.join(', '), placeholder: '9198…, comma separated' }), h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
+    const pr = await api('/api/pricing').catch(() => null);
+    const priceCard = !pr || !state.accounts.some((x) => x.provider === 'cloud') ? null : h('form', { class: 'card', style: 'margin-top:24px', onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const x = e.target;
+      await api('/api/pricing', { method: 'PUT', body: { marketing: x.marketing.value, utility: x.utility.value, authentication: x.authentication.value, service: x.service.value, serviceFreePerMonth: x.free.value } });
+      toast('Prices saved — drafts and estimates use them now');
+    }) },
+      h('h2', {}, `Meta message prices (${pr.currency}, per delivered message)`),
+      h('p', { class: 'muted', style: 'margin-top:0' }, 'Used for the cost shown on drafts and before sending from a Meta API number. Linked phone numbers are free. Since 1 Oct 2026 Meta charges utility templates even inside the 24-hour window; normal replies are free up to the monthly allowance. Check ',
+        h('a', { href: 'https://business.whatsapp.com/products/platform-pricing#rates', target: '_blank', rel: 'noopener' }, 'Meta\'s rate card'), ' and correct these if they differ.'),
+      h('div', { class: 'row', style: 'flex-wrap:wrap' },
+        ...[['marketing', 'Marketing template'], ['utility', 'Utility template'], ['authentication', 'Authentication template'], ['service', 'Reply after the free allowance']].map(([k, l]) =>
+          h('label', { class: 'field', style: 'min-width:150px' }, h('span', {}, l), h('input', { type: 'number', name: k, step: '0.0001', min: 0, value: pr[k] }))),
+        h('label', { class: 'field', style: 'min-width:150px' }, h('span', {}, 'Free replies per number / month'), h('input', { type: 'number', name: 'free', min: 0, value: pr.serviceFreePerMonth }))),
+      h('p', { class: 'muted', style: 'font-size:12px' }, pr.source || ''),
+      h('button', { class: 'btn primary', type: 'submit' }, 'Save prices'));
     const playbookCard = h('form', { class: 'card', style: 'margin-top:24px', onsubmit: guard(async (e) => {
       e.preventDefault();
       await api('/api/playbook', { method: 'PUT', body: { text: e.target.text.value } });
@@ -1359,6 +1398,7 @@ ${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel
         state.accounts.map((x) => h('option', { value: x.id, selected: x.id === id }, x.label)))),
       form,
       alertCard,
+      priceCard,
       playbookCard,
       h('div', { class: 'card', style: 'margin-top:24px;border-color:var(--bad-soft)' },
         h('h2', {}, 'Delete this number from the hub'),

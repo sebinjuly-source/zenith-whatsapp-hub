@@ -430,3 +430,31 @@ test('tap-to-reply buttons inside the window; WEBP image goes as a document; lin
   assert.equal(m.type, 'document');
   assert.equal(m.document.filename, 'dish.webp');
 });
+
+test('prices: estimate before sending, a price on every draft, free replies inside the window, linked numbers free', async () => {
+  let e = await call('POST', '/api/outbox/estimate', { account: 'api', count: 100, waTemplate: { name: 'job_followup' } });
+  assert.equal(e.data.category, 'marketing');
+  assert.equal(Math.round(e.data.total * 100) / 100, 86.31);
+  e = await call('POST', '/api/outbox/estimate', { account: 'api', count: 10, waTemplate: { name: 'candidate_invite' } });
+  assert.equal(e.data.category, 'utility');
+  assert.equal(Math.round(e.data.total * 1000) / 1000, 1.15);
+  // owner corrects a rate
+  await call('PUT', '/api/pricing', { marketing: 0.9 });
+  e = await call('POST', '/api/outbox/estimate', { account: 'api', count: 2, waTemplate: { name: 'job_followup' } });
+  assert.equal(e.data.total, 1.8);
+  await call('PUT', '/api/pricing', { marketing: 0.8631 });
+  // drafts carry their price
+  await call('PATCH', '/api/accounts/api', { settings: { aiMode: 'approve' } });
+  await outbox.enqueue({ account: 'api', to: '919876500001', payload: { text: 'free reply inside the window' }, source: 'mcp' });
+  await outbox.enqueue({ account: 'api', to: '919876500088', payload: { waTemplate: { name: 'candidate_invite', params: ['A', 'Chef'] } }, source: 'mcp' });
+  const rows = (await call('GET', '/api/outbox?account=api&status=draft&limit=5')).data;
+  const tpl = rows.find((r) => r.payload.waTemplate);
+  const reply = rows.find((r) => !r.payload.waTemplate);
+  assert.equal(tpl.price, 0.115);
+  assert.equal(tpl.price_category, 'utility');
+  assert.equal(reply.price, 0);
+  assert.match(reply.price_note, /free/);
+  assert.match(await mcp('list_outbox', { account: 'api', status: 'draft' }), /Total of these: ₹0\.12/);
+  await call('POST', '/api/outbox/reject-selected', { ids: rows.map((r) => r.id) });
+  await call('PATCH', '/api/accounts/api', { settings: { aiMode: 'auto' } });
+});
