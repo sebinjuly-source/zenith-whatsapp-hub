@@ -83,6 +83,10 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
   }
   if (taskId) await refreshTask(taskId);
   if (status === 'queued') wake(session.id);
+  // A single message for later shows on the Board until it goes out
+  if (!taskId && scheduledAt && new Date(scheduledAt) > new Date(Date.now() + 15 * 60000)) {
+    await import('./board.js').then((b) => b.syncScheduled()).catch(() => {});
+  }
   return row;
 }
 

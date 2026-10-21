@@ -1,8 +1,10 @@
 /**
  * Board cards the hub keeps in step by itself, so nothing waits unseen:
- *  - "Reply to X"  — a candidate on a list wrote and nobody has answered yet (closes when any reply goes out)
- *  - "Visit: X"    — a visit date is set (due at the visit; done when they're marked visited, gone if cleared)
- *  - "Reminder"    — a chat snoozed with "Remind me" (due on that date; closes when the chat is reopened/done)
+ *  - "Reply to X"     — AI: a candidate on a list wrote and nobody has answered yet (closes when any reply goes out)
+ *  - "Interview: X"   — YOU, priority: a visit date is set (due at the visit; done when marked visited, gone if cleared)
+ *  - "Follow up: X"   — AI: they said when they'll be free; due the day before (closes when we message them then)
+ *  - "Scheduled: X"   — AI: a single message waiting to go out later (closes when it is sent or cancelled)
+ *  - "Reminder"       — YOU: a chat snoozed with "Remind me" (due on that date; closes when the chat is reopened/done)
  * Updated instantly on each event, and re-checked every 10 minutes (syncBoard) so a missed event can't hide anything.
  */
 import { query } from './db.js';
@@ -36,7 +38,7 @@ async function replyCard(accountId, jid, m, last) {
   if (closed) return null;
   const preview = (last.body || `[${last.type}]`).replace(/\s+/g, ' ').slice(0, 80);
   return upsertRefTask(ref, {
-    account: accountId, kind: 'reply', role: m.role, dueAt: new Date(Number(last.ts) * 1000).toISOString(),
+    account: accountId, kind: 'reply', role: m.role, assignee: 'ai', dueAt: new Date(Number(last.ts) * 1000).toISOString(),
     title: `Reply to ${m.name || phone(jid)}: "${preview}"`,
     details: `${m.list_name} · +${phone(jid)} wrote ${when(Number(last.ts) * 1000)} and is waiting for an answer. Open the chat, or ask the AI to draft a reply.`,
   });
@@ -50,10 +52,65 @@ export async function noteIncoming(accountId, r) {
   await replyCard(accountId, r.chatJid, m, r);
 }
 
-/** We sent something in these chats: their "Reply to …" cards are done. */
+/** We sent something in these chats: their "Reply to …" cards are done, and so is a follow-up that has come due. */
 export async function noteSent(accountId, jids) {
-  const refs = [...new Set(jids)].map((j) => `reply:${accountId}:${j}`);
-  return closeRefTasks(refs, 'done');
+  const uniq = [...new Set(jids)];
+  const refs = uniq.map((j) => `reply:${accountId}:${j}`);
+  const n = await closeRefTasks(refs, 'done');
+  if (!uniq.length) return n;
+  // A follow-up counts as done when we message them from 12 h before it is due (an earlier chat doesn't close it)
+  const due = await query(
+    `SELECT id, ref FROM tasks WHERE kind = 'followup' AND status NOT IN ('done','cancelled') AND due_at <= now() + interval '12 hours'
+       AND split_part(ref, ':', 3) = ANY($1::text[])`,
+    [uniq],
+  );
+  if (due.length) {
+    await closeRefTasks(due.map((t) => t.ref), 'done');
+    for (const t of due) {
+      const [, listId, jid] = t.ref.split(':');
+      await query(`UPDATE list_members SET followup_at = NULL WHERE list_id = $1 AND jid = $2 AND followup_at <= now() + interval '12 hours'`, [listId, jid]);
+    }
+  }
+  return n + due.length;
+}
+
+/** Follow-up card for one person: due at followup_at, for the AI to message them (gone if cleared or they're closed). */
+export async function syncFollowup(list, m) {
+  const ref = `followup:${list.id}:${m.jid}`;
+  if (m.followup_at && !isClosed(m) && !(m.stage === 'date_given' && m.visit_at && new Date(m.visit_at) > new Date())) {
+    return upsertRefTask(ref, {
+      account: list.account_id, kind: 'followup', role: list.role, assignee: 'ai', dueAt: new Date(m.followup_at).toISOString(),
+      title: `Follow up: ${m.name || phone(m.jid)} — ${when(m.followup_at)}`,
+      details: `${m.followup_note || 'Said they will be free around then.'} · ${list.name} · +${phone(m.jid)}. Message them to fix the day and time for the interview.`,
+    });
+  }
+  return closeRefTasks([ref], 'cancelled');
+}
+
+/** Single messages waiting to go out more than 15 minutes from now get a card, so nothing scheduled is invisible. */
+export async function syncScheduled() {
+  const rows = await query(
+    `SELECT o.id, o.account_id, o.to_jid, o.status, o.scheduled_at, o.note, o.payload,
+       COALESCE(NULLIF(ch.name,''), ct.name, ct.notify) AS name
+     FROM outbox o
+     LEFT JOIN chats ch ON ch.account_id = o.account_id AND ch.jid = o.to_jid
+     LEFT JOIN contacts ct ON ct.account_id = o.account_id AND ct.jid = o.to_jid
+     WHERE o.task_id IS NULL AND o.status IN ('queued','draft') AND o.scheduled_at > now() + interval '15 minutes'`,
+  );
+  for (const o of rows) {
+    const text = (o.payload?.text || (o.payload?.waTemplate ? `Meta template "${o.payload.waTemplate.name}"` : '[file]')).replace(/s+/g, ' ').slice(0, 120);
+    await upsertRefTask(`sched:${o.id}`, {
+      account: o.account_id, kind: 'scheduled', assignee: o.status === 'draft' ? 'you' : 'ai', dueAt: new Date(o.scheduled_at).toISOString(),
+      title: `Scheduled: message to ${o.name || phone(o.to_jid)} — ${when(o.scheduled_at)}`,
+      details: `${o.status === 'draft' ? 'Approve it in Drafts, then it goes out at that time. ' : 'Goes out by itself. '}"${text}"${o.note ? ` · ${o.note}` : ''}`,
+    });
+  }
+  const open = await query(`SELECT t.ref FROM tasks t WHERE t.ref LIKE 'sched:%' AND t.status NOT IN ('done','cancelled')`);
+  for (const t of open) {
+    const [o] = await query(`SELECT status, scheduled_at FROM outbox WHERE id = $1`, [Number(t.ref.split(':')[1])]);
+    if (!o || ['sent', 'failed', 'rejected'].includes(o.status)) await closeRefTasks([t.ref], o?.status === 'sent' ? 'done' : 'cancelled');
+  }
+  return rows.length;
 }
 
 /** Visit card for one person (called when a visit date or stage changes). */
@@ -61,9 +118,9 @@ export async function syncVisit(list, m) {
   const ref = `visit:${list.id}:${m.jid}`;
   if (m.stage === 'date_given' && m.visit_at) {
     return upsertRefTask(ref, {
-      account: list.account_id, kind: 'visit', role: list.role, dueAt: new Date(m.visit_at).toISOString(),
-      title: `Visit: ${m.name || phone(m.jid)} — ${when(m.visit_at)}`,
-      details: `${list.name} · +${phone(m.jid)}${m.notes ? ` · ${m.notes}` : ''}. Afterwards set the stage (visited / trial / no_show).`,
+      account: list.account_id, kind: 'visit', role: list.role, assignee: 'you', priority: true, dueAt: new Date(m.visit_at).toISOString(),
+      title: `Interview: ${m.name || phone(m.jid)} — ${when(m.visit_at)}`,
+      details: `${list.name} · +${phone(m.jid)}${m.notes ? ` · ${m.notes}` : ''}. Take the interview / cooking test, then set the stage (visited / trial / no_show).`,
     });
   }
   const done = ['visited', 'trial', 'selected', 'joined'].includes(m.stage);
@@ -80,7 +137,7 @@ export async function syncReminder(accountId, jid, { state, until, note } = {}) 
     [accountId, phone(jid), jid],
   );
   return upsertRefTask(ref, {
-    account: accountId, kind: 'reminder', dueAt: new Date(until).toISOString(),
+    account: accountId, kind: 'reminder', assignee: 'you', dueAt: new Date(until).toISOString(),
     title: `Reminder: ${c?.name || phone(jid)}${note ? ` — ${note}` : ''}`,
     details: `Chat +${phone(jid)} comes back to the inbox on ${when(until)}.`,
   });
@@ -130,6 +187,18 @@ export async function syncBoard() {
     const [m] = await query(`SELECT m.*, l.account_id, l.name AS list_name, l.role FROM list_members m JOIN lists l ON l.id = m.list_id WHERE m.list_id = $1 AND m.jid = $2`, [listId, jid]);
     if (!m || m.stage !== 'date_given' || !m.visit_at) await syncVisit({ id: Number(listId), account_id: m?.account_id }, m || { jid, stage: null });
   }
+  // follow-ups: every date set; cards whose person moved on (or got a visit date) are closed
+  const fus = await query(
+    `SELECT m.*, l.account_id, l.name AS list_name, l.role FROM list_members m JOIN lists l ON l.id = m.list_id WHERE m.followup_at IS NOT NULL`,
+  );
+  for (const v of fus) await syncFollowup({ id: v.list_id, account_id: v.account_id, name: v.list_name, role: v.role }, v);
+  const openFu = await query(`SELECT ref FROM tasks WHERE ref LIKE 'followup:%' AND status NOT IN ('done','cancelled')`);
+  for (const t of openFu) {
+    const [, listId, jid] = t.ref.split(':');
+    const [m] = await query(`SELECT followup_at FROM list_members WHERE list_id = $1 AND jid = $2`, [listId, jid]);
+    if (!m?.followup_at) await closeRefTasks([t.ref], 'cancelled');
+  }
+  const scheduled = await syncScheduled();
   // chat reminders
   const snoozed = await query(`SELECT account_id, jid, snoozed_until, snooze_note FROM chats WHERE state = 'snoozed' AND snoozed_until IS NOT NULL`);
   for (const c of snoozed) await syncReminder(c.account_id, c.jid, { state: 'snoozed', until: c.snoozed_until, note: c.snooze_note });
@@ -139,5 +208,5 @@ export async function syncBoard() {
     const [c] = await query(`SELECT state FROM chats WHERE account_id = $1 AND jid = $2`, [acc, jid]);
     if (c?.state !== 'snoozed') await closeRefTasks([t.ref], 'done');
   }
-  return { replyCards: opened, visits: visits.length, reminders: snoozed.length };
+  return { replyCards: opened, visits: visits.length, followups: fus.length, scheduled, reminders: snoozed.length };
 }

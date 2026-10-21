@@ -31,12 +31,20 @@ export async function refreshTask(taskId) {
   );
 }
 
-export async function createTask({ account, title, details, kind = 'todo', dueAt, createdBy = 'you', idemKey = null, role = null }) {
+export const ASSIGNEES = ['you', 'ai'];
+const who = (a) => {
+  if (a == null || a === '') return null;
+  const v = String(a).toLowerCase() === 'owner' ? 'you' : String(a).toLowerCase();
+  if (!ASSIGNEES.includes(v)) throw new Error('assignee must be "you" (the owner) or "ai"');
+  return v;
+};
+
+export async function createTask({ account, title, details, kind = 'todo', dueAt, createdBy = 'you', idemKey = null, role = null, assignee, priority = false }) {
   if (!title?.trim()) throw new Error('A task needs a title');
   const [row] = await query(
-    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, idem_key, role)
-     VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8) RETURNING *`,
-    [account, title.trim(), details || null, kind, dueAt || null, createdBy, idemKey ? String(idemKey) : null, role],
+    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, idem_key, role, assignee, priority)
+     VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8,$9,$10) RETURNING *`,
+    [account, title.trim(), details || null, kind, dueAt || null, createdBy, idemKey ? String(idemKey) : null, role, who(assignee) || (kind === 'bulk' ? 'ai' : 'you'), !!priority],
   );
   return row;
 }
@@ -45,19 +53,20 @@ export async function createTask({ account, title, details, kind = 'todo', dueAt
  * Cards the hub keeps in step by itself (one open card per ref): create it, or update the open one in place.
  * Reopens nothing that was done — a new event makes a new card.
  */
-export async function upsertRefTask(ref, { account, title, details, kind = 'todo', dueAt = null, role = null, createdBy = 'rule' }) {
+export async function upsertRefTask(ref, { account, title, details, kind = 'todo', dueAt = null, role = null, createdBy = 'rule', assignee = 'you', priority = false }) {
   const [open] = await query(`SELECT id FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled') ORDER BY id DESC LIMIT 1`, [ref]);
   if (open) {
     const [row] = await query(
-      `UPDATE tasks SET title = $2, details = $3, due_at = $4, account_id = $5, role = COALESCE($6, role), updated_at = now() WHERE id = $1 RETURNING *`,
-      [open.id, title, details || null, dueAt, account, role],
+      `UPDATE tasks SET title = $2, details = $3, due_at = $4, account_id = $5, role = COALESCE($6, role), assignee = $7, priority = $8, updated_at = now()
+       WHERE id = $1 RETURNING *`,
+      [open.id, title, details || null, dueAt, account, role, assignee, !!priority],
     );
     return row;
   }
   const [row] = await query(
-    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, role, ref)
-     VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8) RETURNING *`,
-    [account, title, details || null, kind, dueAt, createdBy, role, ref],
+    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, role, ref, assignee, priority)
+     VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8,$9,$10) RETURNING *`,
+    [account, title, details || null, kind, dueAt, createdBy, role, ref, assignee, !!priority],
   );
   return row;
 }
@@ -74,15 +83,16 @@ export async function closeRefTasks(refs, status = 'done') {
   return rows.length;
 }
 
-export async function updateTask(id, { title, details, status, dueAt }) {
+export async function updateTask(id, { title, details, status, dueAt, assignee, priority }) {
   if (status && !COLUMNS.includes(status)) throw new Error(`Status must be one of ${COLUMNS.join(', ')}`);
   const [row] = await query(
     `UPDATE tasks SET title = COALESCE($2, title), details = COALESCE($3, details), status = COALESCE($4, status),
        due_at = CASE WHEN $5::text IS NULL THEN due_at WHEN $5 = '' THEN NULL ELSE $5::timestamptz END,
        completed_at = CASE WHEN COALESCE($4, status) IN ('done','cancelled') THEN COALESCE(completed_at, now()) ELSE NULL END,
+       assignee = COALESCE($6, assignee), priority = COALESCE($7, priority),
        updated_at = now()
      WHERE id = $1 RETURNING *`,
-    [id, title ?? null, details ?? null, status ?? null, dueAt === undefined ? null : dueAt || ''],
+    [id, title ?? null, details ?? null, status ?? null, dueAt === undefined ? null : dueAt || '', who(assignee), priority == null ? null : !!priority],
   );
   if (!row) throw new Error('Task not found');
   return row;
@@ -94,9 +104,17 @@ export async function cancelTask(id) {
   return updateTask(id, { status: 'cancelled' });
 }
 
-export async function listTasks({ account, past = false, limit = 200, role } = {}) {
+export async function listTasks({ account, past = false, limit = 200, role, assignee, dueBefore } = {}) {
   const p = [];
   const where = [];
+  if (assignee) {
+    p.push(who(assignee));
+    where.push(`COALESCE(t.assignee, 'you') = $${p.length}`);
+  }
+  if (dueBefore) {
+    p.push(new Date(dueBefore).toISOString());
+    where.push(`t.due_at <= $${p.length}::timestamptz`);
+  }
   if (role) {
     p.push(role);
     where.push(`lower(t.role) = lower($${p.length})`);

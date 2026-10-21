@@ -18,6 +18,7 @@ import * as outbox from './outbox.js';
 import { createTask, refreshTask, fillTemplate } from './tasks.js';
 import { getTemplate } from './templates.js';
 import { afterTime } from './settings.js';
+import config from './config.js';
 
 export const STATUSES = ['new', 'queued', 'sent', 'replied', 'failed', 'opted_out'];
 
@@ -242,7 +243,19 @@ export async function listMembers(listId, { status, outcome, limit = 500 } = {})
   );
 }
 
-export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, visitAt }) {
+/**
+ * When to follow up with someone who said when they'll be free ("after 10 Nov", "next week", "after Diwali"):
+ * the day before at 10:00 India time — or in an hour if that has already passed.
+ */
+export function followupBefore(availableFrom) {
+  const d = new Date(availableFrom);
+  if (isNaN(d)) throw new Error('Could not read the date they will be available');
+  const day = new Date(d.getTime() - 86400000).toLocaleDateString('en-CA', { timeZone: config.tz });
+  const at = new Date(`${day}T10:00:00+05:30`);
+  return at > new Date() ? at : new Date(Date.now() + 3600000);
+}
+
+export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, visitAt, followupAt, followupNote, availableFrom }) {
   const jid = toJid(phoneOrJid);
   if (stage !== undefined && stage !== null && stage !== '' && !STAGES.includes(stage)) {
     throw new Error(`Stage must be one of: ${STAGES.join(', ')}`);
@@ -250,6 +263,11 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
   let visit = visitAt === undefined ? undefined : visitAt ? new Date(visitAt) : null;
   if (visit && isNaN(visit)) throw new Error('Could not read the visit date');
   if (visit && stage === undefined) stage = 'date_given'; // giving a date moves them to "date given"
+  // Follow-up: an exact time, or worked out from when they said they'll be free. A visit date replaces it.
+  let fu = followupAt === undefined ? undefined : followupAt ? new Date(followupAt) : null;
+  if (fu && isNaN(fu)) throw new Error('Could not read the follow-up date');
+  if (availableFrom) fu = followupBefore(availableFrom);
+  if (visit && fu === undefined) fu = null;
   const [m] = await query(
     `UPDATE list_members SET
        outcome = CASE WHEN $3::text IS NULL THEN outcome WHEN $3 = '' THEN NULL ELSE $3 END,
@@ -259,10 +277,13 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
        visit_at = CASE WHEN $6::text = 'keep' THEN visit_at WHEN $6 = 'clear' THEN NULL ELSE $7::timestamptz END,
        reminded_at = CASE WHEN $6::text = 'keep' THEN reminded_at ELSE NULL END,
        checked_at = CASE WHEN $6::text = 'keep' THEN checked_at ELSE NULL END,
+       followup_at = CASE WHEN $8::text = 'keep' THEN followup_at WHEN $8 = 'clear' THEN NULL ELSE $9::timestamptz END,
+       followup_note = CASE WHEN $8::text = 'clear' THEN NULL ELSE COALESCE($10, followup_note) END,
        updated_at = now()
      WHERE list_id = $1 AND jid = $2 RETURNING *`,
     [listId, jid, outcome === undefined ? null : outcome, notes ?? null, stage === undefined ? null : stage,
-      visit === undefined ? 'keep' : visit === null ? 'clear' : 'set', visit ? visit.toISOString() : null],
+      visit === undefined ? 'keep' : visit === null ? 'clear' : 'set', visit ? visit.toISOString() : null,
+      fu === undefined ? 'keep' : fu === null ? 'clear' : 'set', fu ? fu.toISOString() : null, followupNote || null],
   );
   if (!m) throw new Error('Not on this list');
   // The board shows every visit from the moment the date is set (not only the day before), and drops it when
@@ -270,6 +291,7 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
   const [l] = await query('SELECT id, account_id, name, role FROM lists WHERE id = $1', [listId]);
   const board = await import('./board.js');
   await board.syncVisit(l, m).catch(() => {});
+  await board.syncFollowup(l, m).catch(() => {});
   if (['joined', 'not_interested', 'rejected'].includes(m.stage) || /^\s*(rejected|not[\s-]?interested|hired|joined|do[\s-]?not[\s-]?contact)/i.test(m.outcome || '')) {
     const { closeRefTasks } = await import('./tasks.js');
     const accs = await query(`SELECT DISTINCT account_id FROM messages WHERE chat_jid = $1`, [jid]);
@@ -339,7 +361,7 @@ export async function runPipeline() {
         const vars = { ...m.fields, name: m.name, first_name: first, phone: m.phone, visit_date: m.visit_at ? fmtVisit(m.visit_at) : '' };
         const r = await payloadFor(session, m.jid, fillTemplate(text, vars), waTemplate, vars);
         if (r.skip) {
-          await createTask({ account: acc, title: `Message ${m.name || m.phone} yourself (${note})`, details: `${list.name}: ${r.skip}. Call or message +${m.phone}.`, createdBy: 'rule', role: list.role });
+          await createTask({ account: acc, title: `Message ${m.name || m.phone} yourself (${note})`, details: `${list.name}: ${r.skip}. Call or message +${m.phone}.`, createdBy: 'rule', role: list.role, assignee: 'you', priority: true });
           return 'manual';
         }
         await query(
@@ -374,8 +396,8 @@ export async function runPipeline() {
         reminded++;
         // the visit card already exists (made when the date was set) — just note the reminder on it
         const { upsertRefTask } = await import('./tasks.js');
-        await upsertRefTask(`visit:${list.id}:${m.jid}`, { account: list.account_id, kind: 'visit', role: list.role, dueAt: new Date(m.visit_at).toISOString(),
-          title: `Visit: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminder sent to +${m.phone}. Update the stage after the visit.` });
+        await upsertRefTask(`visit:${list.id}:${m.jid}`, { account: list.account_id, kind: 'visit', role: list.role, dueAt: new Date(m.visit_at).toISOString(), assignee: 'you', priority: true,
+          title: `Interview: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminder sent to +${m.phone}. Take the interview / cooking test, then set the stage (visited / trial / no_show).` });
         await query('UPDATE list_members SET reminded_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
       }
       // 3. visit time passed, stage not updated → ask you
@@ -384,7 +406,7 @@ export async function runPipeline() {
         [list.id],
       );
       for (const m of check) {
-        await createTask({ account: list.account_id, title: `Did ${m.name || m.phone} come? (${fmtVisit(m.visit_at)})`, details: `${list.name}: set the stage to visited / trial / no_show.`, createdBy: 'rule', role: list.role });
+        await createTask({ account: list.account_id, title: `Did ${m.name || m.phone} come? (${fmtVisit(m.visit_at)})`, details: `${list.name}: set the stage to visited / trial / no_show.`, createdBy: 'rule', role: list.role, assignee: 'you', priority: true });
         await query('UPDATE list_members SET checked_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
       }
       for (const acc of woke) outbox.wakeAccount(acc);

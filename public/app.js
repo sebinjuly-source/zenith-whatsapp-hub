@@ -561,6 +561,7 @@
         tplSel.append(...ts.map((t) => h('option', { value: t.id }, t.name)));
       }).catch(() => {});
       fileIn.onchange = () => { fileLabel.textContent = fileIn.files[0]?.name || ''; };
+      const laterIn = h('input', { type: 'datetime-local', 'aria-label': 'Send at', title: 'Send at this time (leave empty to send now)', style: 'display:none;margin-top:4px;max-width:240px' });
       const composer = h('form', { class: 'composer', onsubmit: guard(async (e) => {
         e.preventDefault();
         const text = ta.value.trim();
@@ -573,7 +574,11 @@
         }
         sendBtn.disabled = true;
         try {
-          await api('/api/send', { body: { account: ib.account, to: c.jid, text: text || undefined, attachment, replyTo: replyTo || undefined, source: 'dashboard' } });
+          const scheduleAt = laterIn.value ? new Date(laterIn.value).toISOString() : undefined;
+          await api('/api/send', { body: { account: ib.account, to: c.jid, text: text || undefined, attachment, replyTo: replyTo || undefined, source: 'dashboard', scheduleAt } });
+          if (scheduleAt) toast(`Scheduled for ${new Date(scheduleAt).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })} — it's on the Board`);
+          laterIn.value = '';
+          laterIn.style.display = 'none';
           ta.value = '';
           setReply(null);
           fileIn.value = '';
@@ -584,8 +589,13 @@
         }
       }) },
         h('button', { type: 'button', class: 'btn', onclick: () => fileIn.click(), 'aria-label': 'Attach file' }, '📎'), fileIn,
+        h('button', { type: 'button', class: 'btn', title: 'Send later', 'aria-label': 'Send later', onclick: () => {
+          const on = laterIn.style.display === 'none';
+          laterIn.style.display = on ? '' : 'none';
+          if (on) laterIn.focus(); else laterIn.value = '';
+        } }, '⏰'),
         tplSel,
-        h('div', { class: 'grow' }, replyBar, ta, fileLabel),
+        h('div', { class: 'grow' }, replyBar, ta, laterIn, fileLabel),
       );
       const sendBtn = h('button', { class: 'btn primary', type: 'submit' }, 'Send');
       composer.append(sendBtn);
@@ -715,7 +725,7 @@
     const accs = state.accounts;
     if (!accs.length) return shell([h('h1', {}, 'Board'), h('p', { class: 'sub' }, 'Add and link a number first.')]);
     // Default: every number together, so a card can't hide on another number's tab
-    const b = (state.board ||= { account: '', past: false });
+    const b = (state.board ||= { account: '', past: false, who: '' });
     if (b.account && !accs.find((a) => a.id === b.account)) b.account = '';
     const formAccount = b.account || (accs.find((a) => a.isDefault) || accs[0]).id;
     const q = (extra) => `/api/tasks?${new URLSearchParams({ ...(b.account ? { account: b.account } : {}), ...(b.role ? { role: b.role } : {}), ...extra })}`;
@@ -732,7 +742,49 @@
       ['waiting', 'Waiting for approval'],
       ...(b.past ? [['done', 'Done & cancelled']] : []),
     ];
-    const byCol = (k) => (k === 'done' ? past : active.filter((t) => t.status === k));
+    const whoOf = (t) => t.assignee || 'you';
+    const mine = (t) => !b.who || whoOf(t) === b.who;
+    const byCol = (k) => (k === 'done' ? past : active.filter((t) => t.status === k)).filter(mine);
+    const fmtWhen = (t) => new Date(t).toLocaleString([], { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const whoTag = (t) => h('span', { class: 'tag', title: whoOf(t) === 'ai' ? 'The AI / hub does this' : 'You do this', style: whoOf(t) === 'you' ? 'background:var(--accent-soft)' : '' }, whoOf(t) === 'ai' ? '🤖 AI' : '👤 You');
+    const prioTag = (t) => (t.priority ? h('span', { class: 'tag', style: 'background:var(--bad-soft);color:var(--bad);font-weight:600' }, '⭐ Priority') : null);
+    // Cards the hub made for a chat (reply, follow-up, interview, reminder) open that chat directly
+    const chatOf = (t) => {
+      const [refKind, refA, refB] = String(t.ref || '').split(':');
+      if (!refB || !['reply', 'remind', 'visit', 'followup'].includes(refKind)) return null;
+      return { kind: refKind, account: ['visit', 'followup'].includes(refKind) ? t.account_id : refA, jid: refB };
+    };
+    const goChat = (ch) => {
+      Object.assign(state.inbox, { account: ch.account, q: ch.jid.split('@')[0], chat: null, state: ch.kind === 'remind' ? 'snoozed' : 'open', waiting: false, kind: 'all', open: ch.jid });
+      location.hash = 'inbox';
+    };
+    // ---- agenda: everything with a date, by day — the shared calendar of you and the AI
+    const dayKey = (d) => new Date(d).toLocaleDateString('en-CA');
+    const today = dayKey(Date.now());
+    const tomorrow = dayKey(Date.now() + 86400000);
+    const dated = active.filter((t) => t.due_at && mine(t)).sort((x, y) => new Date(x.due_at) - new Date(y.due_at));
+    const groups = [];
+    for (const t of dated) {
+      const k = new Date(t.due_at) < new Date() ? 'overdue' : dayKey(t.due_at);
+      let g = groups.find((x) => x.k === k);
+      if (!g) groups.push((g = { k, items: [] }));
+      g.items.push(t);
+    }
+    const groupLabel = (k) => (k === 'overdue' ? 'Overdue / now' : k === today ? 'Today' : k === tomorrow ? 'Tomorrow' : new Date(k + 'T12:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' }));
+    const agenda = h('div', { class: 'card', style: 'margin-bottom:14px' },
+      h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, '📅 Coming up'),
+        h('span', { class: 'muted', style: 'font-size:12px' }, '👤 You = you do it · 🤖 AI = the AI/hub does it · ⭐ = must do')),
+      groups.length ? groups.map((g) => h('div', { style: 'margin-top:10px' },
+        h('div', { style: `font-weight:600;font-size:13px;${g.k === 'overdue' ? 'color:var(--bad)' : ''}` }, groupLabel(g.k)),
+        g.items.map((t) => {
+          const ch = chatOf(t);
+          return h('div', { class: 'row', style: `gap:6px;padding:5px 0;border-bottom:1px solid var(--line);font-size:13px;${t.priority ? 'font-weight:600' : ''}` },
+            h('span', { class: 'mono muted', style: 'min-width:64px' }, new Date(t.due_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
+            whoTag(t), prioTag(t),
+            h('span', { class: 'grow' }, t.title),
+            !b.account ? h('span', { class: 'tag' }, labelOf(t.account_id)) : null,
+            ch ? h('button', { class: 'btn small', onclick: () => goChat(ch) }, 'Open chat') : null);
+        }))) : h('p', { class: 'muted', style: 'font-size:13px' }, 'Nothing dated coming up.'));
     const card = (t) => {
       const pct = t.total ? Math.round((100 * (t.sent + t.failed)) / t.total) : null;
       const move = h('select', { 'aria-label': 'Move task', class: 'small-select', onchange: guard(async (e) => {
@@ -746,18 +798,18 @@
         h('option', { value: '' }, 'Move…'),
         ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'].filter((s) => s !== t.status).map((s) => h('option', { value: s }, s.replace('_', ' '))),
       );
-      // Cards the hub made for a chat (reply needed, visit, reminder) open that chat directly
-      const [refKind, refA, refB] = String(t.ref || '').split(':');
-      const chatAcc = refKind === 'visit' ? t.account_id : refA;
-      const chatJid = refKind === 'visit' ? refB : refB;
-      const openChat = t.ref && chatJid ? h('button', { class: 'btn small primary', onclick: () => {
-        Object.assign(state.inbox, { account: chatAcc, q: chatJid.split('@')[0], chat: null, state: refKind === 'reminder' ? 'snoozed' : 'open', waiting: false, kind: 'all', open: chatJid });
-        location.hash = 'inbox';
-      } }, refKind === 'reply' ? 'Open chat to reply' : 'Open chat') : null;
-      const kindTag = { reply: '💬 Reply needed', visit: '📅 Visit', reminder: '⏰ Reminder' }[t.kind];
-      return h('div', { class: 'card taskcard', style: t.kind === 'reply' ? 'border-left:4px solid var(--bad)' : t.kind === 'visit' ? 'border-left:4px solid var(--accent)' : '' },
+      const ch = chatOf(t);
+      const openChat = ch ? h('button', { class: 'btn small primary', onclick: () => goChat(ch) }, ch.kind === 'reply' ? 'Open chat to reply' : 'Open chat') : null;
+      const kindTag = { reply: '💬 Reply needed', visit: '🎯 Interview', followup: '🔁 Follow-up', scheduled: '🕒 Scheduled', reminder: '⏰ Reminder' }[t.kind];
+      const flag = h('button', { class: 'btn small', title: t.priority ? 'Remove priority' : 'Mark as must-do', onclick: guard(async () => {
+        await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { priority: !t.priority } });
+        viewBoard();
+      }) }, t.priority ? '☆ Unflag' : '⭐ Flag');
+      const border = t.priority ? 'border-left:4px solid var(--bad)' : t.kind === 'reply' ? 'border-left:4px solid var(--bad)' : ['visit', 'followup'].includes(t.kind) ? 'border-left:4px solid var(--accent)' : '';
+      return h('div', { class: 'card taskcard', style: border },
         h('div', { class: 'row' }, h('b', { class: 'grow' }, t.title),
-          kindTag ? h('span', { class: 'tag' }, kindTag) : h('span', { class: 'tag' }, { ai: 'AI', rule: 'Rule' }[t.created_by] || 'You'),
+          prioTag(t), whoTag(t),
+          kindTag ? h('span', { class: 'tag' }, kindTag) : null,
           !b.account ? h('span', { class: 'tag' }, labelOf(t.account_id)) : null),
         t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, t.details) : null,
         t.total
@@ -767,7 +819,7 @@
                 `${t.sent}/${t.total} sent`, t.drafts ? ` · ${t.drafts} to approve` : '', t.failed ? ` · ${t.failed} failed` : '',
                 t.replied ? ` · ${t.replied} replied` : '', t.next_at && t.pending ? ` · next ${new Date(t.next_at).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}` : ''))
           : null,
-        t.due_at ? h('div', { class: 'muted', style: 'font-size:12px' }, 'Due ', new Date(t.due_at).toLocaleString([], { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })) : null,
+        t.due_at ? h('div', { class: 'muted', style: `font-size:12px;${new Date(t.due_at) < new Date() && t.status !== 'done' ? 'color:var(--bad)' : ''}` }, 'Due ', fmtWhen(t.due_at)) : null,
         t.completed_at ? h('div', { class: 'muted', style: 'font-size:12px' }, `${t.status === 'cancelled' ? 'Cancelled' : 'Done'} `, new Date(t.completed_at).toLocaleString()) : null,
         h('div', { class: 'row', style: 'margin-top:8px' },
           openChat,
@@ -778,6 +830,7 @@
             viewBoard();
           }) }, `Approve ${t.drafts}`) : null,
           t.total ? h('button', { class: 'btn small', onclick: () => { state.outboxTask = t.id; state.outboxTab = 'all'; location.hash = 'outbox'; } }, 'Messages') : null,
+          t.status !== 'done' && t.status !== 'cancelled' ? flag : null,
           t.status !== 'done' && t.status !== 'cancelled' ? move : null,
         ),
       );
@@ -785,13 +838,17 @@
     const newTask = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
       const f = e.target;
-      await api('/api/tasks', { body: { account: formAccount, title: f.title.value, details: f.details.value || undefined, dueAt: f.due.value ? new Date(f.due.value).toISOString() : undefined } });
+      await api('/api/tasks', { body: { account: formAccount, title: f.title.value, details: f.details.value || undefined, dueAt: f.due.value ? new Date(f.due.value).toISOString() : undefined,
+        assignee: f.who.value, priority: f.priority.checked } });
       viewBoard();
     }) },
       h('h2', {}, 'New to-do'),
       h('label', { class: 'field' }, h('span', {}, 'Title'), h('input', { type: 'text', name: 'title', required: true, placeholder: 'Follow up with interested chef candidates' })),
       h('label', { class: 'field' }, h('span', {}, 'Details'), h('textarea', { name: 'details', rows: 2, placeholder: 'Who, what, any instructions for the AI' })),
-      h('label', { class: 'field' }, h('span', {}, 'Due'), h('input', { type: 'datetime-local', name: 'due' })),
+      h('div', { class: 'row' },
+        h('label', { class: 'field grow' }, h('span', {}, 'Due'), h('input', { type: 'datetime-local', name: 'due' })),
+        h('label', { class: 'field grow' }, h('span', {}, 'Who does it'), h('select', { name: 'who' }, h('option', { value: 'you' }, '👤 Me'), h('option', { value: 'ai' }, '🤖 The AI')))),
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'priority' }), h('span', {}, '⭐ Priority', h('em', {}, 'A must-do: shown in red and bold on the Board.'))),
       h('button', { class: 'btn primary', type: 'submit' }, 'Add to board'),
     );
     const bulkCost = h('p', { style: 'font-weight:600;margin:4px 0' });
@@ -836,10 +893,13 @@
         h('h1', { class: 'grow', style: 'margin:0' }, 'Board'),
         h('button', { class: 'btn small', onclick: () => { b.past = !b.past; viewBoard(); } }, b.past ? 'Hide past' : 'Show past'),
       ),
-      h('p', { class: 'sub' }, 'What each number is doing and what\'s coming up. Bulk sends and follow-ups move between columns by themselves.'),
+      h('p', { class: 'sub' }, 'Your shared calendar with the AI: interviews, follow-ups, replies and scheduled messages. The hub adds and closes most cards by itself.'),
       h('div', { class: 'seg', style: 'max-width:640px;margin-bottom:10px' },
         [['', 'All numbers'], ...accs.map((a) => [a.id, a.label])].map(([id, l]) => h('button', { class: id === b.account ? 'on' : '', onclick: () => { b.account = id; viewBoard(); } }, l))),
       boardRoles,
+      h('div', { class: 'seg', style: 'max-width:420px;margin-bottom:10px' },
+        [['', 'Everyone'], ['you', '👤 Mine'], ['ai', '🤖 AI']].map(([k, l]) => h('button', { class: (b.who || '') === k ? 'on' : '', onclick: () => { b.who = k; viewBoard(); } }, l))),
+      agenda,
       h('div', { class: 'board' },
         cols.map(([k, label]) => {
           const items = byCol(k);
@@ -952,8 +1012,10 @@
         h('div', { class: 'p-edit' },
           h('select', { 'aria-label': 'Stage', onchange: (e) => save(m, { stage: e.target.value }) },
             h('option', { value: '' }, 'Stage…'), Object.entries(STAGE_LABEL).map(([k, l]) => h('option', { value: k, selected: m.stage === k }, l))),
-          h('input', { type: 'datetime-local', 'aria-label': 'Visit date', title: 'When they will come', value: toLocalInput(m.visit_at), onchange: (e) => save(m, { visitAt: e.target.value ? new Date(e.target.value).toISOString() : '' }) }),
+          h('input', { type: 'datetime-local', 'aria-label': 'Interview date', title: 'Interview: when they will come', value: toLocalInput(m.visit_at), onchange: (e) => save(m, { visitAt: e.target.value ? new Date(e.target.value).toISOString() : '' }) }),
+          h('input', { type: 'datetime-local', 'aria-label': 'Follow up on', title: 'Follow up on (the AI messages them then; shows on the Board)', value: toLocalInput(m.followup_at), onchange: (e) => save(m, { followupAt: e.target.value ? new Date(e.target.value).toISOString() : '' }) }),
           h('input', { type: 'text', 'aria-label': 'Outcome', placeholder: 'Reason / outcome', value: m.outcome || '', onchange: (e) => save(m, { outcome: e.target.value }) })),
+        m.followup_at ? h('div', { class: 'muted', style: 'font-size:12px' }, '🔁 Follow up ', fmtD(m.followup_at), m.followup_note ? ` — ${m.followup_note}` : '') : null,
         m.notes ? h('div', { class: 'muted', style: 'font-size:12px' }, m.notes) : null);
     }) : h('p', { class: 'muted' }, 'Nobody here.'));
     const p = { remindHoursBefore: 18, askDateAfterHours: 4, enabled: true, ...(sel.pipeline || {}) };

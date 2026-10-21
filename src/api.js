@@ -381,12 +381,16 @@ export function buildApp() {
 
   // ---- Sending
   api.post('/send', wrap(async (req, res) => {
-    const { account, to, wait = true, template, vars, replyTo, waTemplate } = req.body || {};
+    const { account, to, wait: waitArg = true, template, vars, replyTo, waTemplate } = req.body || {};
+    // scheduleAt (ISO): send later — shows on the Board until it goes out; the call returns at once
+    const scheduledAt = req.body?.scheduleAt || undefined;
+    if (scheduledAt && isNaN(new Date(scheduledAt))) throw new Error('Could not read scheduleAt');
+    const wait = scheduledAt ? false : waitArg;
     let { text, attachment } = req.body || {};
     if (!to) throw new Error('Missing "to" (phone number or chat id)');
     if (waTemplate) {
       // Meta template (Cloud API numbers): { name, language?, params: [...] }
-      const row = await outbox.enqueue({ account, to, payload: { waTemplate }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key') });
+      const row = await outbox.enqueue({ account, to, payload: { waTemplate }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt });
       if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent Meta template "${waTemplate.name}" to ${row.to_jid.split('@')[0]}`);
       if (!wait) return res.json(row);
       const result = await outbox.waitFor(row.id);
@@ -400,7 +404,7 @@ export function buildApp() {
       attachment = attachment || r.payload.attachment;
     }
     const buttons = Array.isArray(req.body?.buttons) ? req.body.buttons.filter(Boolean).slice(0, 3) : undefined;
-    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}), ...(buttons?.length ? { buttons } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key') });
+    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}), ...(buttons?.length ? { buttons } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt });
     if (row.duplicate && ['sent', 'failed', 'rejected'].includes(row.status)) return res.status(row.status === 'sent' ? 200 : 502).json(row);
     if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent a message from the dashboard to ${row.to_jid.split('@')[0]}`);
     if (!wait) return res.json(row);
@@ -444,9 +448,11 @@ export function buildApp() {
   }));
 
   // ---- Task board
-  // ?kind=reply → only "Reply to …" cards (candidates waiting for an answer); also visit, reminder, bulk, todo
+  // ?kind=reply → only "Reply to …" cards (candidates waiting for an answer); also followup, visit, scheduled, reminder, bulk, todo
+  // ?for=you|ai → the owner's or the AI's cards; ?due_now=1 → due within the next hour or overdue
   api.get('/tasks', wrap(async (req, res) => {
-    const rows = await tasks.listTasks({ account: req.query.account, past: req.query.past === '1', role: req.query.role });
+    const rows = await tasks.listTasks({ account: req.query.account, past: req.query.past === '1', role: req.query.role, assignee: req.query.for,
+      dueBefore: req.query.due_now === '1' ? new Date(Date.now() + 3600000) : undefined });
     res.json(req.query.kind ? rows.filter((t) => t.kind === req.query.kind) : rows);
   }));
   // Re-check the board now (unanswered replies, visits, reminders) instead of waiting for the 10-minute check
@@ -455,9 +461,9 @@ export function buildApp() {
     res.json(await syncBoard());
   }));
   api.post('/tasks', wrap(async (req, res) => {
-    const { account, title, details, dueAt } = req.body || {};
+    const { account, title, details, dueAt, assignee, priority } = req.body || {};
     const s = await manager.resolve(account);
-    const t = await tasks.createTask({ account: s.id, title, details, dueAt, createdBy: 'you' });
+    const t = await tasks.createTask({ account: s.id, title, details, dueAt, createdBy: actorOf(req) === 'you' ? 'you' : 'ai', assignee, priority });
     await act(req, s.id, `Created task #${t.id} "${t.title}"`);
     res.json(t);
   }));

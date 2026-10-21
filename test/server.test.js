@@ -778,7 +778,9 @@ test('pipeline: stages, visit dates, ask-for-date, visit reminder + owner tasks,
   assert.match(rows[1].payload.text, /Bala ji, yaad dila rahe hain: aap .+ ko Zenith Suites/);
   assert.ok(rows.every((r) => r.priority === 5), 'warm leads before bulk (0) and follow-ups (-1)');
   const t = (await call('GET', '/api/tasks?account=hire3')).data.map((x) => x.title);
-  assert.ok(t.some((x) => /^Visit: Bala/.test(x)), 'visit task for the owner');
+  assert.ok(t.some((x) => /^Interview: Bala/.test(x)), 'interview task for the owner');
+  const iv = (await call('GET', '/api/tasks?account=hire3&for=you')).data.find((x) => /^Interview: Bala/.test(x.title));
+  assert.ok(iv && iv.priority && iv.assignee === 'you', 'interviews are a priority for the owner');
   assert.ok(t.some((x) => /^Did Chetan come\?/.test(x)), '"did they come" task');
   // nothing repeats on the next run
   await listsMod.runPipeline();
@@ -1121,6 +1123,59 @@ test('board: candidate replies, visit dates and chat reminders all appear as car
   assert.match((await call('GET', '/api/tasks?kind=reminder')).data.find((t) => t.ref === 'remind:hiring:919800001002@s.whatsapp.net').title, /Reminder: Sagar R — call about joining/);
   await call('PATCH', '/api/accounts/hiring/chats/919800001002@s.whatsapp.net/state', { state: 'open' });
   assert.ok(!(await call('GET', '/api/tasks?kind=reminder')).data.find((t) => t.ref === 'remind:hiring:919800001002@s.whatsapp.net'));
+});
+
+test('board as a shared calendar: follow-ups before the date they gave, owner vs AI cards, priority, scheduled messages', async () => {
+  const store = await import('../src/store.js');
+  const board = await import('../src/board.js');
+  const imp = await call('POST', '/api/lists/import', { account: 'hiring', name: 'Calendar batch', role: 'Chef', members: [{ phone: '9800003001', name: 'Manish K' }, { phone: '9800003002', name: 'Ravi T' }] });
+  const listId = imp.data.list.id;
+  // "I can come after 10 Nov" → follow-up the day before at 10:00 India time, a card for the AI
+  const lists = await import('../src/lists.js');
+  const from = new Date(Date.now() + 20 * 86400000);
+  const fromDay = from.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const r = await call('PATCH', `/api/lists/${listId}/members/9800003001`, { stage: 'interested', availableFrom: `${fromDay}T10:00:00+05:30`, followupNote: 'free after his notice period' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const expect = lists.followupBefore(`${fromDay}T10:00:00+05:30`);
+  assert.equal(new Date(r.data.followup_at).toISOString(), expect.toISOString());
+  assert.equal(expect.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }), '10:00');
+  let fu = (await call('GET', '/api/tasks?kind=followup&for=ai')).data.find((t) => t.ref === `followup:${listId}:919800003001@s.whatsapp.net`);
+  assert.ok(fu, 'follow-up card for the AI');
+  assert.match(fu.title, /^Follow up: Manish K/);
+  assert.match(fu.details, /free after his notice period/);
+  assert.ok(!(await call('GET', '/api/tasks?for=ai&due_now=1')).data.find((t) => t.id === fu.id), 'not due yet');
+  // a chat message now (before the date) does not close it
+  await store.insertMessages('hiring', [{ id: 'CF1', fromMe: true, ts: Math.floor(Date.now() / 1000), chatJid: '919800003001@s.whatsapp.net', type: 'text', body: 'theek hai', forwarded: false }]);
+  assert.ok((await call('GET', '/api/tasks?kind=followup')).data.find((t) => t.id === fu.id), 'early chat keeps the follow-up');
+  // when it comes due and we message them, it is done
+  await call('PATCH', `/api/lists/${listId}/members/9800003001`, { followupAt: new Date(Date.now() - 60000).toISOString() });
+  assert.ok((await call('GET', '/api/tasks?for=ai&due_now=1')).data.find((t) => t.id === fu.id), 'due now → on the AI to-do list');
+  await store.insertMessages('hiring', [{ id: 'CF2', fromMe: true, ts: Math.floor(Date.now() / 1000) + 1, chatJid: '919800003001@s.whatsapp.net', type: 'text', body: 'kab aa sakte hain?', forwarded: false }]);
+  assert.ok(!(await call('GET', '/api/tasks?kind=followup')).data.find((t) => t.id === fu.id), 'followed up → off the board');
+  assert.equal((await query(`SELECT followup_at FROM list_members WHERE list_id = $1 AND jid = '919800003001@s.whatsapp.net'`, [listId]))[0].followup_at, null);
+  // a visit date replaces a pending follow-up; rejection cancels one
+  await call('PATCH', `/api/lists/${listId}/members/9800003002`, { followupAt: new Date(Date.now() + 3 * 86400000).toISOString() });
+  assert.ok((await call('GET', '/api/tasks?kind=followup')).data.find((t) => t.ref === `followup:${listId}:919800003002@s.whatsapp.net`));
+  await call('PATCH', `/api/lists/${listId}/members/9800003002`, { visitAt: new Date(Date.now() + 5 * 86400000).toISOString() });
+  assert.ok(!(await call('GET', '/api/tasks?kind=followup')).data.find((t) => t.ref === `followup:${listId}:919800003002@s.whatsapp.net`), 'visit replaces follow-up');
+  const iv = (await call('GET', '/api/tasks?kind=visit')).data.find((t) => t.ref === `visit:${listId}:919800003002@s.whatsapp.net`);
+  assert.ok(iv.priority && iv.assignee === 'you' && /^Interview: Ravi T/.test(iv.title));
+  // owner to-dos: priority and who; flag/unflag
+  const todo = (await call('POST', '/api/tasks', { account: 'hiring', title: 'Take interview of Ravi', priority: true })).data;
+  assert.equal(todo.assignee, 'you');
+  assert.equal(todo.priority, true);
+  const aiTodo = (await call('POST', '/api/tasks', { account: 'hiring', title: 'Send menu to Ravi', assignee: 'ai' })).data;
+  assert.equal(aiTodo.assignee, 'ai');
+  assert.equal((await call('PATCH', `/api/tasks/${todo.id}`, { priority: false })).data.priority, false);
+  assert.equal((await call('POST', '/api/tasks', { account: 'hiring', title: 'x', assignee: 'boss' })).status >= 400, true);
+  // a single message for later is on the board until it goes out
+  const sched = await call('POST', '/api/send', { account: 'hiring', to: '919800003002', text: 'Kal 11 baje yaad rakhiye', scheduleAt: new Date(Date.now() + 2 * 86400000).toISOString() });
+  assert.ok(sched.status < 300, JSON.stringify(sched.data));
+  const sc = (await call('GET', '/api/tasks?kind=scheduled')).data.find((t) => t.ref === `sched:${sched.data.id}`);
+  assert.ok(sc && /Scheduled: message to/.test(sc.title) && sc.assignee === 'ai', 'scheduled send on the board');
+  await query(`UPDATE outbox SET status = 'rejected' WHERE id = $1`, [sched.data.id]);
+  await board.syncBoard();
+  assert.ok(!(await call('GET', '/api/tasks?kind=scheduled')).data.find((t) => t.ref === `sched:${sched.data.id}`), 'cancelled → off the board');
 });
 
 test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {

@@ -261,6 +261,15 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS role TEXT;
 -- 'visit:<list>:<jid>' (a visit date), 'remind:<account>:<jid>' (a chat reminder). One open card per ref.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ref TEXT;
 CREATE INDEX IF NOT EXISTS tasks_ref ON tasks (ref) WHERE ref IS NOT NULL;
+-- Who does it ('you' = the owner, 'ai' = the AI / hub) and whether it's a must-do (interviews, calls to make)
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority BOOLEAN NOT NULL DEFAULT FALSE;
+UPDATE tasks SET assignee = CASE WHEN kind IN ('reply','bulk') THEN 'ai' ELSE 'you' END,
+  priority = (kind = 'visit' OR title LIKE 'Did % come?%' OR title LIKE 'Call %' OR title LIKE 'Call notes needed%')
+  WHERE assignee IS NULL;
+-- A candidate said "after 10 Nov" / "next week": follow up then (card 'followup:<list>:<jid>' due at followup_at)
+ALTER TABLE list_members ADD COLUMN IF NOT EXISTS followup_at TIMESTAMPTZ;
+ALTER TABLE list_members ADD COLUMN IF NOT EXISTS followup_note TEXT;
 
 -- Sent as a reply to someone who wrote in the last 24 h: goes out at once and isn't counted in the automated cap
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_reply BOOLEAN NOT NULL DEFAULT FALSE;

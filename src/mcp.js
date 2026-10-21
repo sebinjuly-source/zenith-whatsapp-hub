@@ -48,6 +48,16 @@ const safe = (fn) => async (args) => {
   }
 };
 
+/** "YYYY-MM-DD" → 10:00; no timezone given → India time. '' stays '' (clear), undefined stays undefined. */
+const localTime = (v) => {
+  if (v === undefined || v === null) return undefined;
+  let t = String(v).trim();
+  if (!t) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) t += ' 10:00';
+  if (!/[zZ]|[+-]\d\d:?\d\d$/.test(t)) t = t.replace(' ', 'T') + '+05:30';
+  if (isNaN(new Date(t))) throw new Error(`Could not read the date "${v}" — use YYYY-MM-DD HH:MM`);
+  return t;
+};
 const accountArg = z.string().optional().describe('Account id (e.g. "hiring") or its phone number. Omit for the default account.');
 // Meta Cloud API numbers: messages to someone who hasn't written in 24 h must be an approved Meta template.
 const waTemplateArg = z.object({
@@ -337,17 +347,22 @@ function buildServer(playbook = '') {
       idempotency_key: z.string().optional().describe('Optional unique key; retrying with the same key never sends twice'),
       wa_template: waTemplateArg.describe('Meta Cloud API numbers only: send this approved Meta template (required when the person has not written in the last 24 h)'),
       buttons: z.array(z.string()).max(3).optional().describe('Up to 3 tap-to-reply answers, e.g. ["Haan, aaunga","Nahi"] (≤20 chars). Meta numbers show buttons; linked numbers list them as "Reply: …"'),
+      schedule_at: z.string().optional().describe('Send later: "YYYY-MM-DD HH:MM" (India time) or ISO. It shows on the Board as "Scheduled: …" until it goes out. In approve mode the owner still approves it first.'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
       const jid = await resolveChat(s.id, a.to);
+      const scheduledAt = localTime(a.schedule_at) || undefined;
       if (s.isCloud && !a.wa_template) {
         const w = await s.windowFor(jid);
+        if (w.open && scheduledAt && w.closesAt && new Date(scheduledAt) > new Date(w.closesAt)) {
+          return `The 24-hour window with ${jid.split('@')[0]} closes before ${scheduledAt}: free text won't be allowed then. Schedule it with wa_template instead.`;
+        }
         if (!w.open) return `"${s.id}" is a Meta Cloud API number and ${jid.split('@')[0]} ${w.closesAt ? 'last wrote over 24 h ago' : 'has never written'} — free text is not allowed. Use wa_template (see list_meta_templates).`;
       }
       if (a.wa_template) {
         const vars = await import('./templates.js').then((t) => t.contactFields(s.id, jid));
-        const row = await outbox.enqueue({ account: s.id, to: jid, payload: { waTemplate: outbox.fillWaTemplate(a.wa_template, vars) }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key });
+        const row = await outbox.enqueue({ account: s.id, to: jid, payload: { waTemplate: outbox.fillWaTemplate(a.wa_template, vars) }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt });
         if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
         await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} Meta template "${a.wa_template.name}" #${row.id} to ${jid.split('@')[0]}${a.note ? ` — ${a.note}` : ''}`);
         return `${row.status === 'draft' ? 'Draft' : 'Queued'} #${row.id} (Meta template "${a.wa_template.name}"): "${trim(row.payload.text, 200)}"`;
@@ -361,12 +376,13 @@ function buildServer(playbook = '') {
         attachment = attachment || r.payload.attachment;
       }
       const payload = { text, attachment, ...(a.reply_to_message_id ? { replyTo: a.reply_to_message_id } : {}), ...(a.buttons?.length && !attachment ? { buttons: a.buttons } : {}) };
-      const row = await outbox.enqueue({ account: s.id, to: jid, payload, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key });
+      const row = await outbox.enqueue({ account: s.id, to: jid, payload, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt });
       if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
-      await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} message #${row.id} to ${jid.split('@')[0]}${a.note ? ` — ${a.note}` : ''}`);
+      const later = scheduledAt ? ` for ${d(scheduledAt)}` : '';
+      await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} message #${row.id} to ${jid.split('@')[0]}${later}${a.note ? ` — ${a.note}` : ''}`);
       return row.status === 'draft'
-        ? `Draft #${row.id} created for ${jid} — waiting for approval in the dashboard (account "${s.id}" is in approve mode).`
-        : `Queued #${row.id} for ${jid}; it goes out after the random delay, within sending hours and the daily cap.`;
+        ? `Draft #${row.id} created for ${jid}${later} — waiting for approval in the dashboard (account "${s.id}" is in approve mode).`
+        : `Queued #${row.id} for ${jid}${later ? `; it goes out${later}` : '; it goes out after the random delay, within sending hours and the daily cap'}.`;
     },
   );
 
@@ -665,15 +681,19 @@ function buildServer(playbook = '') {
     visit_at: z.string().optional().describe('When they will come (ISO or "YYYY-MM-DD HH:MM", your timezone if no offset); sets stage date_given; "" clears'),
     outcome: z.string().optional().describe('Short reason/summary, e.g. "rejected – asked for money before joining"'),
     notes: z.string().optional(),
+    available_from: z.string().optional().describe('When they said they will be free / can come ("after 10 Nov" → 2026-11-10, "next week" → next Monday). The hub sets a follow-up for the day before at 10:00 and puts "Follow up: X" on the Board.'),
+    follow_up_at: z.string().optional().describe('Exact time to follow up instead ("YYYY-MM-DD HH:MM", India time); "" clears the follow-up'),
+    follow_up_note: z.string().optional().describe('What to follow up about, e.g. "said he can join after his notice ends on 10 Nov"'),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    // "YYYY-MM-DD" alone → 10:00; no timezone given → India time
-    let visitAt = a.visit_at === undefined ? undefined : a.visit_at === '' ? null : a.visit_at.trim();
-    if (visitAt && /^\d{4}-\d{2}-\d{2}$/.test(visitAt)) visitAt += ' 10:00';
-    if (visitAt && !/[zZ]|[+-]\d\d:?\d\d$/.test(visitAt)) visitAt = visitAt.replace(' ', 'T') + '+05:30';
-    const m = await lists.updateMember(l.id, a.phone, { outcome: a.outcome, notes: a.notes, stage: a.stage, visitAt });
-    await ai(l.account_id, `${m.name || m.phone} → ${m.stage || '-'}${m.visit_at ? ' (visit ' + d(m.visit_at) + ')' : ''}${a.outcome ? ' – ' + a.outcome : ''} — ${l.name}`, l.role);
-    const parts = [m.stage && `stage ${m.stage}`, m.visit_at && `visit ${d(m.visit_at)}`, m.outcome && `outcome ${m.outcome}`, m.notes && 'notes saved'].filter(Boolean);
+    const v = localTime(a.visit_at);
+    const f = localTime(a.follow_up_at);
+    const m = await lists.updateMember(l.id, a.phone, {
+      outcome: a.outcome, notes: a.notes, stage: a.stage, visitAt: v === undefined ? undefined : v || null,
+      followupAt: f === undefined ? undefined : f || null, availableFrom: localTime(a.available_from) || undefined, followupNote: a.follow_up_note,
+    });
+    await ai(l.account_id, `${m.name || m.phone} → ${m.stage || '-'}${m.visit_at ? ' (visit ' + d(m.visit_at) + ')' : ''}${m.followup_at ? ' (follow up ' + d(m.followup_at) + ')' : ''}${a.outcome ? ' – ' + a.outcome : ''} — ${l.name}`, l.role);
+    const parts = [m.stage && `stage ${m.stage}`, m.visit_at && `visit ${d(m.visit_at)} (interview on the Board for the owner)`, m.followup_at && `follow-up ${d(m.followup_at)} (on the Board)`, m.outcome && `outcome ${m.outcome}`, m.notes && 'notes saved'].filter(Boolean);
     return `${m.name || m.phone}: ${parts.join(', ') || 'updated'}.`;
   });
 
@@ -746,35 +766,46 @@ function buildServer(playbook = '') {
       `#${t.id}`,
       t.account_id,
       t.status,
+      t.priority ? 'PRIORITY' : null,
+      (t.assignee || 'you') === 'ai' ? 'for AI' : 'for owner',
       trim(t.title, 80),
       t.total ? `sent ${t.sent}/${t.total}${t.drafts ? `, ${t.drafts} awaiting approval` : ''}${t.failed ? `, ${t.failed} failed` : ''}${t.replied ? `, ${t.replied} replied` : ''}` : null,
       t.due_at ? `due ${fmtTime(Math.floor(new Date(t.due_at).getTime() / 1000))}` : null,
       t.details ? `— ${trim(t.details, 160)}` : null,
     ].filter(Boolean).join(' | ');
 
-  tool('list_tasks', 'Show the task board: what each number is doing or will do (bulk sends with progress, follow-ups, visits, to-dos). The hub adds cards by itself: "Reply to X" (a candidate wrote and nobody answered — work these first), "Visit: X" (visit dates), "Reminder" (chat reminders). kind=reply shows only the unanswered candidates. Past tasks only if past=true.', {
+  tool('list_tasks', 'Show the Board — the shared calendar of the owner and the AI. Each card is "for owner" (interviews, calls, approvals; PRIORITY = must do) or "for AI" (replies, follow-ups, scheduled sends). The hub adds cards by itself: "Reply to X" (a candidate wrote, nobody answered — work these first), "Follow up: X" (they said when they will be free; message them when due), "Interview: X" (visit dates, owner), "Scheduled: …" (messages going out later), "Reminder". kind filters one type; for=ai with due_now=true is the AI to-do list right now. Past tasks only if past=true.', {
     account: z.string().optional(), past: z.boolean().optional(), role: z.string().optional(),
-    kind: z.enum(['reply', 'visit', 'reminder', 'bulk', 'todo']).optional(),
+    kind: z.enum(['reply', 'followup', 'visit', 'scheduled', 'reminder', 'bulk', 'todo']).optional(),
+    for: z.enum(['you', 'ai']).optional().describe('"you" = the owner cards, "ai" = the AI cards'),
+    due_now: z.boolean().optional().describe('Only cards due by now (plus 1 hour)'),
   }, async (a) => {
-    let rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role });
+    let rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role, assignee: a.for,
+      dueBefore: a.due_now ? new Date(Date.now() + 3600000) : undefined });
     if (a.kind) rows = rows.filter((t) => t.kind === a.kind);
-    return rows.length ? rows.map((t) => `${taskLine(t)}${t.ref?.startsWith('reply:') ? ` | chat ${t.ref.split(':')[2]} on ${t.account_id}` : ''}`).join('\n') : 'No tasks.';
+    const chatOf = (t) => {
+      const [k, x, j] = String(t.ref || '').split(':');
+      return ['reply', 'remind'].includes(k) ? ` | chat ${j} on ${x}` : ['followup', 'visit'].includes(k) ? ` | chat ${j} on ${t.account_id} | list #${x}` : '';
+    };
+    return rows.length ? rows.map((t) => `${taskLine(t)}${chatOf(t)}`).join('\n') : 'No tasks.';
   });
 
-  tool('create_task', 'Add a card to the task board, e.g. "Follow up tomorrow with the 10 candidates who showed interest". Put the who/what in details so a later session can act on it.', {
-    account: accountArg, title: z.string(), details: z.string().optional(), due: z.string().optional().describe('YYYY-MM-DD or ISO datetime'),
+  tool('create_task', 'Add a card to the Board. for="you" (default) = something the owner must do (call notes needed, take an interview, call someone) — set priority=true for must-dos. for="ai" = something an AI session must do at that time (e.g. "Send Ravi the menu on Friday"). Put who/what/which chat in details so a later session can act on it. For a candidate follow-up prefer update_list_member(available_from / follow_up_at), which keeps the card in step by itself.', {
+    account: accountArg, title: z.string(), details: z.string().optional(), due: z.string().optional().describe('"YYYY-MM-DD HH:MM" (India time) or ISO'),
+    for: z.enum(['you', 'ai']).optional(), priority: z.boolean().optional(),
   }, async (a) => {
     const s = await manager.resolve(a.account);
-    const t = await tasks.createTask({ account: s.id, title: a.title, details: a.details, dueAt: a.due, createdBy: 'ai' });
+    const t = await tasks.createTask({ account: s.id, title: a.title, details: a.details, dueAt: localTime(a.due) || null, createdBy: 'ai', assignee: a.for, priority: a.priority });
     await ai(s.id, `Created task #${t.id} "${t.title}"`);
-    return `Task #${t.id} created on ${s.id}.`;
+    return `Task #${t.id} created on ${s.id} (for ${t.assignee === 'ai' ? 'AI' : 'owner'}${t.priority ? ', priority' : ''}${t.due_at ? `, due ${d(t.due_at)}` : ''}).`;
   });
 
   tool('update_task', 'Move or edit a task card (status: upcoming, in_progress, waiting, done, cancelled). Cancelling also stops its unsent messages.', {
     id: z.number().int(), status: z.enum(['upcoming', 'in_progress', 'waiting', 'done', 'cancelled']).optional(),
     title: z.string().optional(), details: z.string().optional(), due: z.string().optional(),
+    for: z.enum(['you', 'ai']).optional(), priority: z.boolean().optional(),
   }, async (a) => {
-    const t = a.status === 'cancelled' ? await tasks.cancelTask(a.id) : await tasks.updateTask(a.id, { status: a.status, title: a.title, details: a.details, dueAt: a.due });
+    const t = a.status === 'cancelled' ? await tasks.cancelTask(a.id) : await tasks.updateTask(a.id, { status: a.status, title: a.title, details: a.details, dueAt: localTime(a.due), assignee: a.for, priority: a.priority });
     return `Task #${t.id}: ${t.status} — ${t.title}`;
   });
 
