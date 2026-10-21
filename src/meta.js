@@ -97,7 +97,9 @@ export async function dispatch(body) {
       } else if (ch.field === 'phone_number_quality_update' || ch.field === 'account_update' || ch.field === 'phone_number_name_update') {
         const s = findCloudSession(null, entry.id);
         await logMetaEvent(s?.id || null, 'account', { status: ch.field, payload: v });
-        await logEvent(s?.id || null, 'warn', `Meta ${ch.field.replace(/_/g, ' ')}: ${JSON.stringify(v).slice(0, 300)}`);
+        // Routine notices (e.g. webhook settings saved) are info; anything else Meta reports about the account is a warning
+        const routine = v.event === 'WEBHOOK_CONFIG_UPDATED';
+        await logEvent(s?.id || null, routine ? 'info' : 'warn', `Meta ${ch.field.replace(/_/g, ' ')}: ${v.event || ''} ${routine ? '' : JSON.stringify(v).slice(0, 300)}`.trim());
         if (s) await s.refreshHealth().catch(() => {});
       }
     }

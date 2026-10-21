@@ -117,7 +117,9 @@ export class CloudSession extends Session {
       h = await this.refreshHealth();
     }
     if (this.wabaId) {
-      await graph(`${this.wabaId}/subscribed_apps`, { method: 'POST', idempotent: true });
+      // Subscribe only if not already (each subscribe makes Meta send an "account update" alert)
+      const subs = await graph(`${this.wabaId}/subscribed_apps`).catch(() => ({ data: [] }));
+      if (!(subs.data || []).length) await graph(`${this.wabaId}/subscribed_apps`, { method: 'POST', idempotent: true });
       await syncTemplates(this.wabaId).catch((err) => logEvent(this.id, 'warn', `Template sync failed: ${err.message}`));
     }
     await this.ensureAppWebhook().catch((err) => logEvent(this.id, 'warn', `Webhook setup: ${err.message}`));
@@ -135,7 +137,7 @@ export class CloudSession extends Session {
     // health_status needs a newer permission set; fall back to the basic fields if Meta refuses it
     const h = await graph(this.phoneNumberId, { params: { fields: `${base},health_status` } })
       .catch(() => graph(this.phoneNumberId, { params: { fields: base } }));
-    const prev = this.health;
+    const prev = this.health || this.account.cloud?.health; // remembered across restarts, so alerts aren't repeated
     const mh = describeMessagingHealth(h.health_status);
     this.health = {
       displayPhone: h.display_phone_number, verifiedName: h.verified_name, quality: h.quality_rating, nameStatus: h.name_status,

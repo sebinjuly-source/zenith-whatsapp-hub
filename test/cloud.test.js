@@ -40,8 +40,9 @@ fakeGraph.post('/v24.0/111/register', (req, res) => {
   registered = true;
   res.json({ success: true });
 });
-fakeGraph.post('/v24.0/222/subscribed_apps', (req, res) => res.json({ success: true }));
-fakeGraph.get('/v24.0/222/subscribed_apps', (req, res) => res.json({ data: [{ whatsapp_business_api_data: { id: '999', name: 'ZenithWAHub' } }] }));
+let wabaSubscribed = false;
+fakeGraph.post('/v24.0/222/subscribed_apps', (req, res) => { wabaSubscribed = true; res.json({ success: true }); });
+fakeGraph.get('/v24.0/222/subscribed_apps', (req, res) => res.json({ data: wabaSubscribed ? [{ whatsapp_business_api_data: { id: '999', name: 'ZenithWAHub' } }] : [] }));
 fakeGraph.get('/v24.0/222/message_templates', (req, res) => res.json({ data: templates, paging: { cursors: {} } }));
 fakeGraph.post('/v24.0/222/message_templates', (req, res) => {
   templates.push({ id: 'tnew', ...req.body, status: 'PENDING' });
