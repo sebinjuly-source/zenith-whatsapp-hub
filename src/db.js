@@ -289,6 +289,8 @@ CREATE TABLE IF NOT EXISTS wa_templates (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (waba_id, name, language)
 );
+-- Public link of the header image a template was created with: used on every send unless another is given
+ALTER TABLE wa_templates ADD COLUMN IF NOT EXISTS header_link TEXT;
 `;
 
 function makePgDriver() {

@@ -498,11 +498,12 @@ function buildServer(playbook = '') {
     account: accountArg, name: z.string().describe('lowercase_with_underscores'), body: z.string(), examples: z.array(z.string()).optional(),
     category: z.enum(['UTILITY', 'MARKETING']).optional(), language: z.string().optional().describe('Default en'),
     footer: z.string().optional(), buttons: z.array(z.string()).max(3).optional().describe('Quick-reply buttons, e.g. ["Haan, interested","Nahi"]'),
+    header_image_url: z.string().optional().describe('Public JPEG/PNG link for an image header (e.g. <hub>/hiring/chef-hiring.jpg); also used for every send'),
   }, async (a) => {
     const s = await manager.resolve(a.account);
     if (!s.isCloud) return `"${s.id}" is a linked phone number — templates are only for Meta Cloud API numbers.`;
     const t = await import('./wa/cloud-templates.js');
-    const r = await t.createTemplate(s.wabaId, { name: a.name, body: a.body, examples: a.examples || [], category: a.category, language: a.language, footer: a.footer, buttons: a.buttons });
+    const r = await t.createTemplate(s.wabaId, { name: a.name, body: a.body, examples: a.examples || [], category: a.category, language: a.language, footer: a.footer, buttons: a.buttons, headerImage: a.header_image_url ? { url: a.header_image_url } : undefined });
     await ai(s.id, `Submitted Meta template "${r.name}" for review (${r.status || 'pending'})`);
     return `Submitted "${r.name}" (${r.category || a.category || 'UTILITY'}) — status ${r.status || 'PENDING'}. Meta usually decides within minutes; it then appears in list_meta_templates.`;
   });

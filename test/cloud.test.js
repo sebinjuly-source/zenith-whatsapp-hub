@@ -54,6 +54,8 @@ fakeGraph.post('/v24.0/999/subscriptions', (req, res) => {
   res.json({ success: true });
 });
 fakeGraph.post('/v24.0/111/media', (req, res) => res.json({ id: 'UPLOADED1' }));
+fakeGraph.post('/v24.0/999/uploads', (req, res) => res.json({ id: 'upload:SESSION1' }));
+fakeGraph.post('/v24.0/upload:SESSION1', (req, res) => res.json({ h: 'HANDLE-123' }));
 fakeGraph.post('/v24.0/111/messages', (req, res) => {
   const b = req.body;
   if (b.status === 'read') return res.json({ success: true });
@@ -457,4 +459,24 @@ test('prices: estimate before sending, a price on every draft, free replies insi
   assert.match(await mcp('list_outbox', { account: 'api', status: 'draft' }), /Total of these: ₹0\.12/);
   await call('POST', '/api/outbox/reject-selected', { ids: rows.map((r) => r.id) });
   await call('PATCH', '/api/accounts/api', { settings: { aiMode: 'auto' } });
+});
+
+test('image-header template: created with an uploaded handle; every send uses its image unless another is given; {field|fallback}', async () => {
+  const img = `${graphUrl}/file/MEDIA9`;
+  const r = await call('POST', '/api/accounts/api/wa-templates', { name: 'chef_hiring_v2', category: 'MARKETING', headerImage: { url: img },
+    body: 'Namaste {{1}} ji, Indian Cook chahiye. Salary {{2}} per month. – Zenith Suites HR', examples: ['Ravi', 'Rs.21,000-23,000'], buttons: ['Haan, interested', 'Nahi'] });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const created = graphCalls.filter((c) => c.method === 'POST' && c.path === '/v24.0/222/message_templates').at(-1).body;
+  assert.deepEqual(created.components[0], { type: 'HEADER', format: 'IMAGE', example: { header_handle: ['HANDLE-123'] } });
+  templates.find((t) => t.name === 'chef_hiring_v2').status = 'APPROVED';
+  await call('GET', '/api/accounts/api/wa-templates?sync=1');
+  const b = await call('POST', '/api/bulk', { account: 'api', title: 'Chefs v2', waTemplate: { name: 'chef_hiring_v2', params: ['{first_name}', '{salary|Rs.21,000-26,000}'] },
+    recipients: [{ to: '9876500301', name: 'Kiran Rao', salary: 'Rs.24,000-26,000' }, { to: '9876500302', name: 'Mohan' }] });
+  assert.equal(b.status, 200, JSON.stringify(b.data));
+  const rows = await query(`SELECT payload FROM outbox WHERE task_id = $1 ORDER BY id`, [b.data.task.id]);
+  assert.deepEqual(rows.map((x) => x.payload.waTemplate.params[1]), ['Rs.24,000-26,000', 'Rs.21,000-26,000']);
+  await until(async () => (await query(`SELECT count(*)::int n FROM outbox WHERE task_id = $1 AND status = 'sent'`, [b.data.task.id]))[0].n === 2, 10000);
+  const sentT = sentMessages().at(-1).body.template;
+  assert.deepEqual(sentT.components[0], { type: 'header', parameters: [{ type: 'image', image: { link: img } }] });
+  assert.equal(b.data.cost.perMessage, 0.8631);
 });

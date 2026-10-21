@@ -882,7 +882,11 @@ test('new-number limit: hard maximum 45 per rolling 24 h, held in the queue, exi
   const { normalizeSettings, NEW_CHATS_HARD_MAX } = await import('../src/settings.js');
   assert.equal(NEW_CHATS_HARD_MAX, 45);
   assert.equal(normalizeSettings({}).newChatsPer24h, 42, 'default 48 − 6');
-  assert.equal(normalizeSettings({ newChatsPer24h: 99 }).newChatsPer24h, 45, 'can never be set above 45');
+  const prevLimit = manager.get('hiring').account.settings.newChatsPer24h;
+  const saved = await manager.update('hiring', { settings: { newChatsPer24h: 99 } });
+  assert.equal(saved.settings.newChatsPer24h, 45, 'a linked phone can never be set above 45');
+  await manager.update('hiring', { settings: { newChatsPer24h: prevLimit ?? 42 } });
+  assert.equal(normalizeSettings({ newChatsPer24h: 5000 }).newChatsPer24h, 1000, 'Meta numbers: up to Meta tiers, never unlimited');
   await manager.create({ id: 'lim', label: 'Limited' });
   fake('lim');
   await manager.update('lim', { settings: { aiMode: 'auto', newChatsPer24h: 2, delayMinSec: 5, delayMaxSec: 5, anytime: true } });

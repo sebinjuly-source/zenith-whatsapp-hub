@@ -101,12 +101,14 @@ export async function listTasks({ account, past = false, limit = 200, role } = {
 
 /**
  * Personalise "{name}"-style placeholders. vars come from the recipient row (name, plus any extra fields).
- * {name} falls back to "there" so "Hi {name}" never reads "Hi ".
+ * {name} falls back to "there" so "Hi {name}" never reads "Hi ". {field|fallback} uses the fallback when the field
+ * is empty, e.g. {salary|Rs.21,000-26,000}.
  */
 export function fillTemplate(template, vars = {}) {
-  return String(template || '').replace(/\{(\w+)\}/g, (m, key) => {
+  return String(template || '').replace(/\{(\w+)(?:\|([^{}]*))?\}/g, (m, key, fallback) => {
     const v = vars[key] ?? vars[key.toLowerCase()];
     if (v != null && String(v).trim()) return String(v).trim();
+    if (fallback !== undefined) return fallback.trim();
     return key.toLowerCase() === 'name' ? 'there' : '';
   });
 }

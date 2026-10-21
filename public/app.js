@@ -1365,7 +1365,9 @@ ${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel
             f('followupDailyMax', 'Follow-ups per day (max)', h('input', { type: 'number', name: 'followupDailyMax', min: 0, value: s.followupDailyMax }))),
           h('p', { class: 'muted', style: 'margin:-6px 0 12px;font-size:12px' }, 'Follow-ups to people who never replied go out only on days with no first messages to new people, after this time.'),
           sw('anytime', 'Send at any time', 'Day and night, every day. Turn off to use the time window below.'),
-          f('newChatsPer24h', 'New numbers per 24 hours (safety limit)', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 45, value: s.newChatsPer24h }), 'First messages to people this number never chatted with, in any 24 hours — from the AI, bulk, you, scripts and the phone itself. Hard maximum 45 (a number was blocked by WhatsApp after 48 in one day).'),
+          a.provider === 'cloud'
+            ? f('newChatsPer24h', 'New numbers per 24 hours', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 1000, value: s.newChatsPer24h }), 'Meta number: Meta allows 250 new people a day now (more after verification). Keep it lower while quality builds — blocks and reports lower Meta\'s quality rating.')
+            : f('newChatsPer24h', 'New numbers per 24 hours (safety limit)', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 45, value: s.newChatsPer24h }), 'First messages to people this number never chatted with, in any 24 hours — from the AI, bulk, you, scripts and the phone itself. Hard maximum 45 (a number was blocked by WhatsApp after 48 in one day).'),
           f('dailyCap', 'Automated messages per 24 hours', h('input', { type: 'number', name: 'dailyCap', min: 0, value: s.dailyCap }), 'AI, bulk and follow-ups, counted over the last 24 hours. Messages you send yourself are not counted here (new numbers still are, above).'),
           h('div', { class: 'row', style: s.anytime ? 'opacity:.5' : '' },
             f('sendStart', 'Send between', h('input', { type: 'time', name: 'sendStart', value: s.sendStart })),

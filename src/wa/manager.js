@@ -6,7 +6,7 @@ import { query, logEvent } from '../db.js';
 import { Session } from './session.js';
 import { CloudSession } from './cloud.js';
 import { hasAuthState, clearAuthState } from './auth-state.js';
-import { normalizeSettings } from '../settings.js';
+import { normalizeSettings, NEW_CHATS_HARD_MAX } from '../settings.js';
 
 class Manager extends EventEmitter {
   constructor() {
@@ -118,6 +118,8 @@ class Manager extends EventEmitter {
     const s = this.get(id);
     if (isDefault) await query('UPDATE accounts SET is_default = (id = $1)', [id]);
     const merged = settings ? normalizeSettings({ ...s.account.settings, ...settings }) : null;
+    // Linked phones: never above the 45 new numbers a day that got a number blocked (Meta numbers follow Meta's tier).
+    if (merged && !s.isCloud) merged.newChatsPer24h = Math.min(merged.newChatsPer24h, NEW_CHATS_HARD_MAX);
     const rows = await query(
       `UPDATE accounts SET label = COALESCE($2, label), purpose = COALESCE($3, purpose),
          enabled = COALESCE($4, enabled), settings = COALESCE($5, settings)

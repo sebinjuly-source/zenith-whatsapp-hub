@@ -11,7 +11,7 @@ import logger from './logger.js';
 import { manager } from './wa/manager.js';
 import { loadOutgoing } from './media.js';
 import { toJid } from './store.js';
-import { MIN_DELAY_SEC, NEW_CHATS_HARD_MAX, randomDelayMs, insideSendingWindow, afterTime } from './settings.js';
+import { MIN_DELAY_SEC, NEW_CHATS_HARD_MAX, CLOUD_NEW_CHATS_MAX, randomDelayMs, insideSendingWindow, afterTime } from './settings.js';
 import { createTask, refreshTask, fillTemplate, planRecipients } from './tasks.js';
 import { hasAuthState } from './wa/auth-state.js';
 import { getTemplate, contactFields, fieldsIn } from './templates.js';
@@ -396,7 +396,8 @@ export async function newChatsStatus(accountId, settings) {
      WHERE NOT EXISTS (SELECT 1 FROM messages x WHERE x.account_id = $1 AND x.chat_jid = m.chat_jid AND x.ts < m.f)`,
     [accountId, since],
   );
-  const limit = Math.min(NEW_CHATS_HARD_MAX, settings?.newChatsPer24h ?? NEW_CHATS_HARD_MAX);
+  const cloud = manager.sessions.get(accountId)?.isCloud;
+  const limit = Math.min(cloud ? CLOUD_NEW_CHATS_MAX : NEW_CHATS_HARD_MAX, settings?.newChatsPer24h ?? NEW_CHATS_HARD_MAX);
   return { count: r.n, limit, nextFreeAt: r.n >= limit && r.oldest ? new Date((Number(r.oldest) + 24 * 3600) * 1000) : null };
 }
 

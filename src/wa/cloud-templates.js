@@ -7,7 +7,8 @@
  * params are filled per person before sending (bulk / lists).
  */
 import { query } from '../db.js';
-import { graph } from './graph.js';
+import { graph, graphBase, metaToken } from './graph.js';
+import { loadOutgoing } from '../media.js';
 import logger from '../logger.js';
 
 const VAR = /\{\{\s*([\w.]+)\s*\}\}/g;
@@ -44,7 +45,22 @@ export async function syncTemplates(wabaId) {
  * Submit a new template to Meta for review (usually minutes). body uses {{1}}, {{2}} …; examples = one sample value
  * per variable (Meta requires them). buttons: quick-reply texts (max 3). Returns Meta's { id, status, category }.
  */
-export async function createTemplate(wabaId, { name, language = 'en', category = 'UTILITY', body, examples = [], header, footer, buttons = [] }) {
+/**
+ * Meta's resumable upload: a file → "header handle" that a new template with an IMAGE/DOCUMENT header needs as its
+ * example. (Sends later use a public link or media id instead.)
+ */
+async function headerHandle({ buffer, mimetype, fileName }) {
+  const appId = process.env.META_APP_ID || (await graph('app', { params: { fields: 'id' } })).id;
+  const s = await graph(`${appId}/uploads`, { method: 'POST', idempotent: true, params: { file_name: fileName || 'header.jpg', file_length: buffer.length, file_type: mimetype } });
+  const res = await fetch(`${graphBase()}/${s.id}`, {
+    method: 'POST', headers: { Authorization: `OAuth ${metaToken()}`, file_offset: '0', 'Content-Type': mimetype }, body: buffer, signal: AbortSignal.timeout(120000),
+  });
+  const r = await res.json().catch(() => ({}));
+  if (!res.ok || !r.h) throw new Error(`Meta didn't accept the header image: ${r.error?.message || res.status}`);
+  return r.h;
+}
+
+export async function createTemplate(wabaId, { name, language = 'en', category = 'UTILITY', body, examples = [], header, headerImage, footer, buttons = [] }) {
   name = String(name || '').toLowerCase().trim().replace(/[^a-z0-9_]+/g, '_').replace(/^_|_$/g, '');
   if (!name) throw new Error('Template name needed (lowercase letters, digits, _)');
   if (!body?.trim()) throw new Error('Template text needed');
@@ -53,12 +69,21 @@ export async function createTemplate(wabaId, { name, language = 'en', category =
   if (examples.length < vars.length) throw new Error(`Give an example value for each fill-in (${vars.map((v) => `{{${v}}}`).join(', ')})`);
   if (/^\s*\{\{|\}\}\s*[.!?]?\s*$/.test(body)) throw new Error('Meta rejects templates that start or end with a fill-in — add a word before/after it');
   const components = [];
-  if (header) components.push({ type: 'HEADER', format: 'TEXT', text: header });
+  // headerImage: { url } (public link — also used for every send) or { base64, mimetype }
+  let headerLink = null;
+  if (headerImage) {
+    const file = await loadOutgoing(headerImage);
+    if (!/^image\/(jpe?g|png)$/.test(file.mimetype)) throw new Error('Header image must be JPEG or PNG');
+    if (file.buffer.length > 5 * 1024 * 1024) throw new Error('Header image must be under 5 MB');
+    components.push({ type: 'HEADER', format: 'IMAGE', example: { header_handle: [await headerHandle(file)] } });
+    headerLink = headerImage.url || null;
+  } else if (header) components.push({ type: 'HEADER', format: 'TEXT', text: header });
   components.push({ type: 'BODY', text: body, ...(vars.length ? { example: { body_text: [examples.slice(0, vars.length).map(String)] } } : {}) });
   if (footer) components.push({ type: 'FOOTER', text: footer });
   if (buttons.length) components.push({ type: 'BUTTONS', buttons: buttons.slice(0, 3).map((text) => ({ type: 'QUICK_REPLY', text: String(text).slice(0, 25) })) });
   const r = await graph(`${wabaId}/message_templates`, { method: 'POST', idempotent: true, json: { name, language, category: String(category).toUpperCase(), components } });
   await syncTemplates(wabaId).catch(() => {});
+  if (headerLink) await query(`UPDATE wa_templates SET header_link = $4 WHERE waba_id = $1 AND name = $2 AND language = $3`, [wabaId, name, language, headerLink]);
   return { name, language, ...r };
 }
 
@@ -120,7 +145,7 @@ export async function buildTemplateMessage(wabaId, waTemplate) {
     if (!waTemplate.header) throw new Error(`Template "${t.name}" needs the header text`);
     components.push({ type: 'header', parameters: [{ type: 'text', text: String(waTemplate.header) }] });
   } else if (['IMAGE', 'DOCUMENT', 'VIDEO'].includes(d.headerFormat)) {
-    const h = waTemplate.header;
+    const h = waTemplate.header || (t.header_link ? { link: t.header_link } : null); // default: the image it was created with
     const link = typeof h === 'string' ? h : h?.link || h?.url;
     const id = h?.id;
     if (!link && !id) throw new Error(`Template "${t.name}" needs a ${d.headerFormat.toLowerCase()} for its header`);

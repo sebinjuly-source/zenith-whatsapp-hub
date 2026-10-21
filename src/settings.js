@@ -13,6 +13,8 @@ export const MIN_DELAY_SEC = 5;
  */
 export const NEW_CHATS_HARD_MAX = 45;
 export const NEW_CHATS_DEFAULT = 42;
+// Meta Cloud API numbers aren't at risk of the linked-device block; Meta enforces its own tier (250 → 1,000 → …).
+export const CLOUD_NEW_CHATS_MAX = 1000;
 
 export const DEFAULT_SETTINGS = {
   // How messages written by AI agents or campaigns go out: 'approve' = saved as drafts for you to approve,
@@ -68,7 +70,8 @@ export function normalizeSettings(input = {}) {
     typing: !!s.typing,
     anytime: s.anytime !== false,
     dailyCap: clampInt(s.dailyCap, 0, 1000, DEFAULT_SETTINGS.dailyCap),
-    newChatsPer24h: clampInt(s.newChatsPer24h, 0, NEW_CHATS_HARD_MAX, NEW_CHATS_DEFAULT),
+    // Stored up to Meta's own tiers; linked phones are still held to NEW_CHATS_HARD_MAX where it's applied (outbox).
+    newChatsPer24h: clampInt(s.newChatsPer24h, 0, CLOUD_NEW_CHATS_MAX, NEW_CHATS_DEFAULT),
     sendStart: isTime(s.sendStart) ? s.sendStart : DEFAULT_SETTINGS.sendStart,
     sendEnd: isTime(s.sendEnd) ? s.sendEnd : DEFAULT_SETTINGS.sendEnd,
     sendDays: Array.isArray(s.sendDays)
