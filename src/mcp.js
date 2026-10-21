@@ -772,6 +772,7 @@ function buildServer(playbook = '') {
       t.total ? `sent ${t.sent}/${t.total}${t.drafts ? `, ${t.drafts} awaiting approval` : ''}${t.failed ? `, ${t.failed} failed` : ''}${t.replied ? `, ${t.replied} replied` : ''}` : null,
       t.due_at ? `due ${fmtTime(Math.floor(new Date(t.due_at).getTime() / 1000))}` : null,
       t.details ? `— ${trim(t.details, 160)}` : null,
+      t.notes ? `${t.notes} note(s), latest: "${trim(t.last_note, 300)}"` : null,
     ].filter(Boolean).join(' | ');
 
   tool('list_tasks', 'Show the Board — the shared calendar of the owner and the AI. Each card is "for owner" (interviews, calls, approvals; PRIORITY = must do) or "for AI" (replies, follow-ups, scheduled sends). The hub adds cards by itself: "Reply to X" (a candidate wrote, nobody answered — work these first), "Follow up: X" (they said when they will be free; message them when due), "Interview: X" (visit dates, owner), "Scheduled: …" (messages going out later), "Reminder". kind filters one type; for=ai with due_now=true is the AI to-do list right now. Past tasks only if past=true.', {
@@ -805,8 +806,23 @@ function buildServer(playbook = '') {
     title: z.string().optional(), details: z.string().optional(), due: z.string().optional(),
     for: z.enum(['you', 'ai']).optional(), priority: z.boolean().optional(),
   }, async (a) => {
-    const t = a.status === 'cancelled' ? await tasks.cancelTask(a.id) : await tasks.updateTask(a.id, { status: a.status, title: a.title, details: a.details, dueAt: localTime(a.due), assignee: a.for, priority: a.priority });
+    const t = a.status === 'cancelled' ? await tasks.cancelTask(a.id, 'ai') : await tasks.updateTask(a.id, { status: a.status, title: a.title, details: a.details, dueAt: localTime(a.due), assignee: a.for, priority: a.priority, actor: 'ai' });
     return `Task #${t.id}: ${t.status} — ${t.title}`;
+  });
+
+  tool('add_task_note', 'Write a note on a Board card (what was agreed, what you did, what is still open). The owner writes call notes on "Call notes needed" cards the same way — read them with task_history before drafting.', {
+    id: z.number().int(), text: z.string(),
+  }, async (a) => {
+    const t = await tasks.addNote(a.id, a.text, 'ai');
+    return `Note added to task #${t.id} (${t.title}).`;
+  });
+
+  tool('task_history', 'A Board card\'s full history and notes: when it was created, moved, re-dated or closed by the hub and why (e.g. "Done by the hub — a reply went out"), plus every note from the owner or the AI. Use it to read call notes, and to debug "where did this card go?".', {
+    id: z.number().int(),
+  }, async (a) => {
+    const rows = await tasks.taskLog(a.id);
+    if (!rows.length) return 'No history for this task (it may be older than the history feature).';
+    return rows.map((r) => `${d(r.at)} | ${r.actor === 'you' ? 'owner' : r.actor} | ${r.kind === 'note' ? 'NOTE: ' : ''}${r.text}`).join('\n');
   });
 
   tool(

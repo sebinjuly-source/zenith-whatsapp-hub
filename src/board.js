@@ -8,7 +8,7 @@
  * Updated instantly on each event, and re-checked every 10 minutes (syncBoard) so a missed event can't hide anything.
  */
 import { query } from './db.js';
-import { upsertRefTask, closeRefTasks } from './tasks.js';
+import { upsertRefTask, closeRefTasks, logTask } from './tasks.js';
 import config from './config.js';
 
 const CLOSED_STAGES = ['joined', 'not_interested', 'rejected'];
@@ -56,16 +56,19 @@ export async function noteIncoming(accountId, r) {
 export async function noteSent(accountId, jids) {
   const uniq = [...new Set(jids)];
   const refs = uniq.map((j) => `reply:${accountId}:${j}`);
-  const n = await closeRefTasks(refs, 'done');
+  const n = await closeRefTasks(refs, 'done', 'a reply went out');
   if (!uniq.length) return n;
   // A follow-up counts as done when we message them from 12 h before it is due (an earlier chat doesn't close it)
   const due = await query(
-    `SELECT id, ref FROM tasks WHERE kind = 'followup' AND status NOT IN ('done','cancelled') AND due_at <= now() + interval '12 hours'
-       AND split_part(ref, ':', 3) = ANY($1::text[])`,
+    `SELECT t.id, t.ref FROM tasks t WHERE t.kind = 'followup' AND t.status NOT IN ('done','cancelled') AND t.due_at <= now() + interval '12 hours'
+       AND split_part(t.ref, ':', 3) = ANY($1::text[])
+       -- only a message sent from 12 h before it was due counts (not an older one seen again by the re-check)
+       AND EXISTS (SELECT 1 FROM messages x WHERE x.chat_jid = split_part(t.ref, ':', 3) AND x.from_me
+                   AND x.ts >= extract(epoch FROM t.due_at - interval '12 hours'))`,
     [uniq],
   );
   if (due.length) {
-    await closeRefTasks(due.map((t) => t.ref), 'done');
+    await closeRefTasks(due.map((t) => t.ref), 'done', 'follow-up message went out');
     for (const t of due) {
       const [, listId, jid] = t.ref.split(':');
       await query(`UPDATE list_members SET followup_at = NULL WHERE list_id = $1 AND jid = $2 AND followup_at <= now() + interval '12 hours'`, [listId, jid]);
@@ -84,7 +87,7 @@ export async function syncFollowup(list, m) {
       details: `${m.followup_note || 'Said they will be free around then.'} · ${list.name} · +${phone(m.jid)}. Message them to fix the day and time for the interview.`,
     });
   }
-  return closeRefTasks([ref], 'cancelled');
+  return closeRefTasks([ref], 'cancelled', isClosed(m) ? `stage ${m.stage || m.outcome}` : m.stage === 'date_given' && m.visit_at ? 'interview date set instead' : 'follow-up date cleared');
 }
 
 /** Single messages waiting to go out more than 15 minutes from now get a card, so nothing scheduled is invisible. */
@@ -108,7 +111,7 @@ export async function syncScheduled() {
   const open = await query(`SELECT t.ref FROM tasks t WHERE t.ref LIKE 'sched:%' AND t.status NOT IN ('done','cancelled')`);
   for (const t of open) {
     const [o] = await query(`SELECT status, scheduled_at FROM outbox WHERE id = $1`, [Number(t.ref.split(':')[1])]);
-    if (!o || ['sent', 'failed', 'rejected'].includes(o.status)) await closeRefTasks([t.ref], o?.status === 'sent' ? 'done' : 'cancelled');
+    if (!o || ['sent', 'failed', 'rejected'].includes(o.status)) await closeRefTasks([t.ref], o?.status === 'sent' ? 'done' : 'cancelled', o ? `message ${o.status}` : 'message removed');
   }
   return rows.length;
 }
@@ -124,13 +127,13 @@ export async function syncVisit(list, m) {
     });
   }
   const done = ['visited', 'trial', 'selected', 'joined'].includes(m.stage);
-  return closeRefTasks([ref], done ? 'done' : 'cancelled');
+  return closeRefTasks([ref], done ? 'done' : 'cancelled', done ? `stage ${m.stage}` : m?.stage ? `stage ${m.stage}, no visit date` : 'visit date cleared');
 }
 
 /** Chat reminder card (Remind me). */
 export async function syncReminder(accountId, jid, { state, until, note } = {}) {
   const ref = `remind:${accountId}:${jid}`;
-  if (state !== 'snoozed' || !until) return closeRefTasks([ref], 'done');
+  if (state !== 'snoozed' || !until) return closeRefTasks([ref], 'done', `chat ${state || 'reopened'}`);
   const [c] = await query(
     `SELECT COALESCE(NULLIF(ch.name,''), ct.name, ct.notify, $2) AS name FROM (SELECT 1) x
      LEFT JOIN chats ch ON ch.account_id = $1 AND ch.jid = $3 LEFT JOIN contacts ct ON ct.account_id = $1 AND ct.jid = $3`,
@@ -141,6 +144,41 @@ export async function syncReminder(accountId, jid, { state, until, note } = {}) 
     title: `Reminder: ${c?.name || phone(jid)}${note ? ` — ${note}` : ''}`,
     details: `Chat +${phone(jid)} comes back to the inbox on ${when(until)}.`,
   });
+}
+
+/** How the last full re-check went (shown on /health, so a stopped check can't go unnoticed). */
+export const lastSync = { at: null, ok: null, error: null, result: null };
+
+export const FORGOTTEN_DAYS = 3;
+/**
+ * Safety net: someone marked "interested" with no interview date, no follow-up date, no open card and no message
+ * either way for FORGOTTEN_DAYS days gets a follow-up card due now — an interested candidate is never forgotten.
+ * At most 20 per run so a backlog can't flood the Board.
+ */
+export async function catchForgotten() {
+  const rows = await query(
+    `SELECT m.list_id, m.jid, m.name, l.account_id, l.name AS list_name, l.role,
+       (SELECT max(x.ts) FROM messages x WHERE x.chat_jid = m.jid) AS last_ts
+     FROM list_members m JOIN lists l ON l.id = m.list_id
+     WHERE m.stage = 'interested' AND m.followup_at IS NULL AND m.visit_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.status NOT IN ('done','cancelled')
+                       AND t.ref IN ('reply:' || l.account_id || ':' || m.jid, 'followup:' || m.list_id || ':' || m.jid))
+       AND COALESCE((SELECT max(x.ts) FROM messages x WHERE x.chat_jid = m.jid), 0) < extract(epoch FROM now())::bigint - $1::bigint * 86400
+       AND COALESCE(m.stage_at, now() - interval '30 days') < now() - ($1 || ' days')::interval
+     LIMIT 20`,
+    [FORGOTTEN_DAYS],
+  );
+  for (const r of rows) {
+    const days = r.last_ts ? Math.floor((Date.now() / 1000 - Number(r.last_ts)) / 86400) : null;
+    const note = `Interested but no interview date and no message for ${days ?? FORGOTTEN_DAYS}+ days — ask for the day and time`;
+    const [m] = await query(
+      `UPDATE list_members SET followup_at = now(), followup_note = $3, updated_at = now() WHERE list_id = $1 AND jid = $2 RETURNING *`,
+      [r.list_id, r.jid, note],
+    );
+    const t = await syncFollowup({ id: r.list_id, account_id: r.account_id, name: r.list_name, role: r.role }, m);
+    await logTask(t?.id, 'Added by the safety net: interested candidate with nothing planned');
+  }
+  return rows.length;
 }
 
 /**
@@ -168,7 +206,7 @@ export async function syncBoard() {
     const m = await memberOf(l.account_id, l.chat_jid);
     if (!m) continue;
     if (isClosed(m)) {
-      await closeRefTasks([`reply:${l.account_id}:${l.chat_jid}`], 'done');
+      await closeRefTasks([`reply:${l.account_id}:${l.chat_jid}`], 'done', `candidate closed (${m.stage || m.outcome})`);
       continue;
     }
     await replyCard(l.account_id, l.chat_jid, m, l);
@@ -196,9 +234,10 @@ export async function syncBoard() {
   for (const t of openFu) {
     const [, listId, jid] = t.ref.split(':');
     const [m] = await query(`SELECT followup_at FROM list_members WHERE list_id = $1 AND jid = $2`, [listId, jid]);
-    if (!m?.followup_at) await closeRefTasks([t.ref], 'cancelled');
+    if (!m?.followup_at) await closeRefTasks([t.ref], 'cancelled', 'follow-up date cleared');
   }
   const scheduled = await syncScheduled();
+  const forgotten = await catchForgotten();
   // chat reminders
   const snoozed = await query(`SELECT account_id, jid, snoozed_until, snooze_note FROM chats WHERE state = 'snoozed' AND snoozed_until IS NOT NULL`);
   for (const c of snoozed) await syncReminder(c.account_id, c.jid, { state: 'snoozed', until: c.snoozed_until, note: c.snooze_note });
@@ -206,7 +245,9 @@ export async function syncBoard() {
   for (const t of openRem) {
     const [, acc, jid] = t.ref.split(':');
     const [c] = await query(`SELECT state FROM chats WHERE account_id = $1 AND jid = $2`, [acc, jid]);
-    if (c?.state !== 'snoozed') await closeRefTasks([t.ref], 'done');
+    if (c?.state !== 'snoozed') await closeRefTasks([t.ref], 'done', 'chat reopened');
   }
-  return { replyCards: opened, visits: visits.length, followups: fus.length, scheduled, reminders: snoozed.length };
+  const result = { replyCards: opened, visits: visits.length, followups: fus.length, scheduled, forgotten, reminders: snoozed.length };
+  Object.assign(lastSync, { at: new Date().toISOString(), ok: true, error: null, result });
+  return result;
 }

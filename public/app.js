@@ -805,6 +805,25 @@
         await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { priority: !t.priority } });
         viewBoard();
       }) }, t.priority ? '☆ Unflag' : '⭐ Flag');
+      // History + notes (call notes, what was agreed); loads when opened
+      const logBox = h('div', { style: 'font-size:12px;margin-top:6px' });
+      const noteIn = h('textarea', { rows: 2, placeholder: 'Add a note (e.g. call notes: what was discussed)', style: 'width:100%;margin-top:6px' });
+      const loadLog = async () => {
+        const rows = await api(`/api/tasks/${t.id}/log`).catch(() => []);
+        logBox.replaceChildren(...(rows.length ? rows.map((r) => h('div', { style: `padding:3px 0;border-bottom:1px solid var(--line);${r.kind === 'note' ? 'font-weight:600' : ''}` },
+          h('span', { class: 'muted' }, new Date(r.at).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }), ' · ', { you: '👤 You', ai: '🤖 AI', hub: '⚙️ Hub', rule: '⚙️ Rule' }[r.actor] || r.actor, ' · '),
+          r.kind === 'note' ? '📝 ' : '', r.text)) : [h('span', { class: 'muted' }, 'No history yet.')]));
+      };
+      const history = h('details', { style: 'margin-top:6px', ontoggle: (e) => { if (e.target.open) loadLog(); } },
+        h('summary', { class: 'muted', style: 'font-size:12px;cursor:pointer' }, t.notes ? `📝 ${t.notes} note${t.notes > 1 ? 's' : ''} · history` : 'History & notes'),
+        logBox,
+        h('div', {}, noteIn, h('button', { class: 'btn small', onclick: guard(async () => {
+          if (!noteIn.value.trim()) return;
+          await api(`/api/tasks/${t.id}/notes`, { body: { text: noteIn.value } });
+          noteIn.value = '';
+          toast('Note saved');
+          loadLog();
+        }) }, 'Save note')));
       const border = t.priority ? 'border-left:4px solid var(--bad)' : t.kind === 'reply' ? 'border-left:4px solid var(--bad)' : ['visit', 'followup'].includes(t.kind) ? 'border-left:4px solid var(--accent)' : '';
       return h('div', { class: 'card taskcard', style: border },
         h('div', { class: 'row' }, h('b', { class: 'grow' }, t.title),
@@ -812,6 +831,7 @@
           kindTag ? h('span', { class: 'tag' }, kindTag) : null,
           !b.account ? h('span', { class: 'tag' }, labelOf(t.account_id)) : null),
         t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, t.details) : null,
+        t.last_note ? h('p', { style: 'margin:6px 0;font-size:13px;white-space:pre-wrap' }, '📝 ', t.last_note) : null,
         t.total
           ? h('div', { style: 'margin:8px 0' },
               h('div', { class: 'progress' }, h('i', { style: `width:${pct}%` })),
@@ -833,6 +853,7 @@
           t.status !== 'done' && t.status !== 'cancelled' ? flag : null,
           t.status !== 'done' && t.status !== 'cancelled' ? move : null,
         ),
+        history,
       );
     };
     const newTask = h('form', { class: 'card', onsubmit: guard(async (e) => {

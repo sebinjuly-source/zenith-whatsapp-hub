@@ -270,6 +270,16 @@ UPDATE tasks SET assignee = CASE WHEN kind IN ('reply','bulk') THEN 'ai' ELSE 'y
 -- A candidate said "after 10 Nov" / "next week": follow up then (card 'followup:<list>:<jid>' due at followup_at)
 ALTER TABLE list_members ADD COLUMN IF NOT EXISTS followup_at TIMESTAMPTZ;
 ALTER TABLE list_members ADD COLUMN IF NOT EXISTS followup_note TEXT;
+-- Card history (created / moved / closed by the hub and why) and notes from the owner or the AI, e.g. call notes
+CREATE TABLE IF NOT EXISTS task_log (
+  id BIGSERIAL PRIMARY KEY,
+  task_id BIGINT NOT NULL,
+  at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  actor TEXT NOT NULL DEFAULT 'hub',
+  kind TEXT NOT NULL DEFAULT 'event',
+  text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS task_log_task ON task_log (task_id, id);
 
 -- Sent as a reply to someone who wrote in the last 24 h: goes out at once and isn't counted in the automated cap
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_reply BOOLEAN NOT NULL DEFAULT FALSE;

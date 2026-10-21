@@ -1178,6 +1178,55 @@ test('board as a shared calendar: follow-ups before the date they gave, owner vs
   assert.ok(!(await call('GET', '/api/tasks?kind=scheduled')).data.find((t) => t.ref === `sched:${sched.data.id}`), 'cancelled → off the board');
 });
 
+test('card history + notes explain every change; forgotten interested candidates get a follow-up; health shows the board check', async () => {
+  const store = await import('../src/store.js');
+  const board = await import('../src/board.js');
+  const imp = await call('POST', '/api/lists/import', { account: 'hiring', name: 'History batch', role: 'Chef', members: [{ phone: '9800004001', name: 'Arun P' }, { phone: '9800004002', name: 'Dinesh Q' }] });
+  const listId = imp.data.list.id;
+  const now = Math.floor(Date.now() / 1000);
+  // a reply card: created by the hub, closed by the hub with the reason
+  await store.insertMessages('hiring', [{ id: 'HL1', fromMe: false, ts: now - 50, chatJid: '919800004001@s.whatsapp.net', type: 'text', body: 'Interested', forwarded: false }]);
+  await board.syncBoard();
+  const card = (await call('GET', '/api/tasks?kind=reply')).data.find((t) => t.ref === 'reply:hiring:919800004001@s.whatsapp.net');
+  assert.ok(card);
+  // the owner writes call notes on it; the AI sees the latest note in the list
+  assert.equal((await call('POST', `/api/tasks/${card.id}/notes`, { text: 'Spoke on phone: can come Sunday 11 am' })).status, 200);
+  assert.equal((await call('POST', `/api/tasks/${card.id}/notes`, { text: '  ' })).status >= 400, true, 'empty note refused');
+  const listed = (await call('GET', '/api/tasks?kind=reply')).data.find((t) => t.id === card.id);
+  assert.equal(listed.notes, 1);
+  assert.match(listed.last_note, /Sunday 11 am/);
+  await call('PATCH', `/api/tasks/${card.id}`, { priority: true });
+  await store.insertMessages('hiring', [{ id: 'HL2', fromMe: true, ts: now - 10, chatJid: '919800004001@s.whatsapp.net', type: 'text', body: 'Sunday 11 confirmed', forwarded: false }]);
+  const log = (await call('GET', `/api/tasks/${card.id}/log`)).data;
+  const texts = log.map((r) => r.text);
+  assert.equal(texts[0], 'Created by the hub');
+  assert.ok(log.find((r) => r.kind === 'note' && /Sunday 11 am/.test(r.text)));
+  assert.ok(texts.includes('Marked priority'));
+  assert.ok(texts.some((x) => /Done by the hub — a reply went out/.test(x)), 'closure says why: ' + texts.join(' | '));
+  // safety net: interested, nothing planned, silent for 3+ days → follow-up card due now (only once)
+  await call('PATCH', `/api/lists/${listId}/members/9800004002`, { stage: 'interested' });
+  await query(`UPDATE list_members SET stage_at = now() - interval '5 days' WHERE list_id = $1 AND jid = '919800004002@s.whatsapp.net'`, [listId]);
+  await store.insertMessages('hiring', [{ id: 'HL3', fromMe: true, ts: now - 5 * 86400, chatJid: '919800004002@s.whatsapp.net', type: 'text', body: 'kab aa sakte hain?', forwarded: false }]);
+  await query(`UPDATE tasks SET status = 'done', completed_at = now() WHERE ref = 'reply:hiring:919800004002@s.whatsapp.net'`);
+  const r1 = await board.syncBoard();
+  assert.ok(r1.forgotten >= 1);
+  const fu = (await call('GET', '/api/tasks?for=ai&due_now=1')).data.find((t) => t.ref === `followup:${listId}:919800004002@s.whatsapp.net`);
+  assert.ok(fu, 'forgotten candidate is back on the board');
+  assert.match(fu.details, /no interview date/);
+  assert.ok((await call('GET', `/api/tasks/${fu.id}/log`)).data.some((r) => /safety net/.test(r.text)));
+  await board.syncBoard();
+  assert.equal((await query(`SELECT count(*)::int n FROM tasks WHERE ref = $1`, [`followup:${listId}:919800004002@s.whatsapp.net`]))[0].n, 1, 'not added twice');
+  // a recently interested candidate is left alone
+  await call('PATCH', `/api/lists/${listId}/members/9800004001`, { stage: 'interested' });
+  await board.syncBoard();
+  assert.ok(!(await call('GET', '/api/tasks?kind=followup')).data.find((t) => t.ref === `followup:${listId}:919800004001@s.whatsapp.net`));
+  // health: the board check and the database are reported
+  const hl = (await call('GET', '/health')).data;
+  assert.equal(hl.dbOk, true);
+  assert.equal(hl.board.ok, true);
+  assert.equal(hl.board.late, false);
+});
+
 test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {
   const s = manager.get('hiring');
   const t0 = Date.now() - 600000;

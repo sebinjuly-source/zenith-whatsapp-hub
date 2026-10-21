@@ -295,7 +295,7 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
   if (['joined', 'not_interested', 'rejected'].includes(m.stage) || /^\s*(rejected|not[\s-]?interested|hired|joined|do[\s-]?not[\s-]?contact)/i.test(m.outcome || '')) {
     const { closeRefTasks } = await import('./tasks.js');
     const accs = await query(`SELECT DISTINCT account_id FROM messages WHERE chat_jid = $1`, [jid]);
-    await closeRefTasks(accs.map((a) => `reply:${a.account_id}:${jid}`), 'done').catch(() => {});
+    await closeRefTasks(accs.map((a) => `reply:${a.account_id}:${jid}`), 'done', `candidate closed (${m.stage || m.outcome})`).catch(() => {});
   }
   return m;
 }

@@ -66,15 +66,22 @@ export function buildApp() {
   app.use(express.json({ limit: '30mb', verify: (req, res, buf) => { if (req.url.startsWith('/meta/')) req.rawBody = buf; } }));
   app.use(cookieParser());
 
-  app.get('/health', (req, res) =>
+  // Always 200 (Render restarts on a failing health check); problems are reported in the body
+  app.get('/health', async (req, res) => {
+    const { lastSync } = await import('./board.js');
+    const dbOk = await Promise.race([query('SELECT 1').then(() => true), new Promise((r) => setTimeout(() => r(false), 5000))]).catch(() => false);
+    const stale = !lastSync.at || Date.now() - new Date(lastSync.at).getTime() > 25 * 60000;
     res.json({
       ok: true,
       db: dbKind(),
+      dbOk,
       version: VERSION,
       memoryMb: Math.round(process.memoryUsage().rss / 1048576), // Render free plan: 512 MB
       accounts: manager.list().map((a) => ({ id: a.id, status: a.status })),
-    }),
-  );
+      // the 10-minute Board re-check: when it last ran and how it went
+      board: { ...lastSync, late: stale },
+    });
+  });
 
   app.post('/login', (req, res) => {
     if (req.body?.key !== config.apiKey) return res.status(401).json({ error: 'Wrong key' });
@@ -467,8 +474,14 @@ export function buildApp() {
     await act(req, s.id, `Created task #${t.id} "${t.title}"`);
     res.json(t);
   }));
+  // A card's history (what happened and why) and its notes
+  api.get('/tasks/:id/log', wrap(async (req, res) => res.json(await tasks.taskLog(req.params.id))));
+  api.post('/tasks/:id/notes', wrap(async (req, res) => {
+    const t = await tasks.addNote(req.params.id, req.body?.text, actorOf(req) === 'you' ? 'you' : 'ai');
+    res.json({ ok: true, id: t.id });
+  }));
   api.patch('/tasks/:id', wrap(async (req, res) => {
-    const t = await tasks.updateTask(req.params.id, req.body || {});
+    const t = await tasks.updateTask(req.params.id, { ...(req.body || {}), actor: actorOf(req) === 'you' ? 'you' : 'ai' });
     await act(req, t.account_id, `Updated task #${t.id} "${t.title}"${req.body?.status ? ` → ${t.status}` : ''}`);
     res.json(t);
   }));

@@ -8,6 +8,27 @@ import { toJid } from './store.js';
 
 export const COLUMNS = ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'];
 
+const LABEL = { upcoming: 'Upcoming', in_progress: 'In progress', waiting: 'Waiting for approval', done: 'Done', cancelled: 'Cancelled' };
+
+/** One line in a card's history. Never throws: history must not break the action it records. */
+export async function logTask(taskId, text, { actor = 'hub', kind = 'event' } = {}) {
+  if (!taskId || !text) return;
+  await query('INSERT INTO task_log (task_id, actor, kind, text) VALUES ($1,$2,$3,$4)', [taskId, actor, kind, String(text).slice(0, 2000)]).catch(() => {});
+}
+
+/** A note on a card (call notes, what was agreed) — from the owner ('you') or the AI. */
+export async function addNote(taskId, text, actor = 'you') {
+  if (!String(text || '').trim()) throw new Error('Write the note first');
+  const [t] = await query('UPDATE tasks SET updated_at = now() WHERE id = $1 RETURNING id, title', [taskId]);
+  if (!t) throw new Error('Task not found');
+  await logTask(t.id, String(text).trim(), { actor, kind: 'note' });
+  return t;
+}
+
+export async function taskLog(taskId) {
+  return query('SELECT at, actor, kind, text FROM task_log WHERE task_id = $1 ORDER BY id', [taskId]);
+}
+
 /** Recompute an auto task's column from its messages. */
 export async function refreshTask(taskId) {
   if (!taskId) return;
@@ -23,12 +44,13 @@ export async function refreshTask(taskId) {
   );
   if (!c.total) return;
   const status = c.drafts ? 'waiting' : c.active ? 'in_progress' : c.later ? 'upcoming' : 'done';
-  await query(
+  const moved = await query(
     `UPDATE tasks SET status = $2, updated_at = now(),
        completed_at = CASE WHEN $2 = 'done' THEN COALESCE(completed_at, now()) ELSE NULL END
-     WHERE id = $1 AND status <> $2`,
+     WHERE id = $1 AND status <> $2 RETURNING id`,
     [taskId, status],
   );
+  if (moved.length) await logTask(taskId, `${LABEL[status]} (from its messages: ${c.total} total, ${c.drafts} to approve)`);
 }
 
 export const ASSIGNEES = ['you', 'ai'];
@@ -46,6 +68,7 @@ export async function createTask({ account, title, details, kind = 'todo', dueAt
      VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8,$9,$10) RETURNING *`,
     [account, title.trim(), details || null, kind, dueAt || null, createdBy, idemKey ? String(idemKey) : null, role, who(assignee) || (kind === 'bulk' ? 'ai' : 'you'), !!priority],
   );
+  await logTask(row.id, 'Created', { actor: createdBy });
   return row;
 }
 
@@ -54,8 +77,11 @@ export async function createTask({ account, title, details, kind = 'todo', dueAt
  * Reopens nothing that was done — a new event makes a new card.
  */
 export async function upsertRefTask(ref, { account, title, details, kind = 'todo', dueAt = null, role = null, createdBy = 'rule', assignee = 'you', priority = false }) {
-  const [open] = await query(`SELECT id FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled') ORDER BY id DESC LIMIT 1`, [ref]);
+  const [open] = await query(`SELECT id, due_at FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled') ORDER BY id DESC LIMIT 1`, [ref]);
   if (open) {
+    const was = open.due_at ? new Date(open.due_at).getTime() : null;
+    const now = dueAt ? new Date(dueAt).getTime() : null;
+    if (was !== now) await logTask(open.id, `Due ${now ? new Date(now).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : 'cleared'}`);
     const [row] = await query(
       `UPDATE tasks SET title = $2, details = $3, due_at = $4, account_id = $5, role = COALESCE($6, role), assignee = $7, priority = $8, updated_at = now()
        WHERE id = $1 RETURNING *`,
@@ -68,11 +94,12 @@ export async function upsertRefTask(ref, { account, title, details, kind = 'todo
      VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8,$9,$10) RETURNING *`,
     [account, title, details || null, kind, dueAt, createdBy, role, ref, assignee, !!priority],
   );
+  await logTask(row.id, 'Created by the hub');
   return row;
 }
 
 /** Close the open card(s) for these refs (status done or cancelled). */
-export async function closeRefTasks(refs, status = 'done') {
+export async function closeRefTasks(refs, status = 'done', reason = '') {
   const list = (Array.isArray(refs) ? refs : [refs]).filter(Boolean);
   if (!list.length) return 0;
   const rows = await query(
@@ -80,11 +107,13 @@ export async function closeRefTasks(refs, status = 'done') {
      WHERE ref = ANY($1::text[]) AND status NOT IN ('done','cancelled') RETURNING id`,
     [list, status],
   );
+  for (const r of rows) await logTask(r.id, `${LABEL[status]} by the hub${reason ? ` — ${reason}` : ''}`);
   return rows.length;
 }
 
-export async function updateTask(id, { title, details, status, dueAt, assignee, priority }) {
+export async function updateTask(id, { title, details, status, dueAt, assignee, priority, actor = 'you' }) {
   if (status && !COLUMNS.includes(status)) throw new Error(`Status must be one of ${COLUMNS.join(', ')}`);
+  const [before] = await query('SELECT status, due_at, priority, assignee FROM tasks WHERE id = $1', [id]);
   const [row] = await query(
     `UPDATE tasks SET title = COALESCE($2, title), details = COALESCE($3, details), status = COALESCE($4, status),
        due_at = CASE WHEN $5::text IS NULL THEN due_at WHEN $5 = '' THEN NULL ELSE $5::timestamptz END,
@@ -95,13 +124,22 @@ export async function updateTask(id, { title, details, status, dueAt, assignee, 
     [id, title ?? null, details ?? null, status ?? null, dueAt === undefined ? null : dueAt || '', who(assignee), priority == null ? null : !!priority],
   );
   if (!row) throw new Error('Task not found');
+  const changes = [
+    before && row.status !== before.status && `Moved to ${LABEL[row.status]}`,
+    before && row.priority !== before.priority && (row.priority ? 'Marked priority' : 'Priority removed'),
+    before && (row.assignee || 'you') !== (before.assignee || 'you') && `Now for ${row.assignee === 'ai' ? 'the AI' : 'the owner'}`,
+    before && String(row.due_at || '') !== String(before.due_at || '') && (row.due_at ? `Due ${new Date(row.due_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })}` : 'Due date removed'),
+    title && 'Title edited',
+    details && 'Details edited',
+  ].filter(Boolean);
+  if (changes.length) await logTask(row.id, changes.join(' · '), { actor });
   return row;
 }
 
 /** Cancel a task and everything it hasn't sent yet. */
-export async function cancelTask(id) {
+export async function cancelTask(id, actor = 'you') {
   await query(`UPDATE outbox SET status = 'rejected' WHERE task_id = $1 AND status IN ('draft','queued')`, [id]);
-  return updateTask(id, { status: 'cancelled' });
+  return updateTask(id, { status: 'cancelled', actor });
 }
 
 export async function listTasks({ account, past = false, limit = 200, role, assignee, dueBefore } = {}) {
@@ -128,8 +166,12 @@ export async function listTasks({ account, past = false, limit = 200, role, assi
   return query(
     `SELECT t.*,
        COALESCE(o.total, 0) AS total, COALESCE(o.sent, 0) AS sent, COALESCE(o.failed, 0) AS failed,
-       COALESCE(o.drafts, 0) AS drafts, COALESCE(o.pending, 0) AS pending, o.next_at, o.replied
+       COALESCE(o.drafts, 0) AS drafts, COALESCE(o.pending, 0) AS pending, o.next_at, o.replied,
+       n.notes, n.last_note
      FROM tasks t
+     LEFT JOIN LATERAL (
+       SELECT count(*)::int AS notes, (array_agg(l.text ORDER BY l.id DESC))[1] AS last_note
+       FROM task_log l WHERE l.task_id = t.id AND l.kind = 'note') n ON TRUE
      LEFT JOIN LATERAL (
        SELECT count(*)::int AS total,
          count(*) FILTER (WHERE x.status = 'sent')::int AS sent,
