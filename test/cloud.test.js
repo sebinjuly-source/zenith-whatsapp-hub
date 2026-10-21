@@ -32,13 +32,16 @@ fakeGraph.use((req, res, next) => {
 fakeGraph.get('/v24.0/111', (req, res) => res.json({
   display_phone_number: '+91 98801 39926', verified_name: 'Zenith Suites', quality_rating: 'GREEN', name_status: 'APPROVED',
   status: registered ? 'CONNECTED' : 'PENDING', platform_type: registered ? 'CLOUD_API' : 'NOT_APPLICABLE', messaging_limit_tier: 'TIER_250', id: '111',
+  ...(String(req.query.fields).includes('health_status') ? { health_status: healthStatus } : {}),
 }));
+let healthStatus = { can_send_message: 'AVAILABLE', entities: [{ entity_type: 'PHONE_NUMBER', id: '111', can_send_message: 'AVAILABLE' }] };
 fakeGraph.post('/v24.0/111/register', (req, res) => {
   if (req.body.pin !== '123456') return res.status(400).json({ error: { code: 133005, message: 'PIN mismatch' } });
   registered = true;
   res.json({ success: true });
 });
 fakeGraph.post('/v24.0/222/subscribed_apps', (req, res) => res.json({ success: true }));
+fakeGraph.get('/v24.0/222/subscribed_apps', (req, res) => res.json({ data: [{ whatsapp_business_api_data: { id: '999', name: 'ZenithWAHub' } }] }));
 fakeGraph.get('/v24.0/222/message_templates', (req, res) => res.json({ data: templates, paging: { cursors: {} } }));
 fakeGraph.post('/v24.0/222/message_templates', (req, res) => {
   templates.push({ id: 'tnew', ...req.body, status: 'PENDING' });
@@ -47,7 +50,7 @@ fakeGraph.post('/v24.0/222/message_templates', (req, res) => {
 fakeGraph.get('/v24.0/app', (req, res) => res.json({ id: '999' }));
 fakeGraph.get('/v24.0/999/subscriptions', (req, res) => res.json({ data: appSubscribed ? [appSubscribed] : [] }));
 fakeGraph.post('/v24.0/999/subscriptions', (req, res) => {
-  appSubscribed = { object: req.query.object, callback_url: req.query.callback_url, active: true, fields: [{ name: req.query.fields }] };
+  appSubscribed = { object: req.query.object, callback_url: req.query.callback_url, active: true, fields: String(req.query.fields).split(',').map((name) => ({ name })) };
   res.json({ success: true });
 });
 fakeGraph.post('/v24.0/111/media', (req, res) => res.json({ id: 'UPLOADED1' }));
@@ -377,4 +380,53 @@ test('submitting a new Meta template: checked first, sent with examples and butt
   assert.deepEqual(sentT.components[1].buttons.map((b) => b.text), ['Haan, interested', 'Nahi']);
   const list = await call('GET', '/api/accounts/api/wa-templates');
   assert.equal(list.data.find((t) => t.name === 'job_followup').status, 'PENDING');
+});
+
+test('health check: Meta says LIMITED because of payment → shown plainly, with the reason and what still works', async () => {
+  healthStatus = { can_send_message: 'LIMITED', entities: [
+    { entity_type: 'PHONE_NUMBER', id: '111', can_send_message: 'AVAILABLE' },
+    { entity_type: 'WABA', id: '222', can_send_message: 'LIMITED', errors: [{ error_code: 141006, error_description: 'There is an error with the payment method.', possible_solution: 'Add a valid payment method in WhatsApp Manager.' }] },
+  ] };
+  const r = await call('GET', '/api/accounts/api/meta-health');
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.status, 'degraded');
+  const can = r.data.checks.find((c) => c.name === 'Can send messages (Meta)');
+  assert.match(can.detail, /WhatsApp account: limited — There is an error with the payment method.*replies within 24 h still work/);
+  assert.ok(r.data.checks.find((c) => c.name === 'App webhook points to the hub').ok);
+  assert.ok(r.data.checks.find((c) => c.name === 'Last event from Meta').ok);
+  const acc = await mcp('list_accounts');
+  assert.match(acc, /CAN SEND: LIMITED/);
+  const ev = await query(`SELECT text FROM events WHERE account_id = 'api' AND text LIKE 'Meta says this number can send%' ORDER BY id DESC LIMIT 1`);
+  assert.match(ev[0].text, /LIMITED/);
+  healthStatus = { can_send_message: 'AVAILABLE', entities: [] };
+  assert.match(await mcp('meta_health_check', { account: 'api' }), /^api: (HEALTHY|DEGRADED)/);
+});
+
+test('timeline: one message and one person, with Meta\'s billing category and failure reasons', async () => {
+  await hook({ statuses: [{ id: 'wamid.T1', status: 'sent', timestamp: String(now()), recipient_id: '919876500055', pricing: { billable: true, category: 'marketing', pricing_model: 'PMP' } }] });
+  await hook({ statuses: [{ id: 'wamid.T1', status: 'failed', timestamp: String(now()), recipient_id: '919876500055', errors: [{ code: 131049, title: 'held back' }] }] });
+  const t = await mcp('message_timeline', { account: 'api', q: '9876500055' });
+  assert.match(t, /status sent .*marketing \(billable\)/);
+  assert.match(t, /status failed .*131049/);
+  const byId = await call('GET', '/api/accounts/api/meta-timeline?q=wamid.T1');
+  assert.equal(byId.data.events.length, 2);
+  const health = await call('GET', '/api/accounts/api/meta-health');
+  assert.match(health.data.checks.find((c) => c.name === 'Billable messages (14 days)').detail, /1 marketing/);
+});
+
+test('tap-to-reply buttons inside the window; WEBP image goes as a document; linked numbers list the answers', async () => {
+  let r = await call('POST', '/api/send', { account: 'api', to: '9876500001', text: 'Kya aap Thursday aa sakte hain?', buttons: ['Haan, aaunga', 'Nahi'] });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  let m = sentMessages().at(-1).body;
+  assert.equal(m.type, 'interactive');
+  assert.deepEqual(m.interactive.action.buttons.map((b) => b.reply.title), ['Haan, aaunga', 'Nahi']);
+  // their tap comes back as a button reply
+  await hook({ messages: [{ from: '919876500001', id: 'wamid.TAP', timestamp: String(now()), type: 'interactive', interactive: { type: 'button_reply', button_reply: { id: 'b1', title: 'Haan, aaunga' } } }] });
+  const [tap] = await query(`SELECT body FROM messages WHERE account_id = 'api' AND id = 'wamid.TAP'`);
+  assert.equal(tap.body, 'Haan, aaunga');
+  r = await call('POST', '/api/send', { account: 'api', to: '9876500001', attachment: { base64: Buffer.from('RIFFxxxxWEBP').toString('base64'), fileName: 'dish.webp', mimetype: 'image/webp', as: 'image' } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  m = sentMessages().at(-1).body;
+  assert.equal(m.type, 'document');
+  assert.equal(m.document.filename, 'dish.webp');
 });

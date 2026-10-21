@@ -17,11 +17,39 @@ import { refreshTask } from '../tasks.js';
 import { postWebhook } from '../notify.js';
 
 const WINDOW_SEC = 24 * 3600;
+// Events the hub wants from Meta: messages + statuses, template approvals, quality and account alerts.
+const WEBHOOK_FIELDS = ['messages', 'message_template_status_update', 'phone_number_quality_update', 'account_update'];
 const STATUS = { sent: 2, delivered: 3, read: 4 }; // same scale as linked numbers (0 failed … 4 read)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jidOf = (waId) => `${String(waId).replace(/\D/g, '')}@s.whatsapp.net`;
 
 export const cloudConfigured = () => !!metaToken();
+
+/** Keep what Meta told us (14 days) so "why didn't X get it?" has an answer. Never throws. */
+export async function logMetaEvent(accountId, kind, { wamid = null, peer = null, status = null, payload = {} } = {}) {
+  try {
+    await query(`INSERT INTO meta_events (account_id, kind, wamid, peer, status, payload) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [accountId, kind, wamid, peer ? String(peer).replace(/@.*/, '') : null, status, JSON.stringify(payload)]);
+    if (Math.random() < 0.01) await query(`DELETE FROM meta_events WHERE created_at < now() - interval '14 days'`);
+  } catch {
+    /* debugging aid only */
+  }
+}
+
+/** Meta's "can this number send?" in plain words, from health_status (AVAILABLE / LIMITED / BLOCKED + reasons). */
+export function describeMessagingHealth(hs) {
+  if (!hs) return null;
+  const names = { PHONE_NUMBER: 'Phone number', WABA: 'WhatsApp account', BUSINESS: 'Business portfolio', APP: 'App', MESSAGE_TEMPLATE: 'Template' };
+  const rank = (e) => (e.can_send_message === 'BLOCKED' ? 0 : e.can_send_message === 'LIMITED' ? 1 : 2);
+  const issues = (hs.entities || []).filter((e) => e.can_send_message && e.can_send_message !== 'AVAILABLE').sort((a, b) => rank(a) - rank(b))
+    .map((e) => {
+      const why = e.additional_info?.length ? e.additional_info.join(' ')
+        : e.errors?.length ? [e.errors[0].error_description, e.errors[0].possible_solution].filter(Boolean).join(' — ') : 'see WhatsApp Manager';
+      const payment = /payment/i.test(why) ? ' (templates to new people are blocked; replies within 24 h still work)' : '';
+      return `${names[e.entity_type] || e.entity_type}: ${e.can_send_message.toLowerCase()} — ${why}${payment}`;
+    });
+  return { canSend: hs.can_send_message || 'UNKNOWN', issues };
+}
 
 export class CloudSession extends Session {
   get isCloud() {
@@ -103,20 +131,100 @@ export class CloudSession extends Session {
 
   /** Number health from Meta: quality, name approval, messaging tier. Saved so the dashboard can show it. */
   async refreshHealth() {
-    const h = await graph(this.phoneNumberId, {
-      params: { fields: 'display_phone_number,verified_name,quality_rating,name_status,code_verification_status,status,platform_type,messaging_limit_tier,throughput' },
-    });
+    const base = 'display_phone_number,verified_name,quality_rating,name_status,code_verification_status,status,platform_type,messaging_limit_tier,throughput';
+    // health_status needs a newer permission set; fall back to the basic fields if Meta refuses it
+    const h = await graph(this.phoneNumberId, { params: { fields: `${base},health_status` } })
+      .catch(() => graph(this.phoneNumberId, { params: { fields: base } }));
     const prev = this.health;
+    const mh = describeMessagingHealth(h.health_status);
     this.health = {
       displayPhone: h.display_phone_number, verifiedName: h.verified_name, quality: h.quality_rating, nameStatus: h.name_status,
-      status: h.status, platform: h.platform_type, tier: h.messaging_limit_tier, throughput: h.throughput?.level, checkedAt: new Date().toISOString(),
+      status: h.status, platform: h.platform_type, tier: h.messaging_limit_tier, throughput: h.throughput?.level,
+      canSend: mh?.canSend || null, issues: mh?.issues || [], checkedAt: new Date().toISOString(),
     };
     await query(`UPDATE accounts SET cloud = jsonb_set(cloud, '{health}', $2::jsonb) WHERE id = $1`, [this.id, JSON.stringify(this.health)]);
     if (prev?.quality && prev.quality !== this.health.quality) {
       await logEvent(this.id, this.health.quality === 'RED' ? 'error' : 'warn', `Meta quality rating changed: ${prev.quality} → ${this.health.quality}`);
     }
+    if (mh && prev?.canSend !== mh.canSend && (prev?.canSend || mh.canSend !== 'AVAILABLE')) {
+      await logEvent(this.id, mh.canSend === 'AVAILABLE' ? 'info' : 'warn', `Meta says this number can send: ${mh.canSend}${mh.issues.length ? ' — ' + mh.issues.join('; ') : ''}`);
+    }
     this.emit('change', this.info());
     return h;
+  }
+
+  /**
+   * Full health check (the checks Kapso's observe-whatsapp runs, done directly against Meta): token and number
+   * access, registration, messaging health (AVAILABLE/LIMITED/BLOCKED + why), name, quality, WABA and app webhook
+   * subscriptions, last event received, templates, failures and billable messages. Each check: { name, ok, level, detail }.
+   */
+  async healthCheck() {
+    const checks = [];
+    const add = (name, ok, detail, level = ok ? 'ok' : 'bad') => checks.push({ name, ok, level, detail });
+    let h = null;
+    try {
+      h = await this.refreshHealth();
+      add('Token and number access', true, `Meta answers for +${String(h.display_phone_number || '').replace(/\D/g, '')}`);
+    } catch (err) {
+      add('Token and number access', false, err.message);
+      return { status: 'unhealthy', checks, checkedAt: new Date().toISOString() };
+    }
+    const c = this.health;
+    add('Registered on the Cloud API', c.platform === 'CLOUD_API' && c.status === 'CONNECTED', `${c.platform || '?'} / ${c.status || '?'}`);
+    if (c.canSend) add('Can send messages (Meta)', c.canSend === 'AVAILABLE', c.canSend === 'AVAILABLE' ? 'Available' : `${c.canSend}: ${c.issues.join('; ')}`, c.canSend === 'BLOCKED' ? 'bad' : c.canSend === 'AVAILABLE' ? 'ok' : 'warn');
+    add('Display name', c.nameStatus === 'APPROVED' || c.nameStatus === 'AVAILABLE_WITHOUT_REVIEW', `"${c.verifiedName}" — ${String(c.nameStatus || '?').toLowerCase().replace(/_/g, ' ')}`, 'warn');
+    add('Quality rating', c.quality !== 'RED', c.quality || 'unknown', c.quality === 'RED' ? 'bad' : c.quality === 'YELLOW' ? 'warn' : 'ok');
+    add('Daily limit (new people)', true, c.tier || 'unknown');
+    if (this.wabaId) {
+      const subs = await graph(`${this.wabaId}/subscribed_apps`).catch((e) => ({ error: e.message }));
+      add('WhatsApp account sends events to the app', !subs.error && (subs.data || []).length > 0, subs.error || `${(subs.data || []).length} app(s) subscribed`);
+    }
+    const secret = process.env.META_APP_SECRET;
+    if (secret && config.publicUrl) {
+      try {
+        const appId = process.env.META_APP_ID || (await graph('app', { params: { fields: 'id' } })).id;
+        const subs = await graph(`${appId}/subscriptions`, { token: `${appId}|${secret}` });
+        const wa = (subs.data || []).find((s) => s.object === 'whatsapp_business_account');
+        const want = `${config.publicUrl}/meta/webhook`;
+        add('App webhook points to the hub', !!wa?.active && wa.callback_url === want, wa ? `${wa.callback_url} (${wa.active ? 'active' : 'inactive'})` : 'not set');
+      } catch (err) {
+        add('App webhook points to the hub', false, err.message, 'warn');
+      }
+    } else add('App webhook points to the hub', false, 'META_APP_SECRET or PUBLIC_URL missing — cannot check', 'warn');
+    const [last] = await query(`SELECT max(created_at) AS at FROM meta_events WHERE account_id = $1 AND kind IN ('in','status')`, [this.id]);
+    add('Last event from Meta', !!last?.at, last?.at ? new Date(last.at).toISOString() : 'none in 14 days — send a message to the number to test', last?.at ? 'ok' : 'warn');
+    const tpl = await query(`SELECT status, count(*)::int n FROM wa_templates WHERE waba_id = $1 GROUP BY status`, [this.wabaId]);
+    const approved = tpl.find((t) => t.status === 'APPROVED')?.n || 0;
+    add('Approved templates', approved > 0, tpl.map((t) => `${t.n} ${t.status.toLowerCase()}`).join(', ') || 'none', approved > 0 ? 'ok' : 'warn');
+    const [fails] = await query(`SELECT count(*)::int n FROM meta_events WHERE account_id = $1 AND kind IN ('status','send_error') AND status IN ('failed') AND created_at > now() - interval '24 hours'`, [this.id]);
+    add('Failed messages (24 h)', fails.n === 0, String(fails.n), fails.n ? 'warn' : 'ok');
+    const billed = await query(
+      `SELECT payload->'pricing'->>'category' AS category, count(DISTINCT wamid)::int n FROM meta_events
+       WHERE account_id = $1 AND kind = 'status' AND (payload->'pricing'->>'billable')::boolean AND created_at > now() - interval '14 days' GROUP BY 1`,
+      [this.id],
+    );
+    add('Billable messages (14 days)', true, billed.map((b) => `${b.n} ${String(b.category || '?').toLowerCase()}`).join(', ') || 'none');
+    const bad = checks.some((x) => x.level === 'bad');
+    const warn = checks.some((x) => x.level === 'warn');
+    return { status: bad ? 'unhealthy' : warn ? 'degraded' : 'healthy', checks, checkedAt: new Date().toISOString() };
+  }
+
+  /** Everything known about one message (wamid) or one person (phone): our outbox rows + Meta's events, in order. */
+  async timeline(wamidOrPhone) {
+    const q = String(wamidOrPhone).trim();
+    const isWamid = q.startsWith('wamid.');
+    const peer = isWamid ? null : q.replace(/\D/g, '').replace(/^(\d{10})$/, '91$1');
+    const events = await query(
+      `SELECT created_at, kind, wamid, peer, status, payload FROM meta_events
+       WHERE account_id = $1 AND (${isWamid ? 'wamid = $2' : 'peer = $2'}) ORDER BY created_at, id LIMIT 200`,
+      [this.id, isWamid ? q : peer],
+    );
+    const out = await query(
+      `SELECT id, status, error, created_at, sent_at, message_id, payload->'waTemplate'->>'name' AS tpl, left(payload->>'text', 60) AS text
+       FROM outbox WHERE account_id = $1 AND ${isWamid ? 'message_id = $2' : `to_jid = $2 || '@s.whatsapp.net'`} ORDER BY id LIMIT 50`,
+      [this.id, isWamid ? q : peer],
+    );
+    return { outbox: out, events };
   }
 
   /** Point the app's WhatsApp webhook at this hub (needs META_APP_SECRET; done once, then only checked). */
@@ -129,12 +237,13 @@ export class CloudSession extends Session {
     const callback = `${config.publicUrl}/meta/webhook`;
     const subs = await graph(`${appId}/subscriptions`, { token: appToken });
     const wa = (subs.data || []).find((s) => s.object === 'whatsapp_business_account');
-    if (wa?.active && wa.callback_url === callback && (wa.fields || []).some((f) => (f.name || f) === 'messages')) return;
+    const have = new Set((wa?.fields || []).map((f) => f.name || f));
+    if (wa?.active && wa.callback_url === callback && WEBHOOK_FIELDS.every((f) => have.has(f))) return;
     await graph(`${appId}/subscriptions`, {
       method: 'POST', token: appToken, idempotent: true,
-      params: { object: 'whatsapp_business_account', callback_url: callback, verify_token: verify, fields: 'messages' },
+      params: { object: 'whatsapp_business_account', callback_url: callback, verify_token: verify, fields: WEBHOOK_FIELDS.join(',') },
     });
-    await logEvent(this.id, 'info', `Meta webhook connected: ${callback} (messages)`);
+    await logEvent(this.id, 'info', `Meta webhook connected: ${callback} (${WEBHOOK_FIELDS.join(', ')})`);
   }
 
   async stop() {
@@ -204,7 +313,20 @@ export class CloudSession extends Session {
         throw e;
       }
       if (typingMs > 0) await this.showTyping(jid, typingMs);
-      const kind = ['image', 'video', 'audio', 'document'].find((k) => content[k]);
+      let kind = ['image', 'video', 'audio', 'document'].find((k) => content[k]);
+      if (kind) {
+        // Meta's limits: images JPEG/PNG ≤ 5 MB, video/audio ≤ 16 MB, documents ≤ 100 MB. Anything else that can still
+        // go goes as a document (e.g. a WEBP/HEIC photo or a big image), instead of failing at Meta.
+        const size = content[kind].length;
+        const mime = content.mimetype || '';
+        if (kind === 'image' && (!/^image\/(jpe?g|png)$/.test(mime) || size > 5 * 1024 * 1024)) kind = 'document';
+        if ((kind === 'video' || kind === 'audio') && size > 16 * 1024 * 1024) kind = 'document';
+        if (kind === 'video' && !/^video\/(mp4|3gpp)$/.test(mime)) kind = 'document';
+        if (size > 100 * 1024 * 1024) throw new Error('File is larger than 100 MB — WhatsApp won\'t accept it');
+        if (kind === 'document' && !content.document) {
+          content = { document: content.image || content.video || content.audio, mimetype: mime, caption: content.caption, fileName: content.fileName || `file.${mime.split('/')[1] || 'bin'}` };
+        }
+      }
       if (kind) {
         const id = await uploadCloudMedia(this.phoneNumberId, { buffer: content[kind], mimetype: content.mimetype, fileName: content.fileName });
         const media = { id };
@@ -215,13 +337,28 @@ export class CloudSession extends Session {
       } else {
         const body = String(content.text || '');
         if (!body.trim()) throw new Error('Empty message');
-        Object.assign(msg, { type: 'text', text: { body: body.slice(0, 4096), preview_url: /https?:\/\//i.test(body) } });
-        row = { type: 'text', body };
+        const buttons = (content.buttons || []).map((b) => String(b).trim()).filter(Boolean).slice(0, 3);
+        if (buttons.length) {
+          // Tap-to-reply buttons (max 3, 20 characters each) — the tap comes back as their reply.
+          Object.assign(msg, { type: 'interactive', interactive: { type: 'button', body: { text: body.slice(0, 1024) },
+            action: { buttons: buttons.map((t, i) => ({ type: 'reply', reply: { id: `b${i + 1}`, title: t.slice(0, 20) } })) } } });
+          row = { type: 'text', body: `${body}\n[${buttons.join(' | ')}]` };
+        } else {
+          Object.assign(msg, { type: 'text', text: { body: body.slice(0, 4096), preview_url: /https?:\/\//i.test(body) } });
+          row = { type: 'text', body };
+        }
       }
     }
     if (quoted?.key?.id) msg.context = { message_id: quoted.key.id };
-    const r = await graph(`${this.phoneNumberId}/messages`, { method: 'POST', json: msg });
+    let r;
+    try {
+      r = await graph(`${this.phoneNumberId}/messages`, { method: 'POST', json: msg });
+    } catch (err) {
+      await logMetaEvent(this.id, 'send_error', { peer: to, status: 'failed', payload: { code: err.code, error: err.message, type: msg.type, template: msg.template?.name } });
+      throw err;
+    }
     const id = r.messages?.[0]?.id;
+    await logMetaEvent(this.id, 'out', { wamid: id, peer: to, status: r.messages?.[0]?.message_status || 'accepted', payload: { type: msg.type, template: msg.template?.name } });
     if (!id) throw new Error('Meta accepted the request but returned no message id');
     // Meta may answer with the number in its canonical form (e.g. a different digit count): keep the chat we used.
     const quotedBody = quoted?.message?.conversation ? String(quoted.message.conversation).slice(0, 300) : null;
@@ -258,6 +395,7 @@ export class CloudSession extends Session {
     if (names.size) await store.upsertContacts(this.id, [...names].map(([w, n]) => ({ jid: jidOf(w), notify: n })));
     const incoming = [];
     for (const m of value.messages || []) {
+      await logMetaEvent(this.id, 'in', { wamid: m.id, peer: m.from, status: m.type, payload: m });
       const r = await this.rowFromCloud(m, names);
       if (r) incoming.push(r);
     }
@@ -327,6 +465,7 @@ export class CloudSession extends Session {
    */
   async onCloudStatus(s, late = false) {
     if (!s?.id) return;
+    if (!late) await logMetaEvent(this.id, 'status', { wamid: s.id, peer: s.recipient_id, status: s.status, payload: s });
     const retryLater = () => {
       if (late) return;
       const t = setTimeout(() => this.enqueue(() => this.onCloudStatus(s, true)), 15000 * Math.max(config.timeScale, 0.01));

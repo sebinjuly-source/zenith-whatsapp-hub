@@ -461,13 +461,20 @@ export async function withTemplatePreview(session, payload) {
 
 async function buildContent(payload, session) {
   if (payload.waTemplate && session?.isCloud) return { waTemplate: payload.waTemplate };
-  if (!payload.attachment) return { text: payload.text };
+  const buttons = (payload.buttons || []).filter(Boolean);
+  if (!payload.attachment) {
+    if (buttons.length && session?.isCloud) return { text: payload.text, buttons };
+    // Linked numbers: WhatsApp doesn't show buttons from unofficial clients reliably → list the answers instead.
+    return { text: buttons.length ? `${payload.text}\n\nReply: ${buttons.join(' / ')}` : payload.text };
+  }
   const a = payload.attachment;
   const file = await loadOutgoing(a);
   const caption = a.caption ?? payload.text ?? undefined;
   const as = a.as || (file.mimetype.startsWith('image/') ? 'image' : file.mimetype.startsWith('video/') ? 'video' : file.mimetype.startsWith('audio/') ? 'audio' : 'document');
-  if (as === 'image') return { image: file.buffer, mimetype: file.mimetype, caption };
-  if (as === 'video') return { video: file.buffer, mimetype: file.mimetype, caption };
+  // fileName rides along so a Meta number that must send an image/video as a document keeps the real name
+  const name = session?.isCloud ? { fileName: file.fileName } : {};
+  if (as === 'image') return { image: file.buffer, mimetype: file.mimetype, caption, ...name };
+  if (as === 'video') return { video: file.buffer, mimetype: file.mimetype, caption, ...name };
   if (as === 'audio') return { audio: file.buffer, mimetype: file.mimetype };
   return { document: file.buffer, mimetype: file.mimetype, fileName: file.fileName || 'file', caption };
 }

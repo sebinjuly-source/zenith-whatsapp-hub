@@ -10,6 +10,7 @@ import crypto from 'crypto';
 import logger from './logger.js';
 import { logEvent } from './db.js';
 import { manager } from './wa/manager.js';
+import { logMetaEvent } from './wa/cloud.js';
 
 function signatureOk(req) {
   const secret = process.env.META_APP_SECRET;
@@ -90,10 +91,12 @@ export async function dispatch(body) {
         await run;
       } else if (ch.field === 'message_template_status_update') {
         const s = findCloudSession(null, entry.id);
+        await logMetaEvent(s?.id || null, 'template', { status: v.event, payload: v });
         await logEvent(s?.id || null, v.event === 'APPROVED' ? 'info' : 'warn', `Meta template "${v.message_template_name}" (${v.message_template_language}): ${String(v.event).toLowerCase()}${v.reason && v.reason !== 'NONE' ? ` — ${v.reason}` : ''}`);
         if (s) await import('./wa/cloud-templates.js').then((t) => t.syncTemplates(s.wabaId)).catch(() => {});
       } else if (ch.field === 'phone_number_quality_update' || ch.field === 'account_update' || ch.field === 'phone_number_name_update') {
         const s = findCloudSession(null, entry.id);
+        await logMetaEvent(s?.id || null, 'account', { status: ch.field, payload: v });
         await logEvent(s?.id || null, 'warn', `Meta ${ch.field.replace(/_/g, ' ')}: ${JSON.stringify(v).slice(0, 300)}`);
         if (s) await s.refreshHealth().catch(() => {});
       }

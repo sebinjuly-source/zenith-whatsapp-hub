@@ -641,7 +641,10 @@ export class Session extends EventEmitter {
       createTask: (title) => createTask({ account: this.id, title: fill(title), details: `From ${fields.name || ''} +${r.chatJid.split('@')[0]}: ${(r.body || '[' + r.type + ']').slice(0, 200)}`, createdBy: 'rule' }),
       sendTemplate: async (tpl, note) => {
         const { payload } = await outbox.renderTemplate(this.id, r.chatJid, tpl);
-        await outbox.enqueue({ account: this.id, to: r.chatJid, payload: { ...payload, replyTo: r.id }, source: 'rule', note });
+        // One auto-reply per person per rule per day, even when they send several messages at once (the key makes
+        // the second, simultaneous attempt a no-op instead of a duplicate).
+        const day = new Date().toLocaleDateString('en-CA', { timeZone: config.tz });
+        await outbox.enqueue({ account: this.id, to: r.chatJid, payload: { ...payload, replyTo: r.id }, source: 'rule', note, idemKey: `${note}:${r.chatJid}:${day}` });
       },
       snooze: (days) => store.setChatState(this.id, r.chatJid, 'snoozed', { until: new Date(Date.now() + days * 86400000).toISOString(), note: 'by rule' }),
     });

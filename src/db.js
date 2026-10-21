@@ -262,6 +262,21 @@ ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_reply BOOLEAN NOT NULL DEFAULT FA
 
 -- Meta WhatsApp Cloud API numbers (provider = 'cloud'): { phoneNumberId, wabaId } + last known number health
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cloud JSONB NOT NULL DEFAULT '{}';
+-- What Meta told us, kept 14 days for debugging (idea from Kapso's observe-whatsapp): every status with pricing and
+-- errors, incoming messages, template/quality/account events, and refused sends. One row per event.
+CREATE TABLE IF NOT EXISTS meta_events (
+  id BIGSERIAL PRIMARY KEY,
+  account_id TEXT,
+  kind TEXT NOT NULL,
+  wamid TEXT,
+  peer TEXT,
+  status TEXT,
+  payload JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS meta_events_wamid ON meta_events (wamid);
+CREATE INDEX IF NOT EXISTS meta_events_peer ON meta_events (account_id, peer, created_at DESC);
+
 -- Message templates approved by Meta (synced from the WhatsApp Business account)
 CREATE TABLE IF NOT EXISTS wa_templates (
   waba_id TEXT NOT NULL,

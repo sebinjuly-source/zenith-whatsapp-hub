@@ -197,6 +197,8 @@
         h('span', { class: `pill ${a.status}` }, statusText[a.status] || a.status),
       ),
       a.error && a.status !== 'open' ? h('p', { style: 'color:var(--bad);margin:6px 0' }, a.error) : null,
+      c.canSend && c.canSend !== 'AVAILABLE' ? h('p', { style: `color:${c.canSend === 'BLOCKED' ? 'var(--bad)' : 'var(--ink)'};background:var(--warn-soft, #fff4d6);padding:6px 8px;border-radius:8px;margin:6px 0` },
+        h('b', {}, `Meta: ${c.canSend === 'BLOCKED' ? 'sending blocked' : 'sending limited'}. `), (c.issues || []).join(' · ')) : null,
       h('dl', { class: 'kv' },
         h('dt', {}, 'Number'), h('dd', {}, a.phone ? '+' + a.phone : c.displayPhone || '–'),
         h('dt', {}, 'Name customers see'), h('dd', {}, c.verifiedName || '–', c.nameStatus && c.nameStatus !== 'APPROVED' ? h('span', { class: 'muted' }, ` (${String(c.nameStatus).toLowerCase().replace(/_/g, ' ')})`) : ''),
@@ -212,6 +214,21 @@
       h('div', { class: 'row' },
         h('button', { class: 'btn small', onclick: () => { state.inbox.account = a.id; location.hash = 'inbox'; } }, 'Open inbox'),
         h('button', { class: 'btn small', onclick: () => { location.hash = 'templates'; } }, 'Meta templates'),
+        h('button', { class: 'btn small primary', title: 'Every check at once: access, can-send status, webhook, templates, failures, billable messages', onclick: guard(async (e) => {
+          e.target.disabled = true;
+          try {
+            const r = await api(`/api/accounts/${a.id}/meta-health`);
+            const icon = { ok: '✅', warn: '⚠️', bad: '❌' };
+            const back = h('div', { class: 'modal-back', onclick: (ev) => ev.target === back && back.remove() },
+              h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Meta health check' },
+                h('h2', {}, `Health check: ${r.status}`),
+                h('div', {}, r.checks.map((x) => h('div', { style: 'padding:6px 0;border-top:1px solid var(--line)' }, `${icon[x.level]} `, h('b', {}, x.name), h('div', { class: 'muted', style: 'font-size:13px;margin-left:24px' }, x.detail)))),
+                h('div', { class: 'row', style: 'justify-content:flex-end;margin-top:10px' }, h('button', { class: 'btn', onclick: () => back.remove() }, 'Close'))));
+            document.body.append(back);
+          } finally {
+            e.target.disabled = false;
+          }
+        }) }, 'Health check'),
         h('button', { class: 'btn small', title: 'Check the number with Meta again (registration, webhook, quality)', onclick: guard(async () => { await api(`/api/accounts/${a.id}/link`, { body: {} }); toast('Checked with Meta'); route(); }) }, 'Re-check with Meta'),
         h('button', { class: 'btn small', onclick: () => { state.settingsFor = a.id; location.hash = 'settings'; } }, 'Settings'),
         !a.isDefault ? h('button', { class: 'btn small', onclick: guard(async () => { await api(`/api/accounts/${a.id}`, { method: 'PATCH', body: { isDefault: true } }); route(); }) }, 'Make default') : null,

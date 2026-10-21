@@ -19,6 +19,9 @@ const EXPLAIN = {
   4: 'Too many calls to Meta right now — retrying later',
   80007: 'Meta rate limit for this WhatsApp account — retrying later',
   130429: 'Sending faster than Meta allows for this number — retrying later',
+  409: 'Another message to this person was still being processed by Meta — retrying',
+  1026: 'This person\'s WhatsApp can\'t receive this kind of message',
+  141000: 'Meta reported an account problem — contact Meta Business Support',
   131000: 'Meta had an unexpected problem — try again',
   131005: 'Permission denied by Meta for this action',
   131008: 'A required field was missing in the message',
@@ -72,7 +75,8 @@ export function explainMetaError(err = {}) {
   return plain ? `${plain} (Meta ${err.code})` : `Meta error ${err.code ?? '?'}: ${details || 'unknown'}`;
 }
 
-const RATE_CODES = new Set([4, 80007, 130429]);
+// Refused for pace reasons — never sent, so safe to retry (409 = another message to this person still in flight).
+const RATE_CODES = new Set([4, 80007, 130429, 409]);
 
 /**
  * graph('123/messages', { method: 'POST', json }) — returns parsed JSON or throws GraphError.

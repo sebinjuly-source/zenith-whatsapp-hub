@@ -114,7 +114,7 @@ function buildServer(playbook = '') {
       const imported = mode === 'full' ? phases.FULL : mode === 'recent' ? phases.RECENT : phases.INITIAL_BOOTSTRAP;
       const nc = await outbox.newChatsStatus(a.id, normalizeSettings(a.settings));
       lines.push(
-        `${a.id}${a.isDefault ? ' (default)' : ''} | ${a.label} | ${a.provider === 'cloud' ? `META CLOUD API (quality ${a.cloud?.quality || '?'}, name ${a.cloud?.nameStatus || '?'}, tier ${a.cloud?.tier || '?'}; first messages & follow-ups need a Meta template — list_meta_templates) | ` : 'linked phone | '}purpose: ${a.purpose || '-'} | +${a.phone || '?'} | ${a.status} | ai:${a.settings.aiMode} | ` +
+        `${a.id}${a.isDefault ? ' (default)' : ''} | ${a.label} | ${a.provider === 'cloud' ? `META CLOUD API (${a.cloud?.canSend && a.cloud.canSend !== 'AVAILABLE' ? `CAN SEND: ${a.cloud.canSend} — ${(a.cloud.issues || []).join('; ')}; ` : ''}quality ${a.cloud?.quality || '?'}, name ${a.cloud?.nameStatus || '?'}, tier ${a.cloud?.tier || '?'}; first messages & follow-ups need a Meta template — list_meta_templates) | ` : 'linked phone | '}purpose: ${a.purpose || '-'} | +${a.phone || '?'} | ${a.status} | ai:${a.settings.aiMode} | ` +
           `${st.chats} chats (${st.groups} groups), ${st.contacts} contacts, ${st.messages} msgs since ${fmtTime(st.oldest_ts)} | history chosen at link: ${HISTORY_MODES[mode]} (${imported === 'complete' ? 'imported' : 'importing'})` +
           (bf ? ` | deep history #${bf.id}: ${bf.status}${bf.result ? ' — ' + bf.result : ''}` : '') +
           ` | new numbers last 24h: ${nc.count}/${nc.limit}${nc.nextFreeAt ? ' (limit reached)' : ''}` +
@@ -329,6 +329,7 @@ function buildServer(playbook = '') {
       reply_to_message_id: z.string().optional().describe('Quote this message (id from get_messages) in the reply'),
       idempotency_key: z.string().optional().describe('Optional unique key; retrying with the same key never sends twice'),
       wa_template: waTemplateArg.describe('Meta Cloud API numbers only: send this approved Meta template (required when the person has not written in the last 24 h)'),
+      buttons: z.array(z.string()).max(3).optional().describe('Up to 3 tap-to-reply answers, e.g. ["Haan, aaunga","Nahi"] (≤20 chars). Meta numbers show buttons; linked numbers list them as "Reply: …"'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
@@ -352,7 +353,7 @@ function buildServer(playbook = '') {
         text = text || r.payload.text;
         attachment = attachment || r.payload.attachment;
       }
-      const payload = { text, attachment, ...(a.reply_to_message_id ? { replyTo: a.reply_to_message_id } : {}) };
+      const payload = { text, attachment, ...(a.reply_to_message_id ? { replyTo: a.reply_to_message_id } : {}), ...(a.buttons?.length && !attachment ? { buttons: a.buttons } : {}) };
       const row = await outbox.enqueue({ account: s.id, to: jid, payload, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key });
       if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
       await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} message #${row.id} to ${jid.split('@')[0]}${a.note ? ` — ${a.note}` : ''}`);
@@ -452,6 +453,36 @@ function buildServer(playbook = '') {
     return rows.length
       ? rows.map((r) => `${r.name} | ${r.language} | ${r.status} | ${r.category} | ${r.vars.length ? r.vars.map((v) => `{{${v}}}`).join(' ') : 'no fill-ins'}${r.headerFormat && r.headerFormat !== 'TEXT' ? ` | header: ${r.headerFormat}` : ''} | ${trim(r.body, 160)}`).join('\n')
       : 'No Meta templates yet — the owner creates them in WhatsApp Manager → Message templates.';
+  });
+
+  tool('meta_health_check', 'Health check of a Meta Cloud API number: token/number access, registration, can-send status from Meta (AVAILABLE / LIMITED / BLOCKED and why — e.g. payment problem), display name, quality, webhook subscriptions, last event received, templates, failures in 24 h, billable messages. Start here when Meta sends fail or nothing arrives.', {
+    account: accountArg,
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    if (!s.isCloud) return `"${s.id}" is a linked phone number — use list_accounts / recent_activity for it.`;
+    const r = await s.healthCheck();
+    return [`${s.id}: ${r.status.toUpperCase()} (checked ${fmtTime(Math.floor(Date.parse(r.checkedAt) / 1000))})`,
+      ...r.checks.map((c) => `${c.level === 'ok' ? 'OK ' : c.level === 'warn' ? 'WARN' : 'FAIL'} ${c.name}: ${c.detail}`)].join('\n');
+  });
+
+  tool('message_timeline', 'What happened to one message or one person on a Meta Cloud API number (last 14 days): our sends (outbox, errors) and every Meta event — accepted, sent, delivered, read, failed with reason, billing category, their incoming messages. Give a wamid or a phone number.', {
+    account: accountArg, q: z.string().describe('wamid.… or phone number'),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    if (!s.isCloud) return `"${s.id}" is a linked phone number — use get_messages for it.`;
+    const t = await s.timeline(a.q);
+    const ts = (d) => fmtTime(Math.floor(new Date(d).getTime() / 1000));
+    const lines = [
+      ...t.outbox.map((o) => `outbox #${o.id} ${o.status}${o.tpl ? ` (template ${o.tpl})` : ''} ${o.text ? `"${o.text}"` : ''}${o.error ? ` — ${o.error}` : ''} [created ${ts(o.created_at)}]`),
+      ...t.events.map((e) => {
+        const p = e.payload || {};
+        const extra = e.kind === 'status' ? `${p.pricing?.category ? ` · ${p.pricing.category}${p.pricing.billable ? ' (billable)' : ''}` : ''}${p.errors?.length ? ` · ${p.errors[0].code} ${p.errors[0].title || ''} ${p.errors[0].error_data?.details || ''}` : ''}`
+          : e.kind === 'in' ? ` · "${trim(p.text?.body || p.button?.text || p.interactive?.button_reply?.title || '[' + p.type + ']', 60)}"`
+          : e.kind === 'send_error' ? ` · ${p.error}` : '';
+        return `[${ts(e.created_at)}] ${e.kind} ${e.status || ''}${e.wamid ? ` ${e.wamid.slice(0, 18)}…` : ''}${extra}`;
+      }),
+    ];
+    return lines.length ? lines.join('\n') : 'Nothing recorded for that in the last 14 days.';
   });
 
   tool('create_meta_template', 'Submit a new message template to Meta for approval (Meta Cloud API numbers). Only when the owner asked for it. Use {{1}}, {{2}} for fill-ins (not at the very start or end) and give one example value each. UTILITY = about something they asked for/applied to (cheaper); MARKETING = promotional. Approval usually takes minutes; check with list_meta_templates.', {

@@ -185,6 +185,18 @@ export function buildApp() {
     await act(req, s.id, `Submitted Meta template "${r.name}" (${r.category || req.body?.category}) for review — ${String(r.status || 'pending').toLowerCase()}`);
     res.json(r);
   }));
+  // Full Meta health check of a Cloud number (access, can-send status and why, webhook, templates, failures, billable)
+  api.get('/accounts/:id/meta-health', wrap(async (req, res) => {
+    const s = manager.get(req.params.id);
+    if (!s.isCloud) throw new Error('Health check is for Meta Cloud API numbers');
+    res.json(await s.healthCheck());
+  }));
+  // What happened to one message (wamid) or one person (phone): outbox rows + Meta's events
+  api.get('/accounts/:id/meta-timeline', wrap(async (req, res) => {
+    const s = manager.get(req.params.id);
+    if (!s.isCloud) throw new Error('Timeline is for Meta Cloud API numbers');
+    res.json(await s.timeline(req.query.q || ''));
+  }));
   // Can this chat get a free-form message right now? (Cloud numbers: 24 h after their last message)
   api.get('/accounts/:id/chats/:jid/window', wrap(async (req, res) => {
     const s = manager.get(req.params.id);
@@ -364,7 +376,8 @@ export function buildApp() {
       text = text || r.payload.text;
       attachment = attachment || r.payload.attachment;
     }
-    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key') });
+    const buttons = Array.isArray(req.body?.buttons) ? req.body.buttons.filter(Boolean).slice(0, 3) : undefined;
+    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}), ...(buttons?.length ? { buttons } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key') });
     if (row.duplicate && ['sent', 'failed', 'rejected'].includes(row.status)) return res.status(row.status === 'sent' ? 200 : 502).json(row);
     if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent a message from the dashboard to ${row.to_jid.split('@')[0]}`);
     if (!wait) return res.json(row);
