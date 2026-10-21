@@ -477,6 +477,25 @@ test('image-header template: created with an uploaded handle; every send uses it
   assert.deepEqual(rows.map((x) => x.payload.waTemplate.params[1]), ['Rs.24,000-26,000', 'Rs.21,000-26,000']);
   await until(async () => (await query(`SELECT count(*)::int n FROM outbox WHERE task_id = $1 AND status = 'sent'`, [b.data.task.id]))[0].n === 2, 10000);
   const sentT = sentMessages().at(-1).body.template;
-  assert.deepEqual(sentT.components[0], { type: 'header', parameters: [{ type: 'image', image: { link: img } }] });
+  assert.deepEqual(sentT.components[0], { type: 'header', parameters: [{ type: 'image', image: { id: 'UPLOADED1' } }] }, 'poster uploaded to Meta once, then sent by id');
   assert.equal(b.data.cost.perMessage, 0.8631);
+});
+
+test('a template still in Meta review can be scheduled: it waits (not failed) and goes once approved; Meta number sends without pauses', async () => {
+  templates.push({ id: 't9', name: 'chef_hiring_v3', language: 'en', status: 'PENDING', category: 'MARKETING', components: [{ type: 'BODY', text: 'Namaste {{1}} ji, stay aur khana free. – Zenith Suites HR' }] });
+  await call('GET', '/api/accounts/api/wa-templates?sync=1');
+  const b = await call('POST', '/api/bulk', { account: 'api', title: 'v3', waTemplate: { name: 'chef_hiring_v3', params: ['{first_name}'] },
+    recipients: [{ to: '9876500401', name: 'Arun' }, { to: '9876500402', name: 'Bhanu' }, { to: '9876500403', name: 'Chetan' }] });
+  assert.equal(b.status, 200, JSON.stringify(b.data));
+  await until(async () => (await query(`SELECT count(*)::int n FROM outbox WHERE task_id = $1 AND error LIKE 'Waiting for Meta%'`, [b.data.task.id]))[0].n === 3);
+  const [w] = await query(`SELECT status, scheduled_at > now() + interval '10 minutes' AS later FROM outbox WHERE task_id = $1 LIMIT 1`, [b.data.task.id]);
+  assert.deepEqual([w.status, w.later], ['queued', true]);
+  // Meta approves → they go out together, without the linked-phone gaps
+  templates.find((t) => t.name === 'chef_hiring_v3').status = 'APPROVED';
+  await call('GET', '/api/accounts/api/wa-templates?sync=1');
+  await query(`UPDATE outbox SET scheduled_at = now() WHERE task_id = $1`, [b.data.task.id]);
+  const t0 = Date.now();
+  outbox.wakeAccount('api');
+  await until(async () => (await query(`SELECT count(*)::int n FROM outbox WHERE task_id = $1 AND status = 'sent'`, [b.data.task.id]))[0].n === 3, 10000);
+  assert.ok(Date.now() - t0 < 5000, 'three template messages in under 5 s');
 });

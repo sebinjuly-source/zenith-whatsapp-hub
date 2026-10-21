@@ -628,9 +628,10 @@ function buildServer(playbook = '') {
     list: listArg, statuses: z.array(z.enum(['new', 'failed', 'sent', 'replied'])).optional(),
     text: z.string().optional(), template: z.string().optional(), only_phones: z.array(z.string()).optional(),
     wa_template: waTemplateArg.describe('Meta Cloud API numbers: the approved Meta template for people who have not written in 24 h (all first messages)'),
+    schedule_at: z.string().optional().describe('Start sending at this time (ISO, e.g. 2026-10-22T09:00:00+05:30); default now'),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, waTemplate: a.wa_template, onlyPhones: a.only_phones, createdBy: 'ai', source: 'mcp' });
+    const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, waTemplate: a.wa_template, onlyPhones: a.only_phones, createdBy: 'ai', source: 'mcp', scheduledAt: a.schedule_at });
     await ai(l.account_id, `List "${l.name}": ${r.queued} messages ${r.mode === 'approve' ? 'drafted' : 'queued'}`, l.role);
     const skipped = r.skipped.length ? ` Skipped: ${r.skipped.map((x) => x.to + ' (' + x.reason + ')').join('; ')}` : '';
     const cost = r.task ? await taskCostText(r.task.id) : '';

@@ -422,7 +422,9 @@ export async function setFollowup(listId, settings) {
  * Message the members with the given statuses (default: new + failed). Each gets their own prepared message
  * from the list (column "message") unless a text/template is given. One board task per call.
  */
-export async function sendToList(listId, { statuses = ['new', 'failed'], text, template, waTemplate, onlyPhones, createdBy = 'you', source = 'campaign' } = {}) {
+export async function sendToList(listId, { statuses = ['new', 'failed'], text, template, waTemplate, onlyPhones, createdBy = 'you', source = 'campaign', scheduledAt } = {}) {
+  const at = scheduledAt ? new Date(scheduledAt) : null;
+  if (at && isNaN(at)) throw new Error('scheduledAt is not a valid date/time');
   const list = await getList(listId);
   await refreshList(list.id);
   const session = await manager.resolve(list.account_id);
@@ -463,8 +465,9 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
   }
   const task = await createTask({ account: list.account_id, title: `${list.name}: message ${plan.length}`, details: `Statuses: ${statuses.join(', ')}`, kind: 'bulk', createdBy, role: list.role });
   const approve = ['mcp', 'campaign'].includes(source) && session.settings.aiMode === 'approve';
-  await insertMany('outbox', ['account_id', 'to_jid', 'payload', 'source', 'status', 'priority', 'note', 'task_id', 'list_id'],
-    plan.map((x) => [list.account_id, x.m.jid, JSON.stringify(x.payload), source, approve ? 'draft' : 'queued', 0, list.name, task.id, list.id]));
+  await insertMany('outbox', ['account_id', 'to_jid', 'payload', 'source', 'status', 'priority', 'note', 'task_id', 'list_id', 'scheduled_at'],
+    plan.map((x) => [list.account_id, x.m.jid, JSON.stringify(x.payload), source, approve ? 'draft' : 'queued', 0, list.name, task.id, list.id, (at || new Date()).toISOString()]));
+  if (at) await query(`UPDATE tasks SET due_at = $2 WHERE id = $1`, [task.id, at.toISOString()]);
   await refreshTask(task.id);
   await refreshList(list.id);
   outbox.wakeAccount(list.account_id);

@@ -132,10 +132,14 @@ function valuesFor(d, params) {
  * Build the Graph API "template" object and the text the person will see (stored in the chat).
  * Throws a clear error when the template is unknown, not approved, or a fill-in is missing.
  */
-export async function buildTemplateMessage(wabaId, waTemplate) {
+export async function buildTemplateMessage(wabaId, waTemplate, { allowPending = false } = {}) {
   const t = await findTemplate(wabaId, waTemplate.name, waTemplate.language);
   if (!t) throw new Error(`No Meta template called "${waTemplate.name}"${waTemplate.language ? ` (${waTemplate.language})` : ''} — create it in WhatsApp Manager, or press "Sync templates"`);
-  if (t.status !== 'APPROVED') throw new Error(`Meta template "${t.name}" is ${t.status.toLowerCase()}, not approved yet`);
+  if (t.status !== 'APPROVED' && !(allowPending && t.status === 'PENDING')) {
+    const e = new Error(`Meta template "${t.name}" is ${t.status.toLowerCase()}, not approved yet`);
+    if (t.status === 'PENDING') e.code = 'TEMPLATE_PENDING';
+    throw e;
+  }
   const d = describe(t);
   const values = valuesFor(d, waTemplate.params || []);
   const missing = d.vars.filter((v, i) => values[i] == null || String(values[i]).trim() === '');

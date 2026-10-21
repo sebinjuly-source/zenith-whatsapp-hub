@@ -301,6 +301,7 @@ export class CloudSession extends Session {
     let row;
     if (content.waTemplate) {
       const t = await buildTemplateMessage(this.wabaId, content.waTemplate);
+      await this.useUploadedHeader(t.template);
       Object.assign(msg, { type: 'template', template: t.template });
       row = { type: 'text', body: t.preview };
     } else {
@@ -368,6 +369,34 @@ export class CloudSession extends Session {
       vcards: null, status: 1, fromHistory: false,
     }]);
     return { key: { id, remoteJid: jid, fromMe: true }, message: msg };
+  }
+
+  /**
+   * A header image given as a link is uploaded to Meta once and the media id reused (Meta keeps it 30 days; we
+   * refresh after 25) — so a 250-message campaign doesn't make Meta fetch the poster from our server 250 times.
+   */
+  async useUploadedHeader(template) {
+    const p = template.components?.find((c) => c.type === 'header')?.parameters?.[0];
+    const kind = p?.type;
+    const link = kind && p[kind]?.link;
+    if (!link) return;
+    this.headerIds ||= new Map();
+    const hit = this.headerIds.get(link);
+    if (hit && Date.now() - hit.at < 25 * 86400e3) {
+      p[kind] = { ...p[kind], id: hit.id };
+      delete p[kind].link;
+      return;
+    }
+    try {
+      const { loadOutgoing } = await import('../media.js');
+      const file = await loadOutgoing({ url: link });
+      const id = await uploadCloudMedia(this.phoneNumberId, file);
+      this.headerIds.set(link, { id, at: Date.now() });
+      p[kind] = { ...p[kind], id };
+      delete p[kind].link;
+    } catch (err) {
+      this.log.warn({ err: err.message }, 'header upload failed — sending with the link instead');
+    }
   }
 
   /** "typing…" (also marks their last message read). Meta shows it up to 25 s, so it's capped. */

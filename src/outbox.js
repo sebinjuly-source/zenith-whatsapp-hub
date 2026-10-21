@@ -56,7 +56,8 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
   const session = await manager.resolve(account);
   if (!payload?.text && !payload?.attachment && !payload?.waTemplate) throw new Error('Nothing to send: give text and/or attachment');
   const jid = toJid(to);
-  if (payload.waTemplate) payload = await withTemplatePreview(session, payload);
+  // Scheduled/automated sends may use a template still in review (they wait); your own direct sends need it approved.
+  if (payload.waTemplate) payload = await withTemplatePreview(session, payload, { allowPending: AUTOMATED.includes(source) });
   if (idemKey) {
     const [dup] = await query('SELECT * FROM outbox WHERE account_id = $1 AND idem_key = $2', [session.id, String(idemKey)]);
     if (dup) return { ...dup, duplicate: true }; // same request seen before: don't send again
@@ -449,14 +450,15 @@ export async function renderTemplate(accountId, jid, templateRef, vars = {}) {
  * A Meta template message: check it now (exists, approved, every {{n}} filled) and keep the text the person will
  * see as payload.text — drafts show it, and a linked number it is moved to sends that text instead.
  */
-export async function withTemplatePreview(session, payload) {
+export async function withTemplatePreview(session, payload, { allowPending = true } = {}) {
   if (!payload.waTemplate?.name) throw new Error('waTemplate needs the Meta template name');
   if (!session.isCloud) {
     if (!payload.text) throw new Error(`"${session.account.label}" is a linked number — Meta templates are only for Meta Cloud API numbers; send text instead`);
     return payload;
   }
   const { buildTemplateMessage } = await import('./wa/cloud-templates.js');
-  const t = await buildTemplateMessage(session.wabaId, payload.waTemplate);
+  // A template still in Meta's review may be queued: it waits at send time until Meta approves it.
+  const t = await buildTemplateMessage(session.wabaId, payload.waTemplate, { allowPending });
   return { ...payload, text: t.preview, waTemplate: { ...payload.waTemplate, language: t.template.language.code } };
 }
 
@@ -536,6 +538,14 @@ export async function queueStatus(accountId) {
 }
 
 const holdNoted = new Map(); // accountId -> until (ms): log "limit reached" once per hold
+const notedOnce = new Map();
+/** Activity entry at most once an hour per key (e.g. "waiting for template approval"). */
+async function noteOnce(accountId, key, text) {
+  const k = `${accountId}|${key}`;
+  if (Date.now() - (notedOnce.get(k) || 0) < 3600e3) return;
+  notedOnce.set(k, Date.now());
+  await logEvent(accountId, 'info', text);
+}
 
 /** Activity entry (once per hold) explaining why messages to new numbers are waiting. */
 async function noteNewChatHold(accountId, reachout, nc) {
@@ -632,6 +642,19 @@ function startWorker(accountId) {
     }
     // Recording the result is separate from sending: if the database hiccups here, the row stays "sending" and
     // the sweep marks it sent (it finds the message in the chat) — a delivered message is never called "failed".
+    if (sendError?.code === 'TEMPLATE_PENDING') {
+      // Meta hasn't approved the template yet: keep it queued and look again in 15 minutes (nothing is lost).
+      await query(`UPDATE outbox SET status = 'queued', sent_at = NULL, scheduled_at = now() + interval '15 minutes', error = $2 WHERE id = $1`,
+        [row.id, 'Waiting for Meta to approve the template — retried every 15 minutes']);
+      await noteOnce(accountId, `pending:${row.payload.waTemplate?.name}`, `Messages using Meta template "${row.payload.waTemplate?.name}" wait until Meta approves it (checked every 15 min)`);
+      // In case Meta's approval webhook was missed, ask Meta directly (at most every 10 minutes).
+      const k = `${accountId}|tplsync`;
+      if (Date.now() - (notedOnce.get(k) || 0) > 600e3) {
+        notedOnce.set(k, Date.now());
+        import('./wa/cloud-templates.js').then((t) => t.syncTemplates(session.wabaId)).catch(() => {});
+      }
+      return;
+    }
     if (sendError) {
       [result] = await query(`UPDATE outbox SET status = 'failed', error = $2 WHERE id = $1 RETURNING *`, [row.id, sendError.message]);
       await logEvent(accountId, 'warn', `Send to ${row.to_jid.split('@')[0]} failed: ${sendError.message}`);
@@ -645,6 +668,12 @@ function startWorker(accountId) {
     done.emit(String(row.id), result);
     if (row.task_id) await refreshTask(row.task_id).catch(() => {});
     if (row.list_id) import('./lists.js').then((l) => l.refreshList(row.list_id)).catch(() => {});
+    if (session.isCloud) {
+      // Meta's API has no human-pace rule (throughput is ~80 messages/s per number): no random gap, just a short
+      // breather so the database and Render keep up.
+      await sleep(250 * config.timeScale);
+      return;
+    }
     if (automated && !row.is_reply) nextAutomatedAt = Date.now() + randomDelayMs(s) * config.timeScale;
     await sleep(MIN_DELAY_SEC * 1000 * config.timeScale); // never two messages from one number within 5 s
   }
