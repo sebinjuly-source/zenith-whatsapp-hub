@@ -59,8 +59,23 @@ reminders always go from the number that has their chat.
 
 ## 3. Dashboard pages
 
+The top bar has the three pages used all day: **🗂️ Board**, **💬 Inbox** and **✉️ Drafts** (with a count). Everything else
+sits behind **☰** at the top right, with icons: 📋 Lists, 📱 Numbers, 📝 Templates, ⚡ Rules, ⚙️ Settings, 🔌 Connect AI &
+apps, 🕘 Activity, ↩️ Log out. Hover over an icon to see its name. The number you pick in the Inbox, the Board filters
+and the open tabs are remembered on that device after a refresh. Less-used parts of each page are folded (▸).
+
 | Page | What it's for |
 |---|---|
+| **Board** | The shared calendar of you and the AI. **🔥 Do now**: what is overdue, due today, or waiting on someone (must-dos first, in red; candidates waiting for a reply folded into one group the AI works through). **📅 Future**: everything later, one fold per day (the next two open). **⏳ Sending now** and **✅ Done** are folded. Filters: number, 👤 Mine / 🤖 AI, job role. Each card shows its title, who does it, when, and one action (Reply / Open chat / Approve / Messages) plus ✓ done; **More** holds the details, ⭐ priority, move, and **history & notes** (call notes go here). Cards the hub makes by itself: 💬 Reply needed, 🔁 Follow-up, 🎯 Interview, 🕒 Scheduled message, ⏰ Reminder, "Did X come?" / call tasks. New to-do and Bulk send are folded at the bottom. |
+| **Inbox** | Chats per number. On a phone the chat fills the screen: ← back, the name, ✓ Done, and ⋯ for Contact, Remind me, Reopen and older messages. The typing box is always visible: 📎 file, ⏰ send later, 📝 saved template, ➤ send. On the Meta number: the 24 h window and a **Meta template…** button when the window is closed. |
+| **Drafts** | Messages waiting for approval, queued, sent, failed (with **What to do** for Meta errors). Price on each card (Meta number), Move to another number, Approve all / selected, status box per number (what waits, why, until when). |
+| **Lists** | Candidate batches by role, status per person, stage, interview and follow-up dates. 🗑 removes a person who was never messaged (e.g. typed by mistake); **🗄 Archive** stops a list from ever sending (for lists imported only to check duplicates). Automation (pipeline and follow-ups) is folded. |
+| **Templates** | Your saved texts, plus **Meta templates** (status, sync, submit new ones). |
+| **Rules** | Automatic actions on incoming messages (e.g. "Haan, interested" → reply asking the day + call task). |
+| **Settings** | **⭐ All numbers (defaults)**: every number follows these, except a setting a number has changed itself (shown as "own" on that number). Per number: name, purpose, active, and "↺ Use all-numbers settings". Sending (approval, new-number limit, daily limit, any time; delay, hours, days and follow-ups folded), history & media, replies & integrations. Folded: connection alerts, Meta prices, Playbook, delete number. |
+| **Numbers / Connect / Activity** | Link numbers and the Meta health check; how to connect AI and Apps Script; every event that happened. |
+
+---|---|
 | **Board** | The shared calendar of you and the AI, all numbers together (or one). **📅 Coming up** at the top lists every dated card by day (Overdue / Today / Tomorrow / …). Every card says who does it — **👤 You** or **🤖 AI** — and must-dos carry **⭐ Priority** (flag/unflag on the card; filter Everyone / Mine / AI). Cards the hub makes by itself: **💬 Reply needed** (AI), **🔁 Follow-up** (AI; the day before the date a candidate gave), **🎯 Interview** (you, priority), **🕒 Scheduled** (a message going out later), **⏰ Reminder** (you), "Did X come?" and call tasks (you, priority), bulk sends with progress. Cards close themselves when done (reply sent, follow-up sent, interview marked, message sent, chat reopened). New to-do (who + priority) and Bulk send forms at the bottom. |
 | **Numbers** | Each number's status. Linked phones: Link (QR or phone-number code), history, deep history. Meta number: name, quality, Meta limit, **Health check** (everything Meta-side in one click), Re-check with Meta. |
 | **Inbox** | All chats per number; reply, quote, files, templates, "Remind me", Done. On the Meta number: the 24 h window and a **Meta template…** button when the window is closed. |
@@ -106,6 +121,10 @@ reminders always go from the number that has their chat.
 Connect once: `https://zenith-whatsapp-hub.onrender.com/mcp/<API_KEY>` (Claude Code: `claude mcp add --transport
 http --scope user whatsapp-hub <url>`; claude.ai: Settings → Connectors). Every AI gets the **Playbook** first.
 
+**Start with `hub_overview`.** It shows what is due now, each number's sending state and why it is held, lists on every number,
+and failures with what to do. The playbook begins with "How to use the hub" (tool order and the rules that prevent mistakes:
+never type candidate data by hand, never conclude something is missing after filtering by one number).
+
 Useful asks: "who replied today?", "draft replies to the chefs who wrote", "move X to date_given Sunday 11 am",
 "run a health check on the Meta number", "what happened to the message to 98xxxxxxx?", "schedule batch 8 for 9 am".
 
@@ -114,7 +133,7 @@ send_message (text, files, buttons, wa_template, schedule_at), bulk_send, list_o
 approve_task, list_tasks (kind=reply|followup|visit|scheduled|reminder, for=you|ai, due_now), create_task / update_task (for, priority), add_task_note, task_history, list_lists, list_members, import_list,
 send_to_list (wa_template, schedule_at), set_followup, update_list_member (visit_at, available_from, follow_up_at), pipeline, set_pipeline, known_candidates,
 list_templates, save_template, list_meta_templates, create_meta_template, meta_health_check, message_timeline,
-list_rules, save_rule, set_chat_state, get_playbook, save_playbook, recent_activity, save_media,
+hub_overview, archive_list, remove_list_member, list_rules, save_rule, set_chat_state, get_playbook, save_playbook, recent_activity, save_media,
 fetch_older_messages, backfill_history, list_shared_contacts, find_followups`.
 
 **Calls in chats.** Linked numbers record WhatsApp calls as lines like `📞 Voice call — answered, 2:14` or
@@ -137,7 +156,7 @@ date replaces a pending follow-up. You can also set a follow-up date per person 
 the reason ("Done by the hub — a reply went out", "Cancelled by the hub — interview date set instead"). Open
 **History & notes** on a card to read it or add a note. Call notes go here: write what was discussed on the "Call
 notes needed" card and the AI drafts the reply from it. AI: `add_task_note`, `task_history`; REST:
-`GET /api/tasks/:id/log`, `POST /api/tasks/:id/notes`.
+`GET/PUT /api/settings/defaults`, `POST /api/accounts/:id/settings/reset` · `GET /api/tasks/:id/log`, `POST /api/tasks/:id/notes`.
 
 **Safety net.** An "interested" candidate with no interview date, no follow-up date, no open card and no message
 either way for 3 days gets a "Follow up" card due now (history: "Added by the safety net"), at most 20 per check.
@@ -157,7 +176,7 @@ everything waits for your approval. Manage it at https://claude.ai/code/routines
 Numbers `GET/POST /api/accounts`, `PATCH/DELETE /api/accounts/:id`, `POST …/link|unlink` · Chats
 `GET /api/accounts/:id/chats`, `…/chats/:jid/messages`, `…/chats/:jid/window`, `PATCH …/chats/:jid/state` ·
 Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleAt) · Bulk `POST /api/bulk` · Lists
-`GET /api/lists`, `POST /api/lists/import`, `GET/PATCH /api/lists/:id/members[/:phone]` (stage, visitAt, outcome, notes, followupAt, availableFrom, followupNote), `PATCH …/followup|pipeline`,
+`GET /api/lists` (`?archived=1`), `POST /api/lists/import`, `POST /api/lists/:id/archive`, `DELETE /api/lists/:id/members/:phone`, `GET/PATCH /api/lists/:id/members[/:phone]` (stage, visitAt, outcome, notes, followupAt, availableFrom, followupNote), `PATCH …/followup|pipeline`,
 `POST /api/lists/:id/send` (waTemplate, scheduledAt) · Drafts `GET /api/outbox`, `/outbox/count`, `/outbox/status`,
 `POST /outbox/estimate|approve-all|approve-selected|reject-selected|move`, `/outbox/:id/approve|reject` · Board
 `GET /api/tasks/:id/log`, `POST /api/tasks/:id/notes` · `GET/POST /api/tasks` (`?kind=reply|followup|visit|scheduled|reminder|bulk|todo`, `?for=you|ai`, `?due_now=1`; POST/PATCH take `assignee` and `priority`), `PATCH /api/tasks/:id`, `POST /api/board/sync` · Meta
@@ -190,4 +209,4 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
 - Failures are shown with a plain reason (WhatsApp/Meta error codes translated); Meta's actual delivery events are
   kept 14 days.
 - Alerts by WhatsApp when a number is logged out or offline 15+ minutes.
-- Tests: `npm test` (81 end-to-end tests, including a fake Meta server).
+- Tests: `npm test` (85 end-to-end tests, including a fake Meta server).
