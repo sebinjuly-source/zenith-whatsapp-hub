@@ -606,7 +606,7 @@
       }) }, h('option', { value: '' }, '📝'));
       api(`/api/templates?account=${encodeURIComponent(ib.account)}`).then((ts) => {
         state.templates = ts;
-        tplSel.append(...ts.map((t) => h('option', { value: t.id }, t.name)));
+        tplSel.append(...(ts.length ? ts.map((t) => h('option', { value: t.id }, t.name)) : [h('option', { value: '', disabled: true }, 'No saved templates yet — ☰ → Templates')]));
       }).catch(() => {});
       fileIn.onchange = () => { fileLabel.textContent = fileIn.files[0]?.name || ''; };
       const laterIn = h('input', { type: 'datetime-local', 'aria-label': 'Send at', title: 'Send at this time (leave empty to send now)', style: 'display:none;margin-top:4px;max-width:240px' });
