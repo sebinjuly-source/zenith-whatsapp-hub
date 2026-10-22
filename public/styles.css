@@ -354,3 +354,27 @@ details.day .cardlist { margin: 6px 0; }
   .topbar .tab .tab-label { font-size: 13px; }
   .topbar .tab { padding: 6px 7px; }
 }
+
+/* ===== Side pane menu (☰ top left, slides in from the left) ===== */
+.topbar .menu-btn { font-size: 22px; border: 0; background: transparent; padding: 6px 10px; margin-right: 2px; }
+.topbar .menu-btn:hover { background: var(--panel-2); }
+.app { position: relative; }
+.drawer {
+  position: fixed; top: 52px; left: 0; bottom: 0; width: min(300px, 86vw); background: var(--panel);
+  border-right: 1px solid var(--line); box-shadow: 4px 0 24px rgba(0,0,0,.14); z-index: 40;
+  display: flex; flex-direction: column; transform: translateX(-102%); transition: transform .2s ease; visibility: hidden;
+}
+.app.drawer-open .drawer { transform: none; visibility: visible; }
+.scrim { position: fixed; inset: 52px 0 0 0; background: rgba(0,0,0,.28); z-index: 35; opacity: 0; pointer-events: none; transition: opacity .2s; }
+.app.drawer-open .scrim { opacity: 1; pointer-events: auto; }
+.drawer-nav { flex: 1; overflow: auto; padding: 10px 8px; display: grid; gap: 2px; align-content: start; }
+.drawer-nav a, .drawer-foot a {
+  display: flex; align-items: center; gap: 14px; padding: 11px 14px; border-radius: 10px; color: var(--ink);
+  text-decoration: none; font-size: 15px;
+}
+.drawer-nav a .ico, .drawer-foot a .ico { font-size: 19px; width: 24px; text-align: center; }
+.drawer-nav a:hover, .drawer-foot a:hover { background: var(--panel-2); }
+.drawer-nav a.active { background: var(--accent-soft); font-weight: 600; }
+.drawer-nav hr { border: 0; border-top: 1px solid var(--line); margin: 6px 8px; }
+.drawer-foot { border-top: 1px solid var(--line); background: var(--panel-2); padding: 8px; }
+@media (prefers-reduced-motion: reduce) { .drawer, .scrim { transition: none; } }

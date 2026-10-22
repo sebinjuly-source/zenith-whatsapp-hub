@@ -147,12 +147,17 @@
   };
 
   // ---------- shell ----------
-  // Top bar: the three pages used all day (Board, Inbox, Drafts); everything else behind ☰ (top right).
+  // Top bar: ☰ (opens the side pane with every page), the name, and the three pages used all day.
   const MENU = [
+    ['board', '🗂️', 'Board'],
+    ['inbox', '💬', 'Inbox'],
+    ['outbox', '✉️', 'Drafts'],
+    null,
     ['lists', '📋', 'Lists'],
     ['accounts', '📱', 'Numbers'],
     ['templates', '📝', 'Templates'],
     ['rules', '⚡', 'Rules'],
+    null,
     ['settings', '⚙️', 'Settings'],
     ['connect', '🔌', 'Connect AI & apps'],
     ['activity', '🕘', 'Activity'],
@@ -161,32 +166,33 @@
     persist();
     const tab = (r, ico, label, extra) =>
       h('a', { href: '#' + r, class: 'tab' + (state.route === r ? ' active' : ''), title: label }, h('span', { class: 'ico' }, ico), h('span', { class: 'tab-label' }, label), extra || '');
-    const inMenu = MENU.find((m) => m[0] === state.route);
-    const panel = h('div', { class: 'menu-panel', role: 'menu', hidden: true },
-      MENU.map(([r, ico, label]) => h('a', { href: '#' + r, role: 'menuitem', class: state.route === r ? 'active' : '', title: label }, h('span', { class: 'ico' }, ico), label)),
-      h('hr'),
-      h('a', { href: '#', role: 'menuitem', onclick: guard(async (e) => { e.preventDefault(); await api('/logout', { method: 'POST' }); renderLogin(); }) }, h('span', { class: 'ico' }, '↩️'), 'Log out'));
-    const menuBtn = h('button', { class: 'menu-btn' + (inMenu ? ' active' : ''), type: 'button', 'aria-label': 'Menu', 'aria-haspopup': 'true', 'aria-expanded': 'false', title: inMenu ? `Menu (${inMenu[2]})` : 'Menu',
-      onclick: (e) => {
-        e.stopPropagation();
-        panel.hidden = !panel.hidden;
-        menuBtn.setAttribute('aria-expanded', String(!panel.hidden));
-      } }, inMenu ? h('span', { class: 'ico menu-current' }, inMenu[1]) : null, '☰');
-    document.onclick = (e) => { if (!panel.hidden && !panel.contains(e.target)) { panel.hidden = true; menuBtn.setAttribute('aria-expanded', 'false'); } };
-    document.onkeydown = (e) => { if (e.key === 'Escape' && !panel.hidden) { panel.hidden = true; menuBtn.focus(); } };
-    root.replaceChildren(
-      h('div', { class: 'app' },
-        h('header', { class: 'topbar' },
-          h('div', { class: 'brand', title: 'Zenith WhatsApp Hub' }, 'WhatsApp Hub'),
-          h('nav', { class: 'tabs', 'aria-label': 'Main' },
-            tab('board', '🗂️', 'Board'),
-            tab('inbox', '💬', 'Inbox'),
-            tab('outbox', '✉️', 'Drafts', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null)),
-          h('div', { class: 'spacer' }),
-          h('div', { class: 'menu' }, menuBtn, panel)),
-        h('main', { class: flush ? 'flush' : '' }, content),
-      ),
-    );
+    const close = () => { app.classList.remove('drawer-open'); menuBtn.setAttribute('aria-expanded', 'false'); menuBtn.firstChild.textContent = '☰'; };
+    const open = () => { app.classList.add('drawer-open'); menuBtn.setAttribute('aria-expanded', 'true'); menuBtn.firstChild.textContent = '✕'; drawer.querySelector('a.active, a')?.focus(); };
+    const menuBtn = h('button', { class: 'menu-btn', type: 'button', 'aria-label': 'Menu', 'aria-controls': 'drawer', 'aria-expanded': 'false', title: 'Menu',
+      onclick: () => (app.classList.contains('drawer-open') ? close() : open()) }, h('span', {}, '☰'));
+    const drawer = h('aside', { class: 'drawer', id: 'drawer', 'aria-label': 'Menu' },
+      h('nav', { class: 'drawer-nav' },
+        MENU.map((m) => (m
+          ? h('a', { href: '#' + m[0], class: state.route === m[0] ? 'active' : '', onclick: close },
+              h('span', { class: 'ico' }, m[1]), h('span', { class: 'grow' }, m[2]),
+              m[0] === 'outbox' && state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null)
+          : h('hr')))),
+      h('div', { class: 'drawer-foot' },
+        h('a', { href: '#', onclick: guard(async (e) => { e.preventDefault(); close(); await api('/logout', { method: 'POST' }); renderLogin(); }) }, h('span', { class: 'ico' }, '↩️'), 'Log out'),
+        h('div', { class: 'muted', style: 'font-size:12px;padding:6px 12px' }, 'Zenith WhatsApp Hub')));
+    const scrim = h('div', { class: 'scrim', onclick: close, 'aria-hidden': 'true' });
+    const app = h('div', { class: 'app' },
+      h('header', { class: 'topbar' },
+        menuBtn,
+        h('div', { class: 'brand', title: 'Zenith WhatsApp Hub' }, 'WhatsApp Hub'),
+        h('nav', { class: 'tabs', 'aria-label': 'Main' },
+          tab('board', '🗂️', 'Board'),
+          tab('inbox', '💬', 'Inbox'),
+          tab('outbox', '✉️', 'Drafts', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null))),
+      h('main', { class: flush ? 'flush' : '' }, content),
+      scrim, drawer);
+    document.onkeydown = (e) => { if (e.key === 'Escape' && app.classList.contains('drawer-open')) { close(); menuBtn.focus(); } };
+    root.replaceChildren(app);
   }
 
   function renderLogin() {

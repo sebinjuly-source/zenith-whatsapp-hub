@@ -60,7 +60,7 @@ reminders always go from the number that has their chat.
 ## 3. Dashboard pages
 
 The top bar has the three pages used all day: **🗂️ Board**, **💬 Inbox** and **✉️ Drafts** (with a count). Everything else
-sits behind **☰** at the top right, with icons: 📋 Lists, 📱 Numbers, 📝 Templates, ⚡ Rules, ⚙️ Settings, 🔌 Connect AI &
+opens from **☰** at the top left in a side pane (✕ or a tap outside closes it), with icons: 📋 Lists, 📱 Numbers, 📝 Templates, ⚡ Rules, ⚙️ Settings, 🔌 Connect AI &
 apps, 🕘 Activity, ↩️ Log out. Hover over an icon to see its name. The number you pick in the Inbox, the Board filters
 and the open tabs are remembered on that device after a refresh. Less-used parts of each page are folded (▸).
 
