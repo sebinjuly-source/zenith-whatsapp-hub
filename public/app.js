@@ -2,6 +2,22 @@
 (() => {
   const root = document.getElementById('root');
   const state = { accounts: [], route: 'accounts', inbox: { account: null, chat: null, kind: 'all', q: '', waiting: false }, draftsCount: 0 };
+  // Choices that survive a refresh on this device (number picked in the inbox, board filters, tabs).
+  const SAVE_KEY = 'hub-ui-v1';
+  try {
+    const saved = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}');
+    Object.assign(state.inbox, saved.inbox || {});
+    for (const k of ['board', 'outboxTab', 'outboxAccount', 'listId', 'listRole', 'settingsFor']) if (saved[k] !== undefined) state[k] = saved[k];
+  } catch {}
+  function persist() {
+    try {
+      const ib = state.inbox;
+      localStorage.setItem(SAVE_KEY, JSON.stringify({
+        inbox: { account: ib.account, kind: ib.kind, state: ib.state, waiting: ib.waiting },
+        board: state.board, outboxTab: state.outboxTab, outboxAccount: state.outboxAccount, listId: state.listId, listRole: state.listRole, settingsFor: state.settingsFor,
+      }));
+    } catch {}
+  }
   let linkModal = null; // { id, el } while the QR / pairing dialog is open
 
   // ---------- helpers ----------
@@ -131,26 +147,43 @@
   };
 
   // ---------- shell ----------
+  // Top bar: the three pages used all day (Board, Inbox, Drafts); everything else behind ☰ (top right).
+  const MENU = [
+    ['lists', '📋', 'Lists'],
+    ['accounts', '📱', 'Numbers'],
+    ['templates', '📝', 'Templates'],
+    ['rules', '⚡', 'Rules'],
+    ['settings', '⚙️', 'Settings'],
+    ['connect', '🔌', 'Connect AI & apps'],
+    ['activity', '🕘', 'Activity'],
+  ];
   function shell(content, { flush = false } = {}) {
-    const link = (r, label, extra) =>
-      h('a', { href: '#' + r, class: state.route === r ? 'active' : '' }, label, extra || '');
+    persist();
+    const tab = (r, ico, label, extra) =>
+      h('a', { href: '#' + r, class: 'tab' + (state.route === r ? ' active' : ''), title: label }, h('span', { class: 'ico' }, ico), h('span', { class: 'tab-label' }, label), extra || '');
+    const inMenu = MENU.find((m) => m[0] === state.route);
+    const panel = h('div', { class: 'menu-panel', role: 'menu', hidden: true },
+      MENU.map(([r, ico, label]) => h('a', { href: '#' + r, role: 'menuitem', class: state.route === r ? 'active' : '', title: label }, h('span', { class: 'ico' }, ico), label)),
+      h('hr'),
+      h('a', { href: '#', role: 'menuitem', onclick: guard(async (e) => { e.preventDefault(); await api('/logout', { method: 'POST' }); renderLogin(); }) }, h('span', { class: 'ico' }, '↩️'), 'Log out'));
+    const menuBtn = h('button', { class: 'menu-btn' + (inMenu ? ' active' : ''), type: 'button', 'aria-label': 'Menu', 'aria-haspopup': 'true', 'aria-expanded': 'false', title: inMenu ? `Menu (${inMenu[2]})` : 'Menu',
+      onclick: (e) => {
+        e.stopPropagation();
+        panel.hidden = !panel.hidden;
+        menuBtn.setAttribute('aria-expanded', String(!panel.hidden));
+      } }, inMenu ? h('span', { class: 'ico menu-current' }, inMenu[1]) : null, '☰');
+    document.onclick = (e) => { if (!panel.hidden && !panel.contains(e.target)) { panel.hidden = true; menuBtn.setAttribute('aria-expanded', 'false'); } };
+    document.onkeydown = (e) => { if (e.key === 'Escape' && !panel.hidden) { panel.hidden = true; menuBtn.focus(); } };
     root.replaceChildren(
       h('div', { class: 'app' },
-        h('nav', { class: 'nav', 'aria-label': 'Main' },
-          h('div', { class: 'brand' }, 'WhatsApp Hub', h('small', {}, 'Zenith')),
-          link('board', 'Board'),
-          link('accounts', 'Numbers'),
-          link('inbox', 'Inbox'),
-          link('outbox', 'Drafts', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null),
-          link('lists', 'Lists'),
-          link('templates', 'Templates'),
-          link('rules', 'Rules'),
-          link('settings', 'Settings'),
-          link('connect', 'Connect AI & apps'),
-          link('activity', 'Activity'),
+        h('header', { class: 'topbar' },
+          h('div', { class: 'brand', title: 'Zenith WhatsApp Hub' }, 'WhatsApp Hub'),
+          h('nav', { class: 'tabs', 'aria-label': 'Main' },
+            tab('board', '🗂️', 'Board'),
+            tab('inbox', '💬', 'Inbox'),
+            tab('outbox', '✉️', 'Drafts', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null)),
           h('div', { class: 'spacer' }),
-          h('a', { href: '#', onclick: guard(async (e) => { e.preventDefault(); await api('/logout', { method: 'POST' }); renderLogin(); }) }, 'Log out'),
-        ),
+          h('div', { class: 'menu' }, menuBtn, panel)),
         h('main', { class: flush ? 'flush' : '' }, content),
       ),
     );
@@ -458,10 +491,12 @@
       h('div', { class: 'tools' },
         h('select', { 'aria-label': 'Number', onchange: (e) => { ib.account = e.target.value; ib.chat = null; viewInbox(); } },
           accs.map((a) => h('option', { value: a.id, selected: a.id === ib.account }, `${a.label}${a.phone ? ' (+' + a.phone + ')' : ''}`))),
-        h('input', { type: 'text', placeholder: 'Search name or number', value: ib.q, 'aria-label': 'Search chats', oninput: (e) => { ib.q = e.target.value; clearTimeout(qTimer); qTimer = setTimeout(loadChats, 250); } }),
+        h('input', { type: 'text', placeholder: '🔍 Search name or number', value: ib.q, 'aria-label': 'Search chats', oninput: (e) => { ib.q = e.target.value; clearTimeout(qTimer); qTimer = setTimeout(loadChats, 250); } }),
         stateEl,
-        segEl,
-        h('label', { class: 'switch', style: 'margin:0' }, h('input', { type: 'checkbox', checked: ib.waiting, onchange: (e) => { ib.waiting = e.target.checked; loadChats(); } }), h('span', {}, 'Only chats waiting on my reply')),
+        h('details', { class: 'fold' }, h('summary', {}, 'More filters', ib.kind !== 'all' || ib.waiting ? ' •' : ''),
+          h('div', { style: 'display:grid;gap:8px;margin-top:8px' },
+            segEl,
+            h('label', { class: 'switch', style: 'margin:0' }, h('input', { type: 'checkbox', checked: ib.waiting, onchange: (e) => { ib.waiting = e.target.checked; persist(); loadChats(); } }), h('span', {}, 'Only chats waiting on my reply')))),
       ),
       list,
     );
@@ -503,10 +538,22 @@
       let oldest = null;
       const olderBtn = h('button', { class: 'btn small', style: 'align-self:center', onclick: guard(() => loadMsgs(true)) }, 'Load earlier');
       const contactPanel = h('div', { class: 'contactpanel', hidden: true });
+      // Chat actions: "Done" stays visible; the rest sit behind ⋯ so the header is one line on a phone
+      const actions = h('div', { class: 'menu-panel chat-actions', hidden: true });
+      const actionsBtn = h('button', { class: 'btn small', type: 'button', 'aria-label': 'More chat actions', title: 'More', onclick: (e) => { e.stopPropagation(); actions.hidden = !actions.hidden; } }, '⋯');
       const header = h('header', {},
-        h('button', { class: 'btn small', onclick: () => { ib.chat = null; wrap.classList.remove('has-chat'); }, 'aria-label': 'Back to chats' }, '←'),
-        h('div', { class: 'who' }, h('b', {}, c.name || c.jid), h('span', { class: 'muted mono' }, c.jid)),
-        !c.is_group ? h('button', { class: 'btn small', onclick: () => { contactPanel.hidden = !contactPanel.hidden; if (!contactPanel.hidden) loadContact(); } }, 'Contact') : null,
+        h('button', { class: 'btn small back', onclick: () => { ib.chat = null; wrap.classList.remove('has-chat'); }, 'aria-label': 'Back to chats', title: 'Back to chats' }, '←'),
+        h('div', { class: 'who' }, h('b', {}, c.name || c.jid), h('span', { class: 'muted mono jid' }, c.jid.split('@')[0])),
+        c.state !== 'done'
+          ? h('button', { class: 'btn small', title: 'Done — it comes back if they write again', onclick: guard(async () => {
+              await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/state`, { method: 'PATCH', body: { state: 'done' } });
+              toast('Marked done — it comes back if they write again'); ib.chat = null; viewInbox();
+            }) }, '✓ Done')
+          : null,
+        h('div', { class: 'menu' }, actionsBtn, actions),
+      );
+      fill(actions,
+        !c.is_group ? h('button', { class: 'btn small', onclick: () => { actions.hidden = true; contactPanel.hidden = !contactPanel.hidden; if (!contactPanel.hidden) loadContact(); } }, '👤 Contact') : null,
         c.state === 'open' || !c.state || c.due
           ? h('button', { class: 'btn small', title: 'Hide this chat until a date, then show it as a reminder', onclick: guard(async () => {
               const when = prompt('Remind me on (YYYY-MM-DD, optionally HH:MM) or in how many days (e.g. 3):', '1');
@@ -516,25 +563,20 @@
               const note = prompt('What to do then? (optional)', '') || undefined;
               await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/state`, { method: 'PATCH', body: { state: 'snoozed', until: until.toISOString(), note } });
               toast('Reminder set'); ib.chat = null; viewInbox();
-            }) }, 'Remind me')
-          : null,
-        c.state !== 'done'
-          ? h('button', { class: 'btn small', onclick: guard(async () => {
-              await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/state`, { method: 'PATCH', body: { state: 'done' } });
-              toast('Marked done — it comes back if they write again'); ib.chat = null; viewInbox();
-            }) }, 'Done')
+            }) }, '⏰ Remind me')
           : null,
         c.state && c.state !== 'open' && !c.due
           ? h('button', { class: 'btn small', onclick: guard(async () => {
               await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/state`, { method: 'PATCH', body: { state: 'open' } });
               toast('Reopened'); viewInbox();
-            }) }, 'Reopen')
+            }) }, '↺ Reopen')
           : null,
         isCloud(ib.account) ? null : h('button', { class: 'btn small', title: 'Ask the phone for older messages', onclick: guard(async () => {
           const r = await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/older`, { body: { count: 50 } });
           toast(r.note);
-        }) }, 'Fetch older from phone'),
+        }) }, '⤓ Older messages from phone'),
       );
+      document.addEventListener('click', (e) => { if (!actions.hidden && !actions.contains(e.target)) actions.hidden = true; });
       const fileIn = h('input', { type: 'file', hidden: true });
       const ta = h('textarea', { rows: 1, placeholder: 'Type a message', 'aria-label': 'Message' });
       const fileLabel = h('span', { class: 'muted' });
@@ -546,7 +588,7 @@
         fill(replyBar, m ? ['↪ Replying to: ', (m.body || '[' + m.type + ']').slice(0, 80), ' ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); setReply(null); } }, 'cancel')] : []);
         if (m) ta.focus();
       };
-      const tplSel = h('select', { 'aria-label': 'Insert a template', style: 'width:auto;max-width:150px', onchange: guard(async (e) => {
+      const tplSel = h('select', { 'aria-label': 'Insert a saved template', title: 'Insert a saved template', class: 'icon-select', onchange: guard(async (e) => {
         const t = (state.templates || []).find((x) => String(x.id) === e.target.value);
         e.target.value = '';
         if (!t) return;
@@ -555,7 +597,7 @@
         ta.value = t.body.replace(/\{name\}/g, name || 'there').replace(/\{first_name\}/g, name.split(/\s+/)[0] || 'there').replace(/\{phone\}/g, c.jid.split('@')[0]);
         if (t.attachment?.url) toast('This template has a file — send it from the Board or via the AI, or attach it here');
         ta.focus();
-      }) }, h('option', { value: '' }, 'Template…'));
+      }) }, h('option', { value: '' }, '📝'));
       api(`/api/templates?account=${encodeURIComponent(ib.account)}`).then((ts) => {
         state.templates = ts;
         tplSel.append(...ts.map((t) => h('option', { value: t.id }, t.name)));
@@ -588,8 +630,8 @@
           sendBtn.disabled = false;
         }
       }) },
-        h('button', { type: 'button', class: 'btn', onclick: () => fileIn.click(), 'aria-label': 'Attach file' }, '📎'), fileIn,
-        h('button', { type: 'button', class: 'btn', title: 'Send later', 'aria-label': 'Send later', onclick: () => {
+        h('button', { type: 'button', class: 'btn icon', onclick: () => fileIn.click(), 'aria-label': 'Attach file', title: 'Attach a file' }, '📎'), fileIn,
+        h('button', { type: 'button', class: 'btn icon', title: 'Send later', 'aria-label': 'Send later', onclick: () => {
           const on = laterIn.style.display === 'none';
           laterIn.style.display = on ? '' : 'none';
           if (on) laterIn.focus(); else laterIn.value = '';
@@ -597,7 +639,7 @@
         tplSel,
         h('div', { class: 'grow' }, replyBar, ta, laterIn, fileLabel),
       );
-      const sendBtn = h('button', { class: 'btn primary', type: 'submit' }, 'Send');
+      const sendBtn = h('button', { class: 'btn primary send', type: 'submit', 'aria-label': 'Send', title: 'Send' }, '➤', h('span', { class: 'tab-label' }, ' Send'));
       composer.append(sendBtn);
       // Meta Cloud API number: free text only within 24 h of their last message, otherwise an approved template.
       const cloudBar = h('div', { style: 'display:none;padding:6px 12px;font-size:13px;border-top:1px solid var(--line)' });
@@ -638,7 +680,7 @@
         ta.placeholder = w.open ? 'Type a message' : 'Free text is blocked until they write again — use "Meta template…"';
       };
       thread.replaceChildren(header, h('div', { style: 'display:flex;flex-direction:column;min-height:0' }, contactPanel, msgs), h('div', {}, cloudBar, composer));
-      thread.style.gridTemplateRows = 'auto 1fr auto';
+      thread.style.gridTemplateRows = 'auto minmax(0, 1fr) auto';
       checkWindow();
 
       async function loadContact() {
@@ -720,34 +762,31 @@
   }
 
   // ---------- task board ----------
+  // Two lists you can read at a glance — "Do now" (overdue, due today, or waiting on someone) and "Future" (by day) —
+  // plus running bulk sends and finished cards, collapsed. Each card shows its title line; details, history & notes
+  // and the move/flag controls open on demand.
   async function viewBoard() {
     await loadAccounts();
     const accs = state.accounts;
     if (!accs.length) return shell([h('h1', {}, 'Board'), h('p', { class: 'sub' }, 'Add and link a number first.')]);
-    // Default: every number together, so a card can't hide on another number's tab
     const b = (state.board ||= { account: '', past: false, who: '' });
     if (b.account && !accs.find((a) => a.id === b.account)) b.account = '';
     const formAccount = b.account || (accs.find((a) => a.isDefault) || accs[0]).id;
     const q = (extra) => `/api/tasks?${new URLSearchParams({ ...(b.account ? { account: b.account } : {}), ...(b.role ? { role: b.role } : {}), ...extra })}`;
-    const [active, past, boardRoles, tplList] = await Promise.all([
+    const [active, past, roles, tplList] = await Promise.all([
       api(q({})),
       b.past ? api(q({ past: '1' })) : Promise.resolve([]),
-      roleChips(b.role, (r) => { b.role = r; viewBoard(); }),
+      api('/api/roles').catch(() => []),
       api(`/api/templates?account=${encodeURIComponent(formAccount)}`).catch(() => []),
     ]);
     const labelOf = (id) => accs.find((a) => a.id === id)?.label || id;
-    const cols = [
-      ['upcoming', 'Upcoming'],
-      ['in_progress', 'In progress'],
-      ['waiting', 'Waiting for approval'],
-      ...(b.past ? [['done', 'Done & cancelled']] : []),
-    ];
     const whoOf = (t) => t.assignee || 'you';
     const mine = (t) => !b.who || whoOf(t) === b.who;
-    const byCol = (k) => (k === 'done' ? past : active.filter((t) => t.status === k)).filter(mine);
     const fmtWhen = (t) => new Date(t).toLocaleString([], { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-    const whoTag = (t) => h('span', { class: 'tag', title: whoOf(t) === 'ai' ? 'The AI / hub does this' : 'You do this', style: whoOf(t) === 'you' ? 'background:var(--accent-soft)' : '' }, whoOf(t) === 'ai' ? '🤖 AI' : '👤 You');
-    const prioTag = (t) => (t.priority ? h('span', { class: 'tag', style: 'background:var(--bad-soft);color:var(--bad);font-weight:600' }, '⭐ Priority') : null);
+    const fmtTime = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const KIND = { reply: ['💬', 'Reply needed'], visit: ['🎯', 'Interview'], followup: ['🔁', 'Follow-up'], scheduled: ['🕒', 'Scheduled message'], reminder: ['⏰', 'Reminder'], bulk: ['📤', 'Bulk send'], todo: ['📌', 'To-do'] };
+    const icon = (pair) => h('span', { class: 'ico', title: pair[1], 'aria-label': pair[1] }, pair[0]);
+    const whoIcon = (t) => icon(whoOf(t) === 'ai' ? ['🤖', 'The AI / hub does this'] : ['👤', 'You do this']);
     // Cards the hub made for a chat (reply, follow-up, interview, reminder) open that chat directly
     const chatOf = (t) => {
       const [refKind, refA, refB] = String(t.ref || '').split(':');
@@ -758,35 +797,45 @@
       Object.assign(state.inbox, { account: ch.account, q: ch.jid.split('@')[0], chat: null, state: ch.kind === 'remind' ? 'snoozed' : 'open', waiting: false, kind: 'all', open: ch.jid });
       location.hash = 'inbox';
     };
-    // ---- agenda: everything with a date, by day — the shared calendar of you and the AI
-    const dayKey = (d) => new Date(d).toLocaleDateString('en-CA');
-    const today = dayKey(Date.now());
-    const tomorrow = dayKey(Date.now() + 86400000);
-    const dated = active.filter((t) => t.due_at && mine(t)).sort((x, y) => new Date(x.due_at) - new Date(y.due_at));
-    const groups = [];
-    for (const t of dated) {
-      const k = new Date(t.due_at) < new Date() ? 'overdue' : dayKey(t.due_at);
-      let g = groups.find((x) => x.k === k);
-      if (!g) groups.push((g = { k, items: [] }));
-      g.items.push(t);
-    }
-    const groupLabel = (k) => (k === 'overdue' ? 'Overdue / now' : k === today ? 'Today' : k === tomorrow ? 'Tomorrow' : new Date(k + 'T12:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' }));
-    const agenda = h('div', { class: 'card', style: 'margin-bottom:14px' },
-      h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, '📅 Coming up'),
-        h('span', { class: 'muted', style: 'font-size:12px' }, '👤 You = you do it · 🤖 AI = the AI/hub does it · ⭐ = must do')),
-      groups.length ? groups.map((g) => h('div', { style: 'margin-top:10px' },
-        h('div', { style: `font-weight:600;font-size:13px;${g.k === 'overdue' ? 'color:var(--bad)' : ''}` }, groupLabel(g.k)),
-        g.items.map((t) => {
-          const ch = chatOf(t);
-          return h('div', { class: 'row', style: `gap:6px;padding:5px 0;border-bottom:1px solid var(--line);font-size:13px;${t.priority ? 'font-weight:600' : ''}` },
-            h('span', { class: 'mono muted', style: 'min-width:64px' }, new Date(t.due_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
-            whoTag(t), prioTag(t),
-            h('span', { class: 'grow' }, t.title),
-            !b.account ? h('span', { class: 'tag' }, labelOf(t.account_id)) : null,
-            ch ? h('button', { class: 'btn small', onclick: () => goChat(ch) }, 'Open chat') : null);
-        }))) : h('p', { class: 'muted', style: 'font-size:13px' }, 'Nothing dated coming up.'));
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+    const due = (t) => t.due_at || (t.kind === 'bulk' && t.next_at) || null;
+    const isNow = (t) => (t.kind === 'bulk' ? t.status === 'waiting' || (!t.pending && !t.next_at) : !due(t) || new Date(due(t)) <= endOfToday);
+    const running = active.filter((t) => mine(t) && t.kind === 'bulk' && t.status === 'in_progress');
+    const now = active.filter((t) => mine(t) && !running.includes(t) && isNow(t))
+      .sort((x, y) => (y.priority - x.priority) || ((due(x) ? new Date(due(x)) : 0) - (due(y) ? new Date(due(y)) : 0)));
+    const future = active.filter((t) => mine(t) && !running.includes(t) && !isNow(t)).sort((x, y) => new Date(due(x)) - new Date(due(y)));
+
+    // one card: title line + one action; everything else under "More"
     const card = (t) => {
+      const ch = chatOf(t);
+      // a reply card is dated when they wrote — that's 'waiting since', not overdue
+      const overdue = due(t) && t.kind !== 'reply' && t.kind !== 'bulk' && new Date(due(t)) < new Date() && !['done', 'cancelled'].includes(t.status);
       const pct = t.total ? Math.round((100 * (t.sent + t.failed)) / t.total) : null;
+      const primary = ch
+        ? h('button', { class: 'btn small primary', onclick: () => goChat(ch) }, ch.kind === 'reply' ? '💬 Reply' : '💬 Open chat')
+        : t.drafts
+          ? h('button', { class: 'btn small primary', onclick: guard(async () => {
+              if (!confirm(`Approve and start sending ${t.drafts} messages?`)) return;
+              await api(`/api/tasks/${t.id}/approve`, { method: 'POST' });
+              toast('Approved — sending');
+              viewBoard();
+            }) }, `✅ Approve ${t.drafts}`)
+          : t.total ? h('button', { class: 'btn small', onclick: () => { state.outboxTask = t.id; state.outboxTab = 'all'; location.hash = 'outbox'; } }, '✉️ Messages') : null;
+      const closed = ['done', 'cancelled'].includes(t.status);
+      const doneBtn = closed ? null : h('button', { class: 'btn small', title: 'Mark done', onclick: guard(async () => {
+        await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: 'done' } });
+        viewBoard();
+      }) }, '✓');
+      // More: details, latest note, history & notes, flag, move
+      const logBox = h('div', { style: 'font-size:12px;margin-top:6px' });
+      const noteIn = h('textarea', { rows: 2, placeholder: 'Add a note (e.g. call notes: what was discussed)', style: 'margin-top:6px' });
+      const loadLog = async () => {
+        const rows = await api(`/api/tasks/${t.id}/log`).catch(() => []);
+        logBox.replaceChildren(...(rows.length ? rows.map((r) => h('div', { style: `padding:3px 0;border-bottom:1px solid var(--line);${r.kind === 'note' ? 'font-weight:600' : ''}` },
+          h('span', { class: 'muted' }, new Date(r.at).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }), ' · ', { you: '👤 You', ai: '🤖 AI', hub: '⚙️ Hub', rule: '⚙️ Rule' }[r.actor] || r.actor, ' · '),
+          r.kind === 'note' ? '📝 ' : '', r.text)) : [h('span', { class: 'muted' }, 'No history yet.')]));
+      };
       const move = h('select', { 'aria-label': 'Move task', class: 'small-select', onchange: guard(async (e) => {
         const v = e.target.value;
         if (v === 'cancelled') {
@@ -794,91 +843,91 @@
           await api(`/api/tasks/${t.id}/cancel`, { method: 'POST' });
         } else await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: v } });
         viewBoard();
-      }) },
-        h('option', { value: '' }, 'Move…'),
-        ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'].filter((s) => s !== t.status).map((s) => h('option', { value: s }, s.replace('_', ' '))),
-      );
-      const ch = chatOf(t);
-      const openChat = ch ? h('button', { class: 'btn small primary', onclick: () => goChat(ch) }, ch.kind === 'reply' ? 'Open chat to reply' : 'Open chat') : null;
-      const kindTag = { reply: '💬 Reply needed', visit: '🎯 Interview', followup: '🔁 Follow-up', scheduled: '🕒 Scheduled', reminder: '⏰ Reminder' }[t.kind];
-      const flag = h('button', { class: 'btn small', title: t.priority ? 'Remove priority' : 'Mark as must-do', onclick: guard(async () => {
-        await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { priority: !t.priority } });
-        viewBoard();
-      }) }, t.priority ? '☆ Unflag' : '⭐ Flag');
-      // History + notes (call notes, what was agreed); loads when opened
-      const logBox = h('div', { style: 'font-size:12px;margin-top:6px' });
-      const noteIn = h('textarea', { rows: 2, placeholder: 'Add a note (e.g. call notes: what was discussed)', style: 'width:100%;margin-top:6px' });
-      const loadLog = async () => {
-        const rows = await api(`/api/tasks/${t.id}/log`).catch(() => []);
-        logBox.replaceChildren(...(rows.length ? rows.map((r) => h('div', { style: `padding:3px 0;border-bottom:1px solid var(--line);${r.kind === 'note' ? 'font-weight:600' : ''}` },
-          h('span', { class: 'muted' }, new Date(r.at).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }), ' · ', { you: '👤 You', ai: '🤖 AI', hub: '⚙️ Hub', rule: '⚙️ Rule' }[r.actor] || r.actor, ' · '),
-          r.kind === 'note' ? '📝 ' : '', r.text)) : [h('span', { class: 'muted' }, 'No history yet.')]));
-      };
-      const history = h('details', { style: 'margin-top:6px', ontoggle: (e) => { if (e.target.open) loadLog(); } },
-        h('summary', { class: 'muted', style: 'font-size:12px;cursor:pointer' }, t.notes ? `📝 ${t.notes} note${t.notes > 1 ? 's' : ''} · history` : 'History & notes'),
+      }) }, h('option', { value: '' }, 'Move…'),
+        ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'].filter((s) => s !== t.status).map((s) => h('option', { value: s }, s.replace('_', ' '))));
+      const more = h('details', { class: 'more', ontoggle: (e) => { if (e.target.open) loadLog(); } },
+        h('summary', {}, t.notes ? `More · 📝 ${t.notes}` : 'More'),
+        t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, t.details) : null,
+        closed ? null : h('div', { class: 'row', style: 'margin:6px 0' },
+          h('button', { class: 'btn small', onclick: guard(async () => { await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { priority: !t.priority } }); viewBoard(); }) }, t.priority ? '☆ Remove priority' : '⭐ Make priority'),
+          move),
+        h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, 'History & notes'),
         logBox,
-        h('div', {}, noteIn, h('button', { class: 'btn small', onclick: guard(async () => {
+        noteIn,
+        h('button', { class: 'btn small', style: 'margin-top:4px', onclick: guard(async () => {
           if (!noteIn.value.trim()) return;
           await api(`/api/tasks/${t.id}/notes`, { body: { text: noteIn.value } });
           noteIn.value = '';
           toast('Note saved');
           loadLog();
-        }) }, 'Save note')));
-      const border = t.priority ? 'border-left:4px solid var(--bad)' : t.kind === 'reply' ? 'border-left:4px solid var(--bad)' : ['visit', 'followup'].includes(t.kind) ? 'border-left:4px solid var(--accent)' : '';
-      return h('div', { class: 'card taskcard', style: border },
-        h('div', { class: 'row' }, h('b', { class: 'grow' }, t.title),
-          prioTag(t), whoTag(t),
-          kindTag ? h('span', { class: 'tag' }, kindTag) : null,
-          !b.account ? h('span', { class: 'tag' }, labelOf(t.account_id)) : null),
-        t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, t.details) : null,
-        t.last_note ? h('p', { style: 'margin:6px 0;font-size:13px;white-space:pre-wrap' }, '📝 ', t.last_note) : null,
-        t.total
-          ? h('div', { style: 'margin:8px 0' },
-              h('div', { class: 'progress' }, h('i', { style: `width:${pct}%` })),
-              h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' },
-                `${t.sent}/${t.total} sent`, t.drafts ? ` · ${t.drafts} to approve` : '', t.failed ? ` · ${t.failed} failed` : '',
-                t.replied ? ` · ${t.replied} replied` : '', t.next_at && t.pending ? ` · next ${new Date(t.next_at).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}` : ''))
-          : null,
-        t.due_at ? h('div', { class: 'muted', style: `font-size:12px;${new Date(t.due_at) < new Date() && t.status !== 'done' ? 'color:var(--bad)' : ''}` }, 'Due ', fmtWhen(t.due_at)) : null,
-        t.completed_at ? h('div', { class: 'muted', style: 'font-size:12px' }, `${t.status === 'cancelled' ? 'Cancelled' : 'Done'} `, new Date(t.completed_at).toLocaleString()) : null,
-        h('div', { class: 'row', style: 'margin-top:8px' },
-          openChat,
-          t.drafts ? h('button', { class: 'btn small primary', onclick: guard(async () => {
-            if (!confirm(`Approve and start sending ${t.drafts} messages?`)) return;
-            await api(`/api/tasks/${t.id}/approve`, { method: 'POST' });
-            toast('Approved — sending with your delay settings');
-            viewBoard();
-          }) }, `Approve ${t.drafts}`) : null,
-          t.total ? h('button', { class: 'btn small', onclick: () => { state.outboxTask = t.id; state.outboxTab = 'all'; location.hash = 'outbox'; } }, 'Messages') : null,
-          t.status !== 'done' && t.status !== 'cancelled' ? flag : null,
-          t.status !== 'done' && t.status !== 'cancelled' ? move : null,
-        ),
-        history,
+        }) }, 'Save note'));
+      return h('div', { class: 'taskcard' + (t.priority ? ' prio' : '') + (overdue ? ' overdue' : '') },
+        h('div', { class: 'tc-head' },
+          t.priority ? icon(['⭐', 'Priority — must do']) : null,
+          icon(KIND[t.kind] || KIND.todo),
+          h('b', { class: 'grow tc-title' }, t.title),
+          whoIcon(t)),
+        h('div', { class: 'tc-meta muted' },
+          due(t) ? h('span', { style: overdue ? 'color:var(--bad);font-weight:600' : '' }, t.kind === 'reply' ? 'Wrote ' : overdue ? 'Overdue · ' : '', fmtWhen(due(t))) : null,
+          !b.account ? h('span', {}, ' · ', labelOf(t.account_id)) : null,
+          t.total ? h('span', {}, ` · ${t.sent}/${t.total} sent${t.drafts ? `, ${t.drafts} to approve` : ''}${t.failed ? `, ${t.failed} failed` : ''}${t.replied ? `, ${t.replied} replied` : ''}`) : null),
+        t.last_note ? h('div', { class: 'tc-note' }, '📝 ', t.last_note) : null,
+        t.total && t.status === 'in_progress' ? h('div', { class: 'progress', style: 'margin:6px 0' }, h('i', { style: `width:${pct}%` })) : null,
+        h('div', { class: 'row tc-actions' }, primary, doneBtn, more),
       );
     };
-    const newTask = h('form', { class: 'card', onsubmit: guard(async (e) => {
+    // Future: one fold per day, the next two open
+    const dayKey = (d) => new Date(d).toLocaleDateString('en-CA');
+    const tomorrow = dayKey(Date.now() + 86400000);
+    const days = [];
+    for (const t of future) {
+      const k = dayKey(due(t));
+      let g = days.find((x) => x.k === k);
+      if (!g) days.push((g = { k, items: [] }));
+      g.items.push(t);
+    }
+    const dayLabel = (k) => (k === tomorrow ? 'Tomorrow' : new Date(k + 'T12:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' }));
+    const futureEl = days.length
+      ? days.map((g, i) => h('details', { class: 'day', open: i < 2 },
+          h('summary', {}, h('b', {}, dayLabel(g.k)), h('span', { class: 'muted' }, ` · ${g.items.length}`),
+            g.items.some((t) => t.priority) ? h('span', { class: 'ico', title: 'Has a must-do' }, ' ⭐') : null,
+            h('span', { class: 'muted day-peek' }, ' — ', g.items.slice(0, 3).map((t) => `${fmtTime(due(t))} ${t.title.replace(/^(Interview|Follow up|Scheduled): /, '').replace(/ — .*$/, '')}`).join(' · '))),
+          h('div', { class: 'cardlist' }, g.items.map(card))))
+      : [h('p', { class: 'muted' }, 'Nothing planned yet.')];
+    const section = (titleIcon, title, items, body, { open = true, hint } = {}) =>
+      h('details', { class: 'section', open },
+        h('summary', {}, h('span', { class: 'sec-title' }, titleIcon, ' ', title), h('span', { class: 'count' }, items), hint ? h('span', { class: 'muted sec-hint' }, hint) : null),
+        body);
+    // filters: compact selects
+    const sel = (label, value, options, onPick) => h('select', { class: 'small-select', 'aria-label': label, title: label, onchange: (e) => onPick(e.target.value) },
+      options.map(([v, l]) => h('option', { value: v, selected: (value || '') === v }, l)));
+    const filters = h('div', { class: 'row filters' },
+      sel('Number', b.account, [['', '📱 All numbers'], ...accs.map((a) => [a.id, a.label])], (v) => { b.account = v; viewBoard(); }),
+      sel('Who does it', b.who, [['', '👥 Everyone'], ['you', '👤 Mine'], ['ai', '🤖 AI']], (v) => { b.who = v; viewBoard(); }),
+      roles.length ? sel('Job role', b.role, [['', '🧑‍🍳 All roles'], ...roles.map((r) => [r, r])], (v) => { b.role = v; viewBoard(); }) : null,
+      h('button', { class: 'btn small', onclick: () => { b.past = !b.past; viewBoard(); } }, b.past ? 'Hide done' : '✓ Show done'));
+
+    const newTask = h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
       const f = e.target;
       await api('/api/tasks', { body: { account: formAccount, title: f.title.value, details: f.details.value || undefined, dueAt: f.due.value ? new Date(f.due.value).toISOString() : undefined,
         assignee: f.who.value, priority: f.priority.checked } });
       viewBoard();
     }) },
-      h('h2', {}, 'New to-do'),
-      h('label', { class: 'field' }, h('span', {}, 'Title'), h('input', { type: 'text', name: 'title', required: true, placeholder: 'Follow up with interested chef candidates' })),
+      h('label', { class: 'field' }, h('span', {}, 'Title'), h('input', { type: 'text', name: 'title', required: true, placeholder: 'Take interview of Ravi' })),
       h('label', { class: 'field' }, h('span', {}, 'Details'), h('textarea', { name: 'details', rows: 2, placeholder: 'Who, what, any instructions for the AI' })),
       h('div', { class: 'row' },
         h('label', { class: 'field grow' }, h('span', {}, 'Due'), h('input', { type: 'datetime-local', name: 'due' })),
         h('label', { class: 'field grow' }, h('span', {}, 'Who does it'), h('select', { name: 'who' }, h('option', { value: 'you' }, '👤 Me'), h('option', { value: 'ai' }, '🤖 The AI')))),
-      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'priority' }), h('span', {}, '⭐ Priority', h('em', {}, 'A must-do: shown in red and bold on the Board.'))),
-      h('button', { class: 'btn primary', type: 'submit' }, 'Add to board'),
-    );
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'priority' }), h('span', {}, '⭐ Priority', h('em', {}, 'A must-do: shown first and marked red.'))),
+      h('button', { class: 'btn primary', type: 'submit' }, 'Add to board'));
     const bulkCost = h('p', { style: 'font-weight:600;margin:4px 0' });
     const peopleCount = () => (bulkForm?.list?.value || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean).length;
     const updateBulkCost = async () => { const v = bulkWa?.value(); bulkCost.textContent = v ? await costLine(formAccount, peopleCount(), v) : ''; };
     let bulkForm = null;
     const bulkWa = isCloud(formAccount) ? waTemplateField(formAccount, null, { label: 'Meta template (required for a Meta API number)', hint: 'Boxes may use {first_name}, {name} or any column you add after the name.', onChange: updateBulkCost }) : null;
     const bulkTpl = h('select', { name: 'tpl' }, h('option', { value: '' }, '— none: write the message below —'), tplList.map((t) => h('option', { value: t.id }, t.name)));
-    const bulk = h('form', { class: 'card', onsubmit: guard(async (e) => {
+    const bulk = h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
       const f = e.target;
       const recipients = f.list.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
@@ -891,11 +940,11 @@
       const r = await api('/api/bulk', { body: { account: formAccount, title: f.title.value, text: f.text?.value || undefined, template: f.tpl?.value || undefined, waTemplate, recipients,
         scheduledAt: f.when.value ? new Date(f.when.value).toISOString() : undefined } });
       alert(r.task
-        ? `${r.queued} messages ${r.mode === 'approve' ? 'saved for approval (see "Waiting for approval")' : 'queued'}.` + (r.cost?.total ? `\nEstimated Meta cost: ${money(r.cost.total, r.cost.currency)} (${r.cost.count} × ${money(r.cost.perMessage, r.cost.currency)})` : '') + (r.skipped.length ? `\n\nSkipped ${r.skipped.length}:\n` + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n') : '')
+        ? `${r.queued} messages ${r.mode === 'approve' ? 'saved for approval (Do now → Approve)' : 'queued'}.` + (r.cost?.total ? `\nEstimated Meta cost: ${money(r.cost.total, r.cost.currency)} (${r.cost.count} × ${money(r.cost.perMessage, r.cost.currency)})` : '') + (r.skipped.length ? `\n\nSkipped ${r.skipped.length}:\n` + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n') : '')
         : 'Nothing queued.\n' + r.skipped.map((x) => `${x.to} — ${x.reason}`).join('\n'));
       viewBoard();
     }) },
-      h('h2', {}, 'Bulk send'),
+      h('p', { class: 'muted', style: 'margin-top:0' }, `From ${labelOf(formAccount)} (pick a number in the filter above to send from another).`),
       h('label', { class: 'field' }, h('span', {}, 'Task title'), h('input', { type: 'text', name: 'title', required: true, placeholder: 'Chef candidates – WorkIndia' })),
       bulkWa || [
         h('label', { class: 'field' }, h('span', {}, 'Use a saved template (optional)'), bulkTpl),
@@ -906,30 +955,24 @@
         h('em', {}, 'Skips duplicates, opted-out contacts and anyone messaged in the last 30 days. Uses this number\'s delay, daily limit and hours.')),
       h('label', { class: 'field' }, h('span', {}, 'Start at (optional)'), h('input', { type: 'datetime-local', name: 'when' })),
       bulkWa ? bulkCost : null,
-      h('button', { class: 'btn primary', type: 'submit' }, 'Create bulk send'),
-    );
+      h('button', { class: 'btn primary', type: 'submit' }, 'Create bulk send'));
     bulkForm = bulk;
+    const priorityNow = now.filter((t) => t.priority).length;
+    // replies come in bulk: one fold so they never bury the must-dos
+    const nowReplies = now.filter((t) => t.kind === 'reply' && !t.priority);
+    const nowMain = now.filter((t) => !nowReplies.includes(t));
     shell([
-      h('div', { class: 'row', style: 'margin-bottom:4px' },
-        h('h1', { class: 'grow', style: 'margin:0' }, 'Board'),
-        h('button', { class: 'btn small', onclick: () => { b.past = !b.past; viewBoard(); } }, b.past ? 'Hide past' : 'Show past'),
-      ),
-      h('p', { class: 'sub' }, 'Your shared calendar with the AI: interviews, follow-ups, replies and scheduled messages. The hub adds and closes most cards by itself.'),
-      h('div', { class: 'seg', style: 'max-width:640px;margin-bottom:10px' },
-        [['', 'All numbers'], ...accs.map((a) => [a.id, a.label])].map(([id, l]) => h('button', { class: id === b.account ? 'on' : '', onclick: () => { b.account = id; viewBoard(); } }, l))),
-      boardRoles,
-      h('div', { class: 'seg', style: 'max-width:420px;margin-bottom:10px' },
-        [['', 'Everyone'], ['you', '👤 Mine'], ['ai', '🤖 AI']].map(([k, l]) => h('button', { class: (b.who || '') === k ? 'on' : '', onclick: () => { b.who = k; viewBoard(); } }, l))),
-      agenda,
-      h('div', { class: 'board' },
-        cols.map(([k, label]) => {
-          const items = byCol(k);
-          return h('section', { class: 'col', 'aria-label': label },
-            h('h2', {}, label, h('span', { class: 'muted', style: 'font-weight:400' }, ` ${items.length}`)),
-            items.length ? items.map(card) : h('p', { class: 'muted', style: 'font-size:13px' }, 'Nothing here'));
-        }),
-      ),
-      h('div', { class: 'settings-grid', style: 'margin-top:24px' }, newTask, bulk),
+      h('div', { class: 'row', style: 'margin-bottom:8px' }, h('h1', { class: 'grow', style: 'margin:0' }, 'Board'), filters),
+      section('🔥', 'Do now', now.length, h('div', {},
+        nowMain.length ? h('div', { class: 'cardlist' }, nowMain.map(card)) : !nowReplies.length ? h('p', { class: 'muted' }, 'All clear — nothing due now.') : null,
+        nowReplies.length ? h('details', { class: 'day', open: nowReplies.length <= 3 }, h('summary', {}, h('b', {}, `💬 ${nowReplies.length} candidate${nowReplies.length > 1 ? 's' : ''} waiting for a reply`), h('span', { class: 'muted' }, ' — the AI drafts these; open to see them')),
+          h('div', { class: 'cardlist' }, nowReplies.map(card))) : null),
+        { hint: priorityNow ? `${priorityNow} must-do` : 'overdue, due today, or waiting on someone' }),
+      section('📅', 'Future', future.length, h('div', {}, futureEl), { hint: 'by day' }),
+      running.length ? section('⏳', 'Sending now', running.length, h('div', { class: 'cardlist' }, running.map(card)), { open: false }) : null,
+      b.past ? section('✅', 'Done & cancelled', past.length, h('div', { class: 'cardlist' }, past.map(card)), { open: false }) : null,
+      h('details', { class: 'section' }, h('summary', {}, h('span', { class: 'sec-title' }, '➕ New to-do')), newTask),
+      h('details', { class: 'section' }, h('summary', {}, h('span', { class: 'sec-title' }, '📤 Bulk send')), bulk),
     ]);
   }
 
@@ -1028,7 +1071,13 @@
       return h('div', { class: 'person' + (closed ? ' closed' : '') },
         h('div', { class: 'p-head' },
           h('div', { class: 'grow' }, h('b', {}, m.row_ref ? `${m.row_ref}. ` : '', m.name || '–'), h('a', { class: 'mono muted', href: `#inbox`, onclick: () => { state.inbox.account = sel.account_id; state.inbox.q = m.phone; }, style: 'margin-left:6px;font-size:12px' }, '+' + m.phone)),
-          h('span', { class: 'tag', style: m.status === 'replied' ? 'background:var(--accent-soft)' : m.status === 'failed' ? 'background:var(--bad-soft)' : '' }, STATUS_LABEL[m.status] || m.status)),
+          h('span', { class: 'tag', style: m.status === 'replied' ? 'background:var(--accent-soft)' : m.status === 'failed' ? 'background:var(--bad-soft)' : '' }, STATUS_LABEL[m.status] || m.status),
+          m.status === 'new' && !m.last_sent_at ? h('button', { class: 'btn small', title: 'Remove from this list (only people never messaged — e.g. typed by mistake)', 'aria-label': 'Remove from list', onclick: guard(async () => {
+            if (!confirm(`Remove ${m.name || m.phone} from ${sel.name}? They were never messaged from it.`)) return;
+            await api(`/api/lists/${sel.id}/members/${m.phone}`, { method: 'DELETE' });
+            toast('Removed');
+            viewLists();
+          }) }, '🗑') : null),
         h('div', { class: 'p-meta muted' }, `Sent ${fmtD(m.last_sent_at)}`, m.followups_sent ? ` · ${m.followups_sent} follow-up(s)` : ''),
         m.error && m.status === 'failed' ? errorBox(m.error, help) : null,
         m.last_reply_at ? h('div', { class: 'p-reply' }, h('span', { class: 'muted' }, fmtD(m.last_reply_at) + ': '), m.last_reply_text || '') : null,
@@ -1068,12 +1117,21 @@
       h('p', { class: 'sub' }, 'Status comes from the real WhatsApp messages of the list\'s number. Stage and visit date are the funnel — set them here or ask the AI.'),
       rolePick,
       picker,
-      h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, sel.name), sendBtn),
+      h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, sel.name), sendBtn,
+        h('button', { class: 'btn small', title: 'Archive: this list never sends again and is hidden (e.g. imported only to check duplicates)', onclick: guard(async () => {
+          const reason = prompt(`Archive ${sel.name}? It will never send again and its unsent messages are cancelled. Reason (optional):`, '');
+          if (reason === null) return;
+          await api(`/api/lists/${sel.id}/archive`, { body: { archived: true, reason } });
+          toast('List archived');
+          state.listId = null;
+          viewLists();
+        }) }, '🗄 Archive')),
       visits.length ? h('div', { class: 'card', style: 'margin:12px 0' }, h('b', {}, '📅 Visits'), visits.map((m) => h('div', { style: 'font-size:13px;margin-top:4px' }, `${new Date(m.visit_at).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })} — ${m.name || m.phone}`, new Date(m.visit_at) < new Date() ? h('span', { style: 'color:var(--bad)' }, ' · passed, update stage') : ''))) : null,
       Object.keys(stageCount).length ? funnel : null,
       tabs,
       people,
-      h('div', { class: 'settings-grid', style: 'margin-top:16px' }, pipeForm, fuForm),
+      h('details', { class: 'section', style: 'margin-top:16px' }, h('summary', {}, h('span', { class: 'sec-title' }, '⚙️ Automation for this list'), h('span', { class: 'muted sec-hint' }, `pipeline ${p.enabled !== false ? 'on' : 'off'} · follow-ups ${f.enabled ? 'on' : 'off'}`)),
+        h('div', { class: 'settings-grid' }, pipeForm, fuForm)),
       importForm,
     ]);
   }
@@ -1398,148 +1456,173 @@ ${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel
   }
 
   // ---------- settings ----------
+  // "All numbers" = the defaults every number follows, except settings a number has changed itself (marked "own").
+  const SETTING_LABEL = { aiMode: 'Approval', delayMinSec: 'Delay from', delayMaxSec: 'Delay to', typing: 'Typing', anytime: 'Any time', dailyCap: 'Automated per 24 h',
+    newChatsPer24h: 'New numbers per 24 h', sendStart: 'Send from', sendEnd: 'Send until', sendDays: 'Days', followupStart: 'Follow-ups from', followupDailyMax: 'Follow-ups per day',
+    storeGroups: 'Store groups', autosaveImages: 'Save images', autosaveDocuments: 'Save documents', autosaveKnownOnly: 'Only known people', autosaveMaxMb: 'Max file size',
+    optOutWords: 'Opt-out words', webhookUrl: 'Notify URL' };
   async function viewSettings() {
     await loadAccounts();
-    const pb = await api('/api/playbook').catch(() => ({ text: '' }));
-    const al = await api('/api/alerts').catch(() => ({ phones: [] }));
-    const alertCard = h('form', { class: 'card', style: 'margin-top:24px', onsubmit: guard(async (e) => {
+    const [pb, al, pr, dflt] = await Promise.all([
+      api('/api/playbook').catch(() => ({ text: '' })),
+      api('/api/alerts').catch(() => ({ phones: [] })),
+      api('/api/pricing').catch(() => null),
+      api('/api/settings/defaults').catch(() => null),
+    ]);
+    if (!state.accounts.length) return shell([h('h1', {}, 'Settings'), h('p', { class: 'sub' }, 'Add a number first.')]);
+    const allMode = state.settingsFor === '*' && dflt;
+    const id = allMode ? '*' : state.settingsFor && state.accounts.find((a) => a.id === state.settingsFor) ? state.settingsFor : state.accounts[0].id;
+    state.settingsFor = id;
+    const a = allMode ? null : state.accounts.find((x) => x.id === id);
+    const s = allMode ? dflt.defaults : a.settings;
+    const own = allMode ? [] : dflt?.numbers.find((n) => n.id === id)?.own || [];
+    const ownTag = (name) => (own.includes(name) ? h('span', { class: 'tag own', title: 'This number has its own value — the all-numbers setting does not change it' }, 'own') : null);
+    const f = (name, label, input, hint) => h('label', { class: 'field' }, h('span', {}, label, ' ', ownTag(name)), input, hint ? h('em', {}, hint) : null);
+    const sw = (name, label, hint) => h('label', { class: 'switch' }, h('input', { type: 'checkbox', name, checked: s[name] }), h('span', {}, label, ' ', ownTag(name), hint ? h('em', {}, hint) : null));
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const cloud = !allMode && a.provider === 'cloud';
+    const collect = (fd) => ({
+      aiMode: fd.aiMode.value,
+      delayMinSec: +fd.delayMinSec.value,
+      delayMaxSec: +fd.delayMaxSec.value,
+      typing: fd.typing.checked,
+      anytime: fd.anytime.checked,
+      dailyCap: +fd.dailyCap.value,
+      newChatsPer24h: +fd.newChatsPer24h.value,
+      followupStart: fd.followupStart.value,
+      followupDailyMax: +fd.followupDailyMax.value,
+      sendStart: fd.sendStart.value,
+      sendEnd: fd.sendEnd.value,
+      sendDays: [...fd.querySelectorAll('input[name=day]:checked')].map((i) => +i.value),
+      storeGroups: fd.storeGroups.checked,
+      autosaveImages: fd.autosaveImages.checked,
+      autosaveDocuments: fd.autosaveDocuments.checked,
+      autosaveKnownOnly: fd.autosaveKnownOnly.checked,
+      autosaveMaxMb: +fd.autosaveMaxMb.value,
+      optOutWords: fd.optOutWords.value,
+      webhookUrl: fd.webhookUrl.value.trim(),
+    });
+    const form = h('form', { onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const fd = e.target;
+      if (allMode) {
+        const r = await api('/api/settings/defaults', { method: 'PUT', body: collect(fd) });
+        const changed = r.numbers.filter((n) => n.changed.length).map((n) => n.label);
+        const kept = r.numbers.filter((n) => n.own.length).map((n) => n.label);
+        toast(`Saved for all numbers${changed.length ? ' — updated ' + changed.join(', ') : ''}${kept.length ? '. Own values kept on ' + kept.join(', ') : ''}`);
+      } else {
+        await api(`/api/accounts/${id}`, { method: 'PATCH', body: { label: fd.label.value, purpose: fd.purpose.value, enabled: fd.enabled.checked, settings: collect(fd) } });
+        toast('Settings saved');
+      }
+      viewSettings();
+    }) },
+      h('div', { class: 'settings-grid' },
+        allMode ? null : h('div', { class: 'card' },
+          h('h2', {}, '📱 Number'),
+          f('label', 'Name', h('input', { type: 'text', name: 'label', value: a.label })),
+          f('purpose', 'Purpose', h('input', { type: 'text', name: 'purpose', value: a.purpose }), 'AI agents read this to understand what the number is for.'),
+          h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: a.enabled }), h('span', {}, 'Active', h('em', {}, 'Turn off to pause this number completely (stays linked).'))),
+          own.length
+            ? h('div', {}, h('p', { class: 'muted', style: 'font-size:12px;margin:4px 0' }, `Own values: ${own.map((k) => SETTING_LABEL[k] || k).join(', ')}. Everything else follows "All numbers".`),
+                h('button', { class: 'btn small', type: 'button', onclick: guard(async () => {
+                  if (!confirm(`Use the all-numbers settings for everything on ${a.label}? Its own values (${own.map((k) => SETTING_LABEL[k] || k).join(', ')}) are replaced.`)) return;
+                  await api(`/api/accounts/${id}/settings/reset`, { method: 'POST' });
+                  toast('Now follows the all-numbers settings');
+                  viewSettings();
+                }) }, '↺ Use all-numbers settings'))
+            : h('p', { class: 'muted', style: 'font-size:12px' }, 'Follows the all-numbers settings for everything.'),
+        ),
+        h('div', { class: 'card' },
+          h('h2', {}, '📤 Sending'),
+          h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'aiMode', value: 'approve', checked: s.aiMode !== 'auto' }), h('span', {}, 'Drafts for my approval ', ownTag('aiMode'), h('em', {}, 'AI and campaign messages wait in Drafts until you approve.'))),
+          h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'aiMode', value: 'auto', checked: s.aiMode === 'auto' }), h('span', {}, 'Send automatically', h('em', {}, 'Still follows the delay, daily limit and hours below.'))),
+          cloud
+            ? f('newChatsPer24h', 'New numbers per 24 hours', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 1000, value: s.newChatsPer24h }), 'Meta number: Meta allows 250 new people a day now (more after verification).')
+            : f('newChatsPer24h', 'New numbers per 24 hours (safety limit)', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 45, value: s.newChatsPer24h }), 'Hard maximum 45 for linked phones (a number was blocked by WhatsApp after 48 in one day).'),
+          f('dailyCap', 'Automated messages per 24 hours', h('input', { type: 'number', name: 'dailyCap', min: 0, value: s.dailyCap }), '0 pauses all automated sending. Your own sends are not counted.'),
+          sw('anytime', 'Send at any time', 'Day and night, every day. Turn off to use the hours below.'),
+          h('details', { class: 'fold' }, h('summary', {}, 'Delay, hours, days, follow-ups'),
+            h('div', { class: 'row', style: 'margin-top:8px' },
+              f('delayMinSec', 'Random delay from (sec)', h('input', { type: 'number', name: 'delayMinSec', min: 5, value: s.delayMinSec })),
+              f('delayMaxSec', 'to (sec)', h('input', { type: 'number', name: 'delayMaxSec', min: 5, value: s.delayMaxSec }))),
+            sw('typing', 'Show "typing…" before each message'),
+            h('div', { class: 'row' },
+              f('sendStart', 'Send between', h('input', { type: 'time', name: 'sendStart', value: s.sendStart })),
+              f('sendEnd', 'and', h('input', { type: 'time', name: 'sendEnd', value: s.sendEnd }))),
+            h('div', { class: 'field' }, h('span', { style: 'display:block;font-weight:550;margin-bottom:4px' }, 'On these days ', ownTag('sendDays')),
+              h('div', { class: 'daypick' }, days.map((d, i) => h('label', {}, h('input', { type: 'checkbox', name: 'day', value: i, checked: s.sendDays.includes(i) }), d)))),
+            h('div', { class: 'row' },
+              f('followupStart', 'Follow-ups not before', h('input', { type: 'time', name: 'followupStart', value: s.followupStart })),
+              f('followupDailyMax', 'Follow-ups per day (max)', h('input', { type: 'number', name: 'followupDailyMax', min: 0, value: s.followupDailyMax }))),
+            h('p', { class: 'muted', style: 'font-size:12px' }, 'Follow-ups to people who never replied go out only on days with no first messages to new people, after this time.')),
+        ),
+        h('details', { class: 'card fold' }, h('summary', {}, h('b', {}, '🗂 History & media')),
+          sw('storeGroups', 'Store group chats', 'Needed to read lead groups.'),
+          sw('autosaveDocuments', 'Auto-save PDFs & documents'),
+          sw('autosaveImages', 'Auto-save images'),
+          sw('autosaveKnownOnly', 'Only from people I have chatted with', 'Skips brochures and ads from businesses that message you out of the blue.'),
+          f('autosaveMaxMb', 'Max file size to auto-save (MB)', h('input', { type: 'number', name: 'autosaveMaxMb', min: 1, max: 50, value: s.autosaveMaxMb }))),
+        h('details', { class: 'card fold' }, h('summary', {}, h('b', {}, '🔗 Replies & integrations')),
+          f('optOutWords', 'Opt-out words', h('input', { type: 'text', name: 'optOutWords', value: s.optOutWords.join(', ') }), 'A reply containing one of these tags the contact "opted-out"; campaigns skip them.'),
+          f('webhookUrl', 'Notify URL for new messages (optional)', h('input', { type: 'url', name: 'webhookUrl', value: s.webhookUrl, placeholder: 'https://script.google.com/macros/s/…/exec' }), 'Each incoming message is POSTed here as JSON.')),
+      ),
+      h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'btn primary', type: 'submit' }, allMode ? 'Save for all numbers' : `Save for ${a.label}`)),
+    );
+    const followers = allMode && dflt
+      ? h('div', { class: 'card', style: 'margin-bottom:12px' },
+          dflt.numbers.map((n) => h('div', { style: 'font-size:13px;margin:2px 0' }, h('b', {}, n.label), ': ',
+            n.own.length ? h('span', { class: 'muted' }, `follows these, except its own ${n.own.map((k) => SETTING_LABEL[k] || k).join(', ')}`) : h('span', { class: 'muted' }, 'follows all of these'))))
+      : null;
+    const fold = (title, body) => h('details', { class: 'section' }, h('summary', {}, h('span', { class: 'sec-title' }, title)), body);
+    const alertForm = h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
       const r = await api('/api/alerts', { method: 'PUT', body: { phones: e.target.phones.value } });
       toast(r.phones.length ? 'Alerts go to ' + r.phones.map((p) => '+' + p).join(', ') : 'Alerts off');
     }) },
-      h('h2', {}, 'Connection alerts'),
       h('p', { class: 'muted', style: 'margin-top:0' }, 'A WhatsApp (from another connected number) when a number is logged out or offline for 15+ minutes. Use a personal number that is not one of the hub numbers.'),
       h('div', { class: 'row' }, h('input', { type: 'text', name: 'phones', class: 'grow', style: 'width:auto', value: al.phones.join(', '), placeholder: '9198…, comma separated' }), h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
-    const pr = await api('/api/pricing').catch(() => null);
-    const priceCard = !pr || !state.accounts.some((x) => x.provider === 'cloud') ? null : h('form', { class: 'card', style: 'margin-top:24px', onsubmit: guard(async (e) => {
+    const priceForm = !pr || !state.accounts.some((x) => x.provider === 'cloud') ? null : h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
       const x = e.target;
       await api('/api/pricing', { method: 'PUT', body: { marketing: x.marketing.value, utility: x.utility.value, authentication: x.authentication.value, service: x.service.value, serviceFreePerMonth: x.free.value } });
       toast('Prices saved — drafts and estimates use them now');
     }) },
-      h('h2', {}, `Meta message prices (${pr.currency}, per delivered message)`),
-      h('p', { class: 'muted', style: 'margin-top:0' }, 'Used for the cost shown on drafts and before sending from a Meta API number. Linked phone numbers are free. Since 1 Oct 2026 Meta charges utility templates even inside the 24-hour window; normal replies are free up to the monthly allowance. Check ',
-        h('a', { href: 'https://business.whatsapp.com/products/platform-pricing#rates', target: '_blank', rel: 'noopener' }, 'Meta\'s rate card'), ' and correct these if they differ.'),
+      h('p', { class: 'muted', style: 'margin-top:0' }, `Per delivered message, ${pr.currency}. Used for costs on drafts and before sending from a Meta number. Check `,
+        h('a', { href: 'https://business.whatsapp.com/products/platform-pricing#rates', target: '_blank', rel: 'noopener' }, 'Meta\'s rate card'), '.'),
       h('div', { class: 'row', style: 'flex-wrap:wrap' },
         ...[['marketing', 'Marketing template'], ['utility', 'Utility template'], ['authentication', 'Authentication template'], ['service', 'Reply after the free allowance']].map(([k, l]) =>
           h('label', { class: 'field', style: 'min-width:150px' }, h('span', {}, l), h('input', { type: 'number', name: k, step: '0.0001', min: 0, value: pr[k] }))),
         h('label', { class: 'field', style: 'min-width:150px' }, h('span', {}, 'Free replies per number / month'), h('input', { type: 'number', name: 'free', min: 0, value: pr.serviceFreePerMonth }))),
-      h('p', { class: 'muted', style: 'font-size:12px' }, pr.source || ''),
       h('button', { class: 'btn primary', type: 'submit' }, 'Save prices'));
-    const playbookCard = h('form', { class: 'card', style: 'margin-top:24px', onsubmit: guard(async (e) => {
+    const playbookForm = h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
       await api('/api/playbook', { method: 'PUT', body: { text: e.target.text.value } });
       toast('Playbook saved — every AI using the hub now follows it');
     }) },
-      h('h2', {}, 'Playbook (your rules for the AI)'),
       h('p', { class: 'muted', style: 'margin-top:0' }, 'Sent to every AI that connects to the hub (Claude Code, regular Claude, others). Write your rules in plain words.'),
-      h('textarea', { name: 'text', rows: 14, value: pb.text || '' }),
+      h('textarea', { name: 'text', rows: 16, value: pb.text || '' }),
       h('div', { style: 'margin-top:8px' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save playbook')));
-    if (!state.accounts.length) return shell([h('h1', {}, 'Settings'), h('p', { class: 'sub' }, 'Add a number first.')]);
-    const id = state.settingsFor && state.accounts.find((a) => a.id === state.settingsFor) ? state.settingsFor : state.accounts[0].id;
-    state.settingsFor = id;
-    const a = state.accounts.find((x) => x.id === id);
-    const s = a.settings;
-    const f = (name, label, input, hint) => h('label', { class: 'field' }, h('span', {}, label), input, hint ? h('em', {}, hint) : null);
-    const sw = (name, label, hint) => h('label', { class: 'switch' }, h('input', { type: 'checkbox', name, checked: s[name] }), h('span', {}, label, hint ? h('em', {}, hint) : null));
-    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const form = h('form', { onsubmit: guard(async (e) => {
-      e.preventDefault();
-      const fd = e.target;
-      const settings = {
-        aiMode: fd.aiMode.value,
-        delayMinSec: +fd.delayMinSec.value,
-        delayMaxSec: +fd.delayMaxSec.value,
-        typing: fd.typing.checked,
-        anytime: fd.anytime.checked,
-        dailyCap: +fd.dailyCap.value,
-        newChatsPer24h: +fd.newChatsPer24h.value,
-        followupStart: fd.followupStart.value,
-        followupDailyMax: +fd.followupDailyMax.value,
-        sendStart: fd.sendStart.value,
-        sendEnd: fd.sendEnd.value,
-        sendDays: [...fd.querySelectorAll('input[name=day]:checked')].map((i) => +i.value),
-        storeGroups: fd.storeGroups.checked,
-        autosaveImages: fd.autosaveImages.checked,
-        autosaveDocuments: fd.autosaveDocuments.checked,
-        autosaveKnownOnly: fd.autosaveKnownOnly.checked,
-        autosaveMaxMb: +fd.autosaveMaxMb.value,
-        optOutWords: fd.optOutWords.value,
-        webhookUrl: fd.webhookUrl.value.trim(),
-      };
-      await api(`/api/accounts/${id}`, { method: 'PATCH', body: { label: fd.label.value, purpose: fd.purpose.value, enabled: fd.enabled.checked, settings } });
-      toast('Settings saved');
-      viewSettings();
-    }) },
-      h('div', { class: 'settings-grid' },
-        h('div', { class: 'card' },
-          h('h2', {}, 'Number'),
-          f('label', 'Name', h('input', { type: 'text', name: 'label', value: a.label })),
-          f('purpose', 'Purpose', h('input', { type: 'text', name: 'purpose', value: a.purpose }), 'AI agents read this to understand what the number is for.'),
-          h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: a.enabled }), h('span', {}, 'Active', h('em', {}, 'Turn off to pause this number completely (stays linked).'))),
-        ),
-        h('div', { class: 'card' },
-          h('h2', {}, 'AI & campaign sending'),
-          h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'aiMode', value: 'approve', checked: s.aiMode !== 'auto' }), h('span', {}, 'Drafts for my approval', h('em', {}, 'AI and campaign messages wait in Drafts until you approve.'))),
-          h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'aiMode', value: 'auto', checked: s.aiMode === 'auto' }), h('span', {}, 'Send automatically', h('em', {}, 'Still follows the delay, daily limit and hours below.'))),
-          h('div', { class: 'row' },
-            f('delayMinSec', 'Random delay from (sec)', h('input', { type: 'number', name: 'delayMinSec', min: 5, value: s.delayMinSec })),
-            f('delayMaxSec', 'to (sec)', h('input', { type: 'number', name: 'delayMaxSec', min: 5, value: s.delayMaxSec })),
-          ),
-          h('p', { class: 'muted', style: 'margin:-6px 0 12px;font-size:12px' }, 'Gap between two automated messages, picked at random in this range. Minimum 5 seconds.'),
-          sw('typing', 'Show "typing…" before each message'),
-          h('div', { class: 'row' },
-            f('followupStart', 'Follow-ups not before', h('input', { type: 'time', name: 'followupStart', value: s.followupStart })),
-            f('followupDailyMax', 'Follow-ups per day (max)', h('input', { type: 'number', name: 'followupDailyMax', min: 0, value: s.followupDailyMax }))),
-          h('p', { class: 'muted', style: 'margin:-6px 0 12px;font-size:12px' }, 'Follow-ups to people who never replied go out only on days with no first messages to new people, after this time.'),
-          sw('anytime', 'Send at any time', 'Day and night, every day. Turn off to use the time window below.'),
-          a.provider === 'cloud'
-            ? f('newChatsPer24h', 'New numbers per 24 hours', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 1000, value: s.newChatsPer24h }), 'Meta number: Meta allows 250 new people a day now (more after verification). Keep it lower while quality builds — blocks and reports lower Meta\'s quality rating.')
-            : f('newChatsPer24h', 'New numbers per 24 hours (safety limit)', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 45, value: s.newChatsPer24h }), 'First messages to people this number never chatted with, in any 24 hours — from the AI, bulk, you, scripts and the phone itself. Hard maximum 45 (a number was blocked by WhatsApp after 48 in one day).'),
-          f('dailyCap', 'Automated messages per 24 hours', h('input', { type: 'number', name: 'dailyCap', min: 0, value: s.dailyCap }), 'AI, bulk and follow-ups, counted over the last 24 hours. Messages you send yourself are not counted here (new numbers still are, above).'),
-          h('div', { class: 'row', style: s.anytime ? 'opacity:.5' : '' },
-            f('sendStart', 'Send between', h('input', { type: 'time', name: 'sendStart', value: s.sendStart })),
-            f('sendEnd', 'and', h('input', { type: 'time', name: 'sendEnd', value: s.sendEnd })),
-          ),
-          h('div', { class: 'field', style: s.anytime ? 'opacity:.5' : '' }, h('span', { style: 'display:block;font-weight:550;margin-bottom:4px' }, 'On these days'),
-            h('div', { class: 'daypick' }, days.map((d, i) => h('label', {}, h('input', { type: 'checkbox', name: 'day', value: i, checked: s.sendDays.includes(i) }), d)))),
-        ),
-        h('div', { class: 'card' },
-          h('h2', {}, 'History & media'),
-          sw('storeGroups', 'Store group chats', 'Needed to read lead groups.'),
-          sw('autosaveDocuments', 'Auto-save PDFs & documents'),
-          sw('autosaveImages', 'Auto-save images'),
-          sw('autosaveKnownOnly', 'Only from people I have chatted with', 'Skips brochures and ads from businesses that message you out of the blue. Heavily-forwarded files are always skipped.'),
-          f('autosaveMaxMb', 'Max file size to auto-save (MB)', h('input', { type: 'number', name: 'autosaveMaxMb', min: 1, max: 50, value: s.autosaveMaxMb })),
-          h('p', { class: 'muted', style: 'font-size:12px' }, 'Anything not auto-saved can still be opened or kept later from the chat (or by AI, e.g. a resume).'),
-        ),
-        h('div', { class: 'card' },
-          h('h2', {}, 'Replies & integrations'),
-          f('optOutWords', 'Opt-out words', h('input', { type: 'text', name: 'optOutWords', value: s.optOutWords.join(', ') }), 'A reply containing one of these tags the contact "opted-out"; campaigns skip them.'),
-          f('webhookUrl', 'Notify URL for new messages (optional)', h('input', { type: 'url', name: 'webhookUrl', value: s.webhookUrl, placeholder: 'https://script.google.com/macros/s/…/exec' }), 'Each incoming message is POSTed here as JSON.'),
-        ),
-      ),
-      h('div', { class: 'row', style: 'margin-top:16px' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save settings')),
-    );
     shell([
-      h('h1', {}, 'Settings'),
-      h('p', { class: 'sub' }, 'Each number has its own rules.'),
-      h('div', { class: 'row', style: 'margin-bottom:16px' }, h('select', { style: 'max-width:320px', 'aria-label': 'Number', onchange: (e) => { state.settingsFor = e.target.value; viewSettings(); } },
-        state.accounts.map((x) => h('option', { value: x.id, selected: x.id === id }, x.label)))),
+      h('div', { class: 'row', style: 'margin-bottom:6px' }, h('h1', { class: 'grow', style: 'margin:0' }, '⚙️ Settings'),
+        h('select', { style: 'max-width:300px', 'aria-label': 'Settings for', onchange: (e) => { state.settingsFor = e.target.value; viewSettings(); } },
+          dflt ? h('option', { value: '*', selected: allMode }, '⭐ All numbers (defaults)') : null,
+          state.accounts.map((x) => h('option', { value: x.id, selected: x.id === id }, `📱 ${x.label}`)))),
+      h('p', { class: 'sub' }, allMode ? 'These apply to every number, except a setting a number has changed itself (marked "own" on that number).' : `Settings for ${a.label}. Values marked "own" differ from the all-numbers settings.`),
+      followers,
       form,
-      alertCard,
-      priceCard,
-      playbookCard,
-      h('div', { class: 'card', style: 'margin-top:24px;border-color:var(--bad-soft)' },
-        h('h2', {}, 'Delete this number from the hub'),
-        h('p', { class: 'muted' }, 'Unlinks it and deletes all stored chats, contacts and messages for it. Cannot be undone.'),
-        h('button', { class: 'btn danger', onclick: guard(async () => {
-          const typed = prompt(`Type "${id}" to delete ${a.label} and all its stored data`);
-          if (typed !== id) return;
-          await api(`/api/accounts/${id}?confirm=${encodeURIComponent(id)}`, { method: 'DELETE' });
-          state.settingsFor = null;
-          location.hash = 'accounts';
-        }) }, 'Delete number and data')),
+      h('div', { style: 'margin-top:20px' },
+        fold('🔔 Connection alerts', alertForm),
+        priceForm ? fold('💰 Meta message prices', priceForm) : null,
+        fold('📘 Playbook (your rules for the AI)', playbookForm),
+        allMode ? null : fold('🗑 Delete this number', h('div', {},
+          h('p', { class: 'muted' }, 'Unlinks it and deletes all stored chats, contacts and messages for it. Cannot be undone.'),
+          h('button', { class: 'btn danger', onclick: guard(async () => {
+            const typed = prompt(`Type "${id}" to delete ${a.label} and all its stored data`);
+            if (typed !== id) return;
+            await api(`/api/accounts/${id}?confirm=${encodeURIComponent(id)}`, { method: 'DELETE' });
+            state.settingsFor = null;
+            location.hash = 'accounts';
+          }) }, 'Delete number and data')))),
     ]);
   }
 
