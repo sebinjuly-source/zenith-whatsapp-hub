@@ -23,7 +23,7 @@ import { getPlaybook, savePlaybook } from './playbook.js';
 import { logEvent } from './db.js';
 import { HISTORY_MODES } from './describe.js';
 import { normalizeSettings } from './settings.js';
-import { priceRows, money } from './pricing.js';
+import { priceRows, money, getPricing } from './pricing.js';
 
 const ai = (accountId, text, role = null) => logEvent(accountId, 'info', text, 'ai', role);
 
@@ -66,6 +66,29 @@ const helpFor = (err) => {
   const todo = code && metaHelpFn ? metaHelpFn(code).todo : null;
   return todo ? ` | what to do: ${todo}` : '';
 };
+/** " | sending: … | today: … | Meta budget …" for one number (why messages wait, what's left, what it cost). */
+async function sendingLine(a) {
+  try {
+    const q = await outbox.queueStatus(a.id);
+    const parts = [` | sending: ${q.state}${q.reason ? ' — ' + q.reason : ''}${q.until ? ' until ' + fmtTime(Math.floor(new Date(q.until).getTime() / 1000)) : ''}`,
+      `${q.queued} queued, ${q.drafts} drafts, automated ${q.automated24h}/${q.dailyCap} in 24 h`];
+    if (a.provider === 'cloud') {
+      const nc = q.newChats;
+      const pr = await getPricing();
+      const [c] = await query(
+        `SELECT count(*) FILTER (WHERE payload->'pricing'->>'category' = 'marketing')::int AS mk,
+                count(*) FILTER (WHERE payload->'pricing'->>'category' IN ('utility','authentication'))::int AS ut
+         FROM meta_events WHERE account_id = $1 AND kind = 'status' AND status = 'sent' AND (payload->'pricing'->>'billable')::boolean
+           AND created_at >= date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata'`,
+        [a.id],
+      );
+      parts.push(`Meta budget today: ${Math.max(0, nc.limit - nc.count)} of ${nc.limit} new people left; spent today ≈ ${money(c.mk * pr.marketing + c.ut * pr.utility, pr.currency)} (${c.mk} marketing, ${c.ut} utility); health ${a.cloud?.canSend || '?'}, quality ${a.cloud?.quality || '?'}`);
+    }
+    return parts.join(' | ');
+  } catch {
+    return '';
+  }
+}
 const accountArg = z.string().optional().describe('Account id (e.g. "hiring") or its phone number. Omit for the default account.');
 // Meta Cloud API numbers: messages to someone who hasn't written in 24 h must be an approved Meta template.
 const waTemplateArg = z.object({
@@ -124,7 +147,7 @@ const msgLine = (m, maxLen) => {
 function buildServer(playbook = '') {
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `Zenith WhatsApp Hub: several WhatsApp numbers (list_accounts), chats, candidate lists with a funnel, tasks, templates and rules. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    { instructions: `Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
   const tool = (name, description, inputSchema, fn) => server.registerTool(name, { description, inputSchema }, safe(fn));
 
@@ -143,10 +166,37 @@ function buildServer(playbook = '') {
           `${st.chats} chats (${st.groups} groups), ${st.contacts} contacts, ${st.messages} msgs since ${fmtTime(st.oldest_ts)} | history chosen at link: ${HISTORY_MODES[mode]} (${imported === 'complete' ? 'imported' : 'importing'})` +
           (bf ? ` | deep history #${bf.id}: ${bf.status}${bf.result ? ' — ' + bf.result : ''}` : '') +
           ` | new numbers last 24h: ${nc.count}/${nc.limit}${nc.nextFreeAt ? ' (limit reached)' : ''}` +
-          (a.reachout?.isActive ? ` | WHATSAPP BLOCKS NEW CHATS until ${a.reachout.timeEnforcementEnds || '?'}` : ''),
+          (a.reachout?.isActive ? ` | WHATSAPP BLOCKS NEW CHATS until ${a.reachout.timeEnforcementEnds || '?'}` : '') +
+          (await sendingLine(a)),
       );
     }
     return lines.join('\n') || 'No accounts yet.';
+  });
+
+  tool('hub_overview', 'START HERE. One screen, in priority order, across ALL numbers: what is due now on the Board (replies, follow-ups, call notes, interviews), drafts waiting, each number\'s sending state (and why it is held), Meta budget and spend today, lists per number, recent failures. Then use the specific tools.', {}, async () => {
+    await manager.refresh();
+    const out = [];
+    const now = new Date();
+    const open = await tasks.listTasks({ limit: 500 });
+    const dueNow = open.filter((t) => !t.due_at || new Date(t.due_at) <= new Date(now.getTime() + 3600e3));
+    const later = open.filter((t) => t.due_at && new Date(t.due_at) > new Date(now.getTime() + 3600e3));
+    const byKind = (rows, k) => rows.filter((t) => t.kind === k).length;
+    out.push(`1. DUE NOW (${dueNow.length}): ${byKind(dueNow, 'reply')} replies to answer, ${byKind(dueNow, 'followup')} follow-ups, ${dueNow.filter((t) => /^Call notes needed/.test(t.title)).length} call notes needed, ${dueNow.filter((t) => t.priority && (t.assignee || 'you') === 'you').length} owner must-dos. → list_tasks(for="ai", due_now=true), list_tasks(kind="reply")`);
+    for (const t of dueNow.filter((x) => x.priority || x.kind === 'reply' || x.kind === 'followup').slice(0, 12)) out.push(`   - #${t.id} ${(t.assignee || 'you') === 'ai' ? 'AI' : 'owner'}${t.priority ? ' PRIORITY' : ''}: ${trim(t.title, 90)}`);
+    const upcomingVisits = later.filter((t) => t.kind === 'visit').slice(0, 5);
+    out.push(`2. COMING UP: ${later.length} dated cards${upcomingVisits.length ? '; interviews: ' + upcomingVisits.map((t) => trim(t.title.replace(/^Interview: /, ''), 50)).join('; ') : ''}`);
+    const [dr] = await query(`SELECT count(*)::int n, count(DISTINCT account_id)::int a FROM outbox WHERE status = 'draft'`);
+    out.push(`3. DRAFTS WAITING FOR OWNER APPROVAL: ${dr.n}${dr.n ? ' (list_outbox status=draft) — the owner approves; never approve unless told to' : ''}`);
+    out.push('4. NUMBERS:');
+    for (const a of manager.list()) out.push(`   - ${a.id} (${a.label}, ${a.provider === 'cloud' ? 'Meta API' : 'linked phone'}): ${a.status}${await sendingLine(a)}`);
+    const ls = await lists.listLists(null, null);
+    const arch = (await query(`SELECT count(*)::int n FROM lists WHERE archived IS NOT NULL`))[0].n;
+    out.push(`5. LISTS (all numbers${arch ? `; ${arch} archived hidden — list_lists(include_archived=true)` : ''}):`);
+    for (const l of ls.slice(0, 15)) out.push(`   - #${l.id} ${l.name} on ${l.account_id}: ${l.total} people, ${l.new} new, ${l.queued} queued, ${l.replied} replied, ${l.failed} failed`);
+    const fails = await query(`SELECT account_id, error, count(*)::int n FROM outbox WHERE status = 'failed' AND created_at > now() - interval '24 hours' GROUP BY 1,2 ORDER BY 3 DESC LIMIT 5`);
+    out.push(`6. FAILED LAST 24 H: ${fails.length ? fails.map((f) => `${f.n}× on ${f.account_id}: ${trim(f.error, 90)}${helpFor(f.error)}`).join('\n   ') : 'none'}`);
+    out.push('Done/finished tasks are hidden by default: list_tasks(past=true). Tool guide: get_playbook (section HOW TO USE THE HUB).');
+    return out.join('\n');
   });
 
   tool(
@@ -613,15 +663,35 @@ function buildServer(playbook = '') {
   const listArg = z.string().describe('List id or name, e.g. "Chef candidates – Batch 5"');
   const d = (t) => (t ? fmtTime(Math.floor(new Date(t).getTime() / 1000)) : '-');
 
-  tool('list_lists', 'Contact lists (candidate batches), grouped by job role, with counts per status: new (not messaged), queued, sent (no reply), replied, failed, opted_out — plus follow-up settings.', {
-    account: z.string().optional(), role: z.string().optional().describe('Job role, e.g. Chef, Front office, Housekeeping'),
+  tool('list_lists', 'Contact lists (candidate batches) on ALL numbers by default (each line says its number), with counts per status: new (not messaged), queued, sent (no reply), replied, failed, opted_out — plus follow-up settings. Archived lists are hidden unless include_archived=true.', {
+    account: z.string().optional().describe('Only this number (other numbers\' lists are then counted, not shown)'), role: z.string().optional().describe('Job role, e.g. Chef, Front office, Housekeeping'),
+    include_archived: z.boolean().optional(),
   }, async (a) => {
     const acc = a.account ? (await manager.resolve(a.account)).id : null;
-    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1)', [acc])) await lists.refreshList(l.id);
-    const rows = await lists.listLists(acc, a.role);
-    return rows.length
-      ? rows.map((l) => `#${l.id} | ${l.role || '-'} | ${l.name} | ${l.account_id} | ${l.total} people: ${l.new} new, ${l.queued} queued, ${l.sent} sent/no reply, ${l.replied} replied, ${l.failed} failed, ${l.opted_out} opted out | follow-up: ${l.followup?.enabled ? `after ${l.followup.afterDays}d, max ${l.followup.max}` : 'off'}`).join('\n')
-      : 'No lists yet.';
+    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND archived IS NULL', [acc])) await lists.refreshList(l.id);
+    const rows = await lists.listLists(acc, a.role, { includeArchived: a.include_archived });
+    const others = acc ? (await query('SELECT count(*)::int n FROM lists WHERE account_id <> $1 AND archived IS NULL', [acc]))[0].n : 0;
+    const note = others ? `\n(${others} more list(s) on other numbers — call list_lists without account to see them)` : '';
+    return (rows.length
+      ? rows.map((l) => `#${l.id} | ${l.role || '-'} | ${l.name} | number ${l.account_id}${l.archived ? ` | ARCHIVED: ${l.archived} — never send` : ''} | ${l.total} people: ${l.new} new, ${l.queued} queued, ${l.sent} sent/no reply, ${l.replied} replied, ${l.failed} failed, ${l.opted_out} opted out | follow-up: ${l.followup?.enabled ? `after ${l.followup.afterDays}d, max ${l.followup.max}` : 'off'}`).join('\n')
+      : 'No lists match.') + note;
+  });
+
+  tool('archive_list', 'Archive a list that must never send (e.g. imported only to check duplicates, or already handled long ago): it stops all sending from it (bulk, follow-ups, pipeline), cancels its unsent drafts/queued messages, and hides it from list_lists. archived=false brings it back.', {
+    list: listArg, archived: z.boolean().optional().describe('Default true'), reason: z.string().optional().describe('e.g. "historical import for duplicate checks — already messaged in Sept"'),
+  }, async (a) => {
+    const r = await lists.archiveList((await lists.getList(a.list)).id, a.archived !== false, a.reason);
+    await ai(r.list.account_id, `${r.list.archived ? 'Archived' : 'Unarchived'} list "${r.list.name}"${a.reason ? ' — ' + a.reason : ''}`, r.list.role);
+    return r.list.archived ? `List #${r.list.id} "${r.list.name}" archived: ${r.list.archived}. ${r.cancelled} unsent message(s) cancelled.` : `List #${r.list.id} "${r.list.name}" is active again.`;
+  });
+
+  tool('remove_list_member', 'Delete people from a list for good — only rows this list never messaged (e.g. entered by mistake). Anyone already messaged is kept (set their stage instead). Also cancels their unsent drafts from this list.', {
+    list: listArg, phones: z.array(z.string()).min(1),
+  }, async (a) => {
+    const l = await lists.getList(a.list);
+    const r = await lists.removeMembers(l.id, a.phones);
+    if (r.removed.length) await ai(l.account_id, `Removed ${r.removed.length} from list "${l.name}": ${r.removed.join(', ')}`, l.role);
+    return `Removed ${r.removed.length}${r.removed.length ? ': ' + r.removed.join(', ') : ''}.${r.kept.length ? ` Kept ${r.kept.length}: ${r.kept.map((k) => `${k.name || k.phone} (${k.reason})`).join('; ')}` : ''}`;
   });
 
   tool('list_members', 'People on a list, one line each: phone | name | status | outcome | last sent | last reply (+ their last message) | follow-ups | error. Filter by status to stay short.', {
@@ -653,7 +723,13 @@ function buildServer(playbook = '') {
   }, async (a) => {
     const r = await lists.importList({ account: a.account, name: a.name, role: a.role, since: a.since, source: a.source, members: a.members, skipKnown: a.skip_known !== false });
     await ai(r.list.account_id, `Imported ${r.imported} people into list "${r.list.name}"${r.skipped.length ? `, ${r.skipped.length} skipped` : ''}`, r.list.role);
-    return `List #${r.list.id} "${r.list.name}" (role ${r.list.role}): ${r.imported} people imported/updated${r.skipped.length ? `, skipped ${r.skipped.length}: ${r.skipped.map((x) => x.row + ' (' + x.reason + ')').join('; ')}` : ''}.`;
+    const names = (xs) => (xs.length > 40 ? xs.slice(0, 40).join(', ') + ` … +${xs.length - 40}` : xs.join(', '));
+    return [
+      `List #${r.list.id} "${r.list.name}" on ${r.list.account_id} (role ${r.list.role}): ${r.added.length} new, ${r.updated.length} already on this list (updated), ${r.skipped.length} skipped. Check the counts match your source file.`,
+      r.added.length ? `New: ${names(r.added)}` : null,
+      r.updated.length ? `Updated: ${names(r.updated)}` : null,
+      r.skipped.length ? `Skipped (not added): ${r.skipped.map((x) => `${x.row}${x.phone ? ' +' + x.phone : ''} — ${x.reason}`).join('; ')}` : null,
+    ].filter(Boolean).join('\n');
   });
 
   tool('send_to_list', 'Message the people on a list with the given statuses (default new + failed). Each gets their own prepared message from the list, unless text/template is given. Follows the number\'s approval mode, delay, daily cap and hours. Use only_phones to pick specific people.', {
@@ -737,7 +813,7 @@ function buildServer(playbook = '') {
   }, async (a) => {
     const rows = await lists.knownPeople(a.role, a.account ? (await manager.resolve(a.account)).id : null);
     return rows.length
-      ? `${rows.length} people already on ${a.role} lists:\n` + rows.map((r) => [trim(r.name, 30), r.phone, trim(r.location, 30), r.list, r.stage || r.status].join(' | ')).join('\n')
+      ? `${rows.length} people already on ${a.role} lists (name | phone | location | list | number | added | first messaged | stage/status):\n` + rows.map((r) => [trim(r.name, 30), r.phone, trim(r.location, 30), r.list + (r.archived ? ' (archived)' : ''), r.account_id, d(r.added_at), r.first_sent_at ? d(r.first_sent_at) : 'never', r.stage || r.status].join(' | ')).join('\n')
       : `Nobody on ${a.role} lists yet.`;
   });
 
@@ -796,7 +872,10 @@ function buildServer(playbook = '') {
       const [k, x, j] = String(t.ref || '').split(':');
       return ['reply', 'remind'].includes(k) ? ` | chat ${j} on ${x}` : ['followup', 'visit'].includes(k) ? ` | chat ${j} on ${t.account_id} | list #${x}` : '';
     };
-    return rows.length ? rows.map((t) => `${taskLine(t)}${chatOf(t)}`).join('\n') : 'No tasks.';
+    if (rows.length) return rows.map((t) => `${taskLine(t)}${chatOf(t)}`).join('\n');
+    if (a.past) return 'No finished tasks match.';
+    const [p] = await query(`SELECT count(*)::int n FROM tasks WHERE status IN ('done','cancelled') AND completed_at > now() - interval '7 days'`);
+    return `No open tasks match${a.account || a.for || a.kind || a.role ? ' these filters' : ''}. (${p.n} finished in the last 7 days — they are hidden; use past=true. A finished bulk send means everything went out.)`;
   });
 
   tool('create_task', 'Add a card to the Board. for="you" (default) = something the owner must do (call notes needed, take an interview, call someone) — set priority=true for must-dos. for="ai" = something an AI session must do at that time (e.g. "Send Ravi the menu on Friday"). Put who/what/which chat in details so a later session can act on it. For a candidate follow-up prefer update_list_member(available_from / follow_up_at), which keeps the card in step by itself.', {

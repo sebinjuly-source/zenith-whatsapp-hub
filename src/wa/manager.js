@@ -106,7 +106,7 @@ class Manager extends EventEmitter {
     const first = this.sessions.size === 0;
     const rows = await query(
       `INSERT INTO accounts (id, label, purpose, is_default, settings, provider, cloud) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [slug, label || slug, purpose, first, JSON.stringify(normalizeSettings(settings)), provider, JSON.stringify(cloudCfg)],
+      [slug, label || slug, purpose, first, JSON.stringify(normalizeSettings({ ...(provider === 'baileys' ? await (await import('../defaults.js')).getDefaults() : {}), ...settings })), provider, JSON.stringify(cloudCfg)],
     );
     const s = this.attach(rows[0]);
     await logEvent(slug, 'info', `Account created${first ? ' (default)' : ''}${provider === 'cloud' ? ' — Meta Cloud API number' : ''}`);

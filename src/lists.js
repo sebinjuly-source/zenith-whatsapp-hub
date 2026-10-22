@@ -102,7 +102,8 @@ export function roleFromName(name) {
  */
 export async function knownPeople(role, account) {
   return query(
-    `SELECT m.name, m.phone, m.fields->>'Location' AS location, m.fields->>'Age' AS age, l.name AS list, m.status, m.stage
+    `SELECT m.name, m.phone, m.fields->>'Location' AS location, m.fields->>'Age' AS age, l.name AS list, m.status, m.stage,
+       l.account_id, m.added_at, m.first_sent_at, l.archived
      FROM list_members m JOIN lists l ON l.id = m.list_id
      WHERE lower(l.role) = lower($1) AND ($2::text IS NULL OR l.account_id = $2)
      ORDER BY l.id, m.added_at`,
@@ -124,13 +125,17 @@ export async function importList({ account, name, role, since, source, members, 
   // People already on ANOTHER list of the same role are not added again (never re-message a past batch).
   const known = new Map();
   if (skipKnown) {
+    // every number, not only this one: a person on Seema's Batch 1 is "known" for a new batch on the Meta number too
     const rows = await query(
-      `SELECT m.jid, l.name AS list, m.status, m.stage FROM list_members m JOIN lists l ON l.id = m.list_id
-       WHERE lower(l.role) = lower($1) AND l.account_id = $2 AND l.id <> $3`,
-      [list.role, s.id, list.id],
+      `SELECT m.jid, l.name AS list, l.account_id, m.status, m.stage, m.added_at, m.first_sent_at FROM list_members m JOIN lists l ON l.id = m.list_id
+       WHERE lower(l.role) = lower($1) AND l.id <> $2`,
+      [list.role, list.id],
     );
     for (const r of rows) known.set(r.jid, r);
   }
+  const already = new Set((await query('SELECT jid FROM list_members WHERE list_id = $1', [list.id])).map((r) => r.jid));
+  const updated = [];
+  const added = [];
   const rows = [];
   const bad = [];
   const seen = new Set();
@@ -146,9 +151,11 @@ export async function importList({ account, name, role, since, source, members, 
     seen.add(jid);
     const k = known.get(jid);
     if (k) {
-      bad.push({ row: m.name || raw, reason: `already in "${k.list}" (${k.stage || k.status})` });
+      const day = (t) => (t ? new Date(t).toLocaleDateString('en-IN', { timeZone: config.tz, day: 'numeric', month: 'short' }) : null);
+      bad.push({ row: m.name || raw, phone: jid.split('@')[0], reason: `already in "${k.list}" on ${k.account_id}, added ${day(k.added_at)}${k.first_sent_at ? `, first messaged ${day(k.first_sent_at)}` : ', never messaged'} (${k.stage || k.status})` });
       continue;
     }
+    (already.has(jid) ? updated : added).push(m.name || jid.split('@')[0]);
     const { phone, to, name: nm, message, row, ...fields } = m;
     rows.push([list.id, jid, jid.split('@')[0], nm || fields.Name || null, JSON.stringify(fields), decodeMessage(message) || null, row != null ? String(row) : null]);
   }
@@ -159,7 +166,53 @@ export async function importList({ account, name, role, since, source, members, 
          row_ref = COALESCE(EXCLUDED.row_ref, list_members.row_ref), updated_at = now()`);
   }
   await refreshList(list.id);
-  return { list, imported: rows.length, skipped: bad };
+  return { list, imported: rows.length, added, updated, skipped: bad };
+}
+
+/** Archive (or bring back) a list: an archived list never sends, and its unsent drafts/queued messages are cancelled. */
+export async function archiveList(listId, archived = true, reason = '') {
+  const l = await getList(listId);
+  const text = archived ? `${reason || 'archived'} (${new Date().toLocaleDateString('en-IN', { timeZone: config.tz, day: 'numeric', month: 'short' })})` : null;
+  await query('UPDATE lists SET archived = $2, updated_at = now() WHERE id = $1', [l.id, text]);
+  const cancelled = archived
+    ? (await query(`UPDATE outbox SET status = 'rejected', error = 'List archived' WHERE list_id = $1 AND status IN ('draft','queued') RETURNING id`, [l.id])).length
+    : 0;
+  return { list: { ...l, archived: text }, cancelled };
+}
+
+/**
+ * Remove people from a list for good — only those this list never messaged (e.g. rows typed in by mistake).
+ * Anyone already messaged stays (their history matters); mark them rejected / not_interested instead.
+ */
+export async function removeMembers(listId, phones = []) {
+  const l = await getList(listId);
+  const removed = [];
+  const kept = [];
+  for (const p of phones) {
+    let jid;
+    try {
+      jid = toJid(p);
+    } catch {
+      kept.push({ phone: p, reason: 'not a phone number' });
+      continue;
+    }
+    const [m] = await query('SELECT name FROM list_members WHERE list_id = $1 AND jid = $2', [l.id, jid]);
+    if (!m) {
+      kept.push({ phone: p, reason: 'not on this list' });
+      continue;
+    }
+    const [sent] = await query(`SELECT 1 FROM outbox WHERE list_id = $1 AND to_jid = $2 AND status IN ('sent','sending') LIMIT 1`, [l.id, jid]);
+    if (sent) {
+      kept.push({ phone: p, name: m.name, reason: 'already messaged from this list — set stage rejected/not_interested instead' });
+      continue;
+    }
+    await query(`UPDATE outbox SET status = 'rejected', error = 'Removed from the list' WHERE list_id = $1 AND to_jid = $2 AND status IN ('draft','queued')`, [l.id, jid]);
+    await query('DELETE FROM list_members WHERE list_id = $1 AND jid = $2', [l.id, jid]);
+    const { closeRefTasks } = await import('./tasks.js');
+    await closeRefTasks([`visit:${l.id}:${jid}`, `followup:${l.id}:${jid}`], 'cancelled', 'removed from the list').catch(() => {});
+    removed.push(m.name || jid.split('@')[0]);
+  }
+  return { list: l, removed, kept };
 }
 
 /** Recompute every member's status from the WhatsApp messages and the outbox (one query). */
@@ -204,7 +257,7 @@ export async function refreshList(listId) {
   );
 }
 
-export async function listLists(account, role) {
+export async function listLists(account, role, { includeArchived = false } = {}) {
   return query(
     `SELECT l.*, a.label AS account_label,
        count(m.*)::int AS total,
@@ -216,9 +269,9 @@ export async function listLists(account, role) {
        count(*) FILTER (WHERE m.status = 'opted_out')::int AS opted_out,
        count(*) FILTER (WHERE m.outcome IS NOT NULL)::int AS with_outcome
      FROM lists l JOIN accounts a ON a.id = l.account_id LEFT JOIN list_members m ON m.list_id = l.id
-     WHERE ($1::text IS NULL OR l.account_id = $1) AND ($2::text IS NULL OR lower(l.role) = lower($2))
+     WHERE ($1::text IS NULL OR l.account_id = $1) AND ($2::text IS NULL OR lower(l.role) = lower($2)) AND ($3 OR l.archived IS NULL)
      GROUP BY l.id, a.label ORDER BY l.role NULLS LAST, l.id DESC`,
-    [account || null, role || null],
+    [account || null, role || null, !!includeArchived],
   );
 }
 
@@ -343,7 +396,7 @@ const fmtVisit = (t) => new Date(t).toLocaleString('en-IN', { timeZone: process.
  * These come before bulk sends and follow-ups (priority 5).
  */
 export async function runPipeline() {
-  const lists = await query(`SELECT * FROM lists`);
+  const lists = await query(`SELECT * FROM lists WHERE archived IS NULL`);
   for (const list of lists) {
     const p = { ...DEFAULT_PIPELINE, ...(list.pipeline || {}) };
     if (!p.enabled) continue;
@@ -462,6 +515,7 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
   const at = scheduledAt ? new Date(scheduledAt) : null;
   if (at && isNaN(at)) throw new Error('scheduledAt is not a valid date/time');
   const list = await getList(listId);
+  if (list.archived) throw new Error(`List "${list.name}" is archived (${list.archived}) — it can't send. Unarchive it first if that is really intended.`);
   await refreshList(list.id);
   const session = await manager.resolve(list.account_id);
   await outbox.assertCanSend(session);
@@ -516,7 +570,7 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
  * Uses the number's approval mode, delay, daily cap and sending hours like any automated message.
  */
 export async function runFollowups() {
-  const lists = await query(`SELECT * FROM lists WHERE (followup->>'enabled')::boolean`);
+  const lists = await query(`SELECT * FROM lists WHERE (followup->>'enabled')::boolean AND archived IS NULL`);
   const tz = process.env.TZ_NAME || 'Asia/Kolkata';
   // Per number (shared by all lists): may it send follow-ups now, and how many more today?
   const numbers = new Map();

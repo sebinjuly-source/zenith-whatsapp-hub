@@ -260,7 +260,7 @@ test('Meta "try later" failures (131049) are sent again after 25 h, at most twic
   // due now → sent again; Meta holds it back twice more → only 2 retries, then failed for good
   for (const n of [2, 3]) {
     await query(`UPDATE outbox SET scheduled_at = now() WHERE id = $1`, [t.id]);
-    const deadline = Date.now() + 10000;
+    const deadline = Date.now() + 25000; // the sender looks at its queue at least every 10 s
     while (Date.now() < deadline && (await query(`SELECT status FROM outbox WHERE id = $1`, [t.id]))[0].status !== 'sent') await new Promise((r) => setTimeout(r, 100));
     [o] = await query(`SELECT status, message_id FROM outbox WHERE id = $1`, [t.id]);
     assert.equal(o.status, 'sent', 'retry ' + n + ' sent');
@@ -278,7 +278,7 @@ test('Meta "try later" failures (131049) are sent again after 25 h, at most twic
   await fail(v.message_id, '919876500079', 131049);
   await hook({ messages: [{ from: '919876500079', id: 'wamid.IN79', timestamp: String(now() + 1), type: 'text', text: { body: 'Haan interested' } }], contacts: [{ wa_id: '919876500079', profile: { name: 'V' } }] });
   await query(`UPDATE outbox SET scheduled_at = now() WHERE id = $1`, [v.id]);
-  const dl = Date.now() + 10000;
+  const dl = Date.now() + 25000;
   while (Date.now() < dl && (await query(`SELECT status FROM outbox WHERE id = $1`, [v.id]))[0].status === 'queued') await new Promise((r) => setTimeout(r, 100));
   [o] = await query(`SELECT status, error FROM outbox WHERE id = $1`, [v.id]);
   assert.equal(o.status, 'rejected');

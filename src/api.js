@@ -316,8 +316,9 @@ export function buildApp() {
 
   // ---- Contact lists (candidate batches) + follow-ups
   api.get('/lists', wrap(async (req, res) => {
+    // ?archived=1 includes archived lists
     for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1)', [req.query.account || null])) await lists.refreshList(l.id);
-    res.json(await lists.listLists(req.query.account, req.query.role));
+    res.json(await lists.listLists(req.query.account, req.query.role, { includeArchived: req.query.archived === '1' }));
   }));
   // Create/extend a list: { account, name, since?, source?, members: [{ phone, name, message?, ...fields }], followup? }
   api.post('/lists/import', wrap(async (req, res) => {
@@ -473,6 +474,37 @@ export function buildApp() {
     const t = await tasks.createTask({ account: s.id, title, details, dueAt, createdBy: actorOf(req) === 'you' ? 'you' : 'ai', assignee, priority });
     await act(req, s.id, `Created task #${t.id} "${t.title}"`);
     res.json(t);
+  }));
+  // ---- Settings for all numbers (each number keeps the settings it changed itself)
+  api.get('/settings/defaults', wrap(async (req, res) => {
+    const d = await import('./defaults.js');
+    const defaults = await d.getDefaults();
+    res.json({ defaults, numbers: manager.list().map((a) => ({ id: a.id, label: a.label, own: d.ownKeys(a.settings, defaults) })) });
+  }));
+  api.put('/settings/defaults', wrap(async (req, res) => {
+    const d = await import('./defaults.js');
+    const r = await d.saveDefaults(req.body || {}, manager);
+    const changed = r.numbers.filter((n) => n.changed.length);
+    await act(req, null, `Changed settings for all numbers${changed.length ? ' — applied to ' + changed.map((n) => n.label).join(', ') : ''}`);
+    res.json(r);
+  }));
+  api.post('/accounts/:id/settings/reset', wrap(async (req, res) => {
+    const d = await import('./defaults.js');
+    const acc = await d.resetToDefaults(req.params.id, manager);
+    await act(req, acc.id, 'Settings reset to the defaults for all numbers');
+    res.json(acc);
+  }));
+  // One-screen overview (same as the AI's hub_overview)
+  api.post('/lists/:id/archive', wrap(async (req, res) => {
+    const r = await lists.archiveList(req.params.id, req.body?.archived !== false, req.body?.reason);
+    await act(req, r.list.account_id, `${r.list.archived ? 'Archived' : 'Unarchived'} list "${r.list.name}"`, r.list.role);
+    res.json(r);
+  }));
+  api.delete('/lists/:id/members/:phone', wrap(async (req, res) => {
+    const r = await lists.removeMembers(req.params.id, [req.params.phone]);
+    if (!r.removed.length) return res.status(400).json({ error: r.kept[0]?.reason || 'Not removed' });
+    await act(req, r.list.account_id, `Removed ${r.removed[0]} from list "${r.list.name}"`, r.list.role);
+    res.json(r);
   }));
   // Meta error codes: meaning, what to do, whether the hub retries (for "what to do" lines on failed cards)
   api.get('/meta-errors', wrap(async (req, res) => {

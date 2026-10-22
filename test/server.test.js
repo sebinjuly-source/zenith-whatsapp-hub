@@ -646,8 +646,8 @@ test('lists: import, status from real messages, send to new+failed only, follow-
       { phone: '123', name: 'Bad phone' },
     ],
   });
-  assert.match(imp, /4 people imported/);
-  assert.match(imp, /Bad phone \(invalid phone\)/);
+  assert.match(imp, /4 new, 0 already on this list/);
+  assert.match(imp, /Bad phone — invalid phone/);
   const l = await listsMod.getList('Chef Batch T');
   let rows = await listsMod.listMembers(l.id);
   const st = Object.fromEntries(rows.map((r) => [r.phone, r.status]));
@@ -855,14 +855,15 @@ test('job roles: lists, tasks and log kept separate per role; earlier batches ne
   await manager.create({ id: 'hire5', label: 'Hire5' });
   fake('hire5');
   const b1 = await mcp('import_list', { account: 'hire5', name: 'Chef candidates – Batch A', members: [{ phone: '9200000001', name: 'Old Chef', Location: 'Hebbal' }, { phone: '9200000002', name: 'Other Chef' }] });
-  assert.match(b1, /\(role Chef\): 2 people/);
-  // next batch overlaps with one earlier chef → skipped with the reason
+  assert.match(b1, /\(role Chef\): 2 new/);
+  // next batch overlaps with one earlier chef → skipped with the reason, the number and the date
   const b2 = await mcp('import_list', { account: 'hire5', name: 'Chef candidates – Batch B', members: [{ phone: '9200000001', name: 'Old Chef again' }, { phone: '9200000003', name: 'New Chef' }] });
-  assert.match(b2, /1 people imported/);
-  assert.match(b2, /already in "Chef candidates – Batch A"/);
+  assert.match(b2, /1 new/);
+  assert.match(b2, /New: New Chef/);
+  assert.match(b2, /Skipped \(not added\): Old Chef again \+919200000001 — already in "Chef candidates – Batch A" on hire5, added .+, never messaged/);
   // a different role does not clash with chefs
   const fo = await mcp('import_list', { account: 'hire5', name: 'Front office – Batch 1', members: [{ phone: '9200000001', name: 'Same person, other job' }] });
-  assert.match(fo, /\(role Front office\): 1 people/);
+  assert.match(fo, /\(role Front office\): 1 new/);
   // known candidates for de-duplication before unlocking
   const known = await mcp('known_candidates', { role: 'Chef', account: 'hire5' });
   assert.match(known, /^3 people already on Chef lists/);
@@ -1225,6 +1226,70 @@ test('card history + notes explain every change; forgotten interested candidates
   assert.equal(hl.dbOk, true);
   assert.equal(hl.board.ok, true);
   assert.equal(hl.board.late, false);
+});
+
+test('AI onboarding: hub_overview first; lists on all numbers; duplicates checked across numbers; archive stops sends; mistaken rows can be removed', async () => {
+  await manager.create({ id: 'hire8', label: 'Hire8' });
+  await manager.create({ id: 'hire9', label: 'Hire9' });
+  fake('hire8');
+  fake('hire9');
+  const ov = await mcp('hub_overview');
+  assert.match(ov, /1\. DUE NOW/);
+  assert.match(ov, /4\. NUMBERS:\n   - /);
+  assert.match(ov, /hire8 \(Hire8, linked phone\): open \| sending: /);
+  // a batch on one number; a new batch on ANOTHER number skips the person, saying where and when
+  await mcp('import_list', { account: 'hire8', name: 'Chef – Batch X', role: 'Chef', members: [{ phone: '9300000001', name: 'Asha' }, { phone: '9300000002', name: 'Bala' }] });
+  const b = await mcp('import_list', { account: 'hire9', name: 'Chef – Batch Y', role: 'Chef', members: [{ phone: '9300000001', name: 'Asha' }, { phone: '9300000003', name: 'Chitra' }] });
+  assert.match(b, /Asha \+919300000001 — already in "Chef – Batch X" on hire8/);
+  // filtering by one number says other numbers have lists too
+  assert.match(await mcp('list_lists', { account: 'hire9' }), /more list\(s\) on other numbers/);
+  const known = await mcp('known_candidates', { role: 'Chef' });
+  assert.match(known, /Asha \| 919300000001 \|  \| Chef – Batch X \| hire8 \| .+ \| never \|/);
+  // archive: hidden, never sends, unsent messages cancelled
+  const [lx] = await query(`SELECT id FROM lists WHERE name = 'Chef – Batch X'`);
+  const arch = await mcp('archive_list', { list: String(lx.id), reason: 'duplicate check only' });
+  assert.match(arch, /archived: duplicate check only/);
+  assert.doesNotMatch(await mcp('list_lists', {}), /Chef – Batch X/);
+  assert.match(await mcp('list_lists', { include_archived: true }), /ARCHIVED: duplicate check only/);
+  const send = await call('POST', `/api/lists/${lx.id}/send`, {});
+  assert.equal(send.status, 400);
+  assert.match(send.data.error, /archived/);
+  // remove rows typed by mistake (never messaged) — not someone already messaged
+  const [ly] = await query(`SELECT id FROM lists WHERE name = 'Chef – Batch Y'`);
+  await call('POST', `/api/lists/${ly.id}/send`, { onlyPhones: ['9300000003'], text: 'Hi' });
+  await query(`UPDATE outbox SET status = 'sent' WHERE list_id = $1`, [ly.id]);
+  await mcp('import_list', { account: 'hire9', name: 'Chef – Batch Y', role: 'Chef', members: [{ phone: '9399999999', name: 'Fake Person' }] });
+  const rm = await mcp('remove_list_member', { list: String(ly.id), phones: ['9399999999', '9300000003'] });
+  assert.match(rm, /Removed 1: Fake Person/);
+  assert.match(rm, /Chitra \(already messaged from this list/);
+  assert.equal((await query(`SELECT count(*)::int n FROM list_members WHERE list_id = $1 AND phone = '919399999999'`, [ly.id]))[0].n, 0);
+  // no open tasks → says finished ones exist and how to see them
+  assert.match(await mcp('list_tasks', { account: 'hire9', kind: 'todo' }), /No open tasks match these filters\. \(\d+ finished in the last 7 days/);
+});
+
+test('settings for all numbers: numbers follow the defaults except settings they changed themselves; reset brings them back', async () => {
+  await manager.create({ id: 'set1', label: 'Set1' });
+  await manager.create({ id: 'set2', label: 'Set2' });
+  await call('PATCH', '/api/accounts/set2', { settings: { dailyCap: 20 } }); // its own value
+  const r = await call('PUT', '/api/settings/defaults', { dailyCap: 30, delayMinSec: 60, delayMaxSec: 90 });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const s1 = manager.get('set1').account.settings;
+  const s2 = manager.get('set2').account.settings;
+  assert.equal(s1.dailyCap, 30, 'follows the default');
+  assert.equal(s1.delayMinSec, 60);
+  assert.equal(s2.dailyCap, 20, 'keeps its own');
+  assert.equal(s2.delayMinSec, 60, 'other settings still follow');
+  const g = (await call('GET', '/api/settings/defaults')).data;
+  assert.deepEqual(g.numbers.find((n) => n.id === 'set2').own, ['dailyCap']);
+  // a new number starts from the defaults
+  await manager.create({ id: 'set3', label: 'Set3' });
+  assert.equal(manager.get('set3').account.settings.dailyCap, 30);
+  // reset: back on every default
+  await call('POST', '/api/accounts/set2/settings/reset');
+  assert.equal(manager.get('set2').account.settings.dailyCap, 30);
+  assert.deepEqual((await call('GET', '/api/settings/defaults')).data.numbers.find((n) => n.id === 'set2').own, []);
+  // put the defaults back for other tests
+  await call('PUT', '/api/settings/defaults', { dailyCap: 35, delayMinSec: 45, delayMaxSec: 120 });
 });
 
 test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {
