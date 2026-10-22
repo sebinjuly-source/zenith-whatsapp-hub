@@ -386,6 +386,19 @@ test('lists on a Meta number: first messages use the template; follow-ups use th
   assert.equal(f.payload.waTemplate.params[0], 'Chandan');
 });
 
+test('a list message Meta reports as not delivered shows as failed with the reason (not "sent")', async () => {
+  const imp = await call('POST', '/api/lists/import', { account: 'api', name: 'Undelivered batch', role: 'Chef', members: [{ phone: '9876500031', name: 'Mohan' }] });
+  const id = imp.data.list.id;
+  await call('POST', `/api/lists/${id}/send`, { waTemplate: { name: 'candidate_invite', params: ['{first_name}', 'Chef'] } });
+  await until(async () => (await query(`SELECT status FROM outbox WHERE list_id = $1`, [id]))[0]?.status === 'sent');
+  const [o] = await query(`SELECT message_id FROM outbox WHERE list_id = $1`, [id]);
+  await hook({ statuses: [{ id: o.message_id, status: 'failed', timestamp: String(now()), recipient_id: '919876500031', errors: [{ code: 131026, title: 'x' }] }] });
+  await lists.refreshList(id);
+  const [m] = (await call('GET', `/api/lists/${id}/members`)).data;
+  assert.equal(m.status, 'failed');
+  assert.match(m.error, /not on WhatsApp/);
+});
+
 test('AI tools: list_accounts says it is a Meta number; templates listed; free text outside the window is explained', async () => {
   const acc = await mcp('list_accounts');
   assert.match(acc, /META CLOUD API \(quality GREEN/);

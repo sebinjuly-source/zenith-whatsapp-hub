@@ -168,11 +168,12 @@ export async function refreshList(listId) {
   await query(
     `WITH l AS (SELECT id, account_id, extract(epoch FROM since)::bigint AS since,
        ARRAY(SELECT DISTINCT o.account_id FROM outbox o WHERE o.list_id = $1) || account_id AS accs FROM lists WHERE id = $1),
+     -- a message WhatsApp/Meta reported as not delivered (status 0) does not count as sent
      m AS (
        SELECT lm.jid,
-         (SELECT min(ts) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND x.ts >= l.since) AS first_sent,
-         (SELECT max(ts) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND x.ts >= l.since) AS last_sent,
-         (SELECT count(*) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND x.ts >= l.since) AS sent_count
+         (SELECT min(ts) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND COALESCE(x.status, 1) <> 0 AND x.ts >= l.since) AS first_sent,
+         (SELECT max(ts) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND COALESCE(x.status, 1) <> 0 AND x.ts >= l.since) AS last_sent,
+         (SELECT count(*) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND COALESCE(x.status, 1) <> 0 AND x.ts >= l.since) AS sent_count
        FROM list_members lm WHERE lm.list_id = $1
      ),
      r AS (
