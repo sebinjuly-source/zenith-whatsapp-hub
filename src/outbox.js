@@ -630,6 +630,19 @@ function startWorker(accountId) {
       await nap(Math.min(wait, 10000));
       return;
     }
+    // An automatic retry (Meta said "try later") is dropped if the person has written to us since:
+    // the conversation moved on, so the old message would be out of place.
+    if (row.retries > 0) {
+      const [wrote] = await query(
+        `SELECT 1 FROM messages WHERE account_id = $1 AND chat_jid = $2 AND NOT from_me AND ts >= extract(epoch FROM $3::timestamptz) LIMIT 1`,
+        [accountId, row.to_jid, row.created_at],
+      );
+      if (wrote) {
+        await query(`UPDATE outbox SET status = 'rejected', error = 'Not retried: they wrote to us in the meantime' WHERE id = $1`, [row.id]);
+        if (row.task_id) await refreshTask(row.task_id).catch(() => {});
+        return;
+      }
+    }
     const automated = AUTOMATED.includes(row.source);
     let result;
     let sent;

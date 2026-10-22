@@ -240,6 +240,51 @@ test('delivery statuses: delivered/read update ticks; a failure marks the messag
   assert.match(o.error, /not on WhatsApp/);
 });
 
+test('Meta "try later" failures (131049) are sent again after 25 h, at most twice, with what to do; a retry is dropped if they wrote meanwhile', async () => {
+  const send = async (to) => (await call('POST', '/api/send', { account: 'api', to, waTemplate: { name: 'hello_world' } })).data;
+  const fail = (id, to, code) => hook({ statuses: [{ id, status: 'failed', timestamp: String(now()), recipient_id: to, errors: [{ code, title: 'x' }] }] });
+  const t = await send('9876500077');
+  await fail(t.message_id, '919876500077', 131049);
+  let [o] = await query(`SELECT status, retries, error, message_id, scheduled_at FROM outbox WHERE id = $1`, [t.id]);
+  assert.equal(o.status, 'queued');
+  assert.equal(o.retries, 1);
+  assert.equal(o.message_id, null);
+  assert.match(o.error, /held back .*retrying automatically .*try 2 of 3/);
+  const hours = (new Date(o.scheduled_at) - Date.now()) / 3600000;
+  assert.ok(hours > 24 && hours < 26, 'waits ~25 h, got ' + hours);
+  // the dashboard/AI know what to do
+  const help = (await call('GET', '/api/meta-errors')).data;
+  assert.match(help['131049'].todo, /25 hours/);
+  assert.match(help['131026'].todo, /Call them/);
+  assert.match(await mcp('list_outbox', { account: 'api', status: 'queued' }), /what to do: Nothing to do — the hub tries again after 25 hours/);
+  // due now → sent again; Meta holds it back twice more → only 2 retries, then failed for good
+  for (const n of [2, 3]) {
+    await query(`UPDATE outbox SET scheduled_at = now() WHERE id = $1`, [t.id]);
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline && (await query(`SELECT status FROM outbox WHERE id = $1`, [t.id]))[0].status !== 'sent') await new Promise((r) => setTimeout(r, 100));
+    [o] = await query(`SELECT status, message_id FROM outbox WHERE id = $1`, [t.id]);
+    assert.equal(o.status, 'sent', 'retry ' + n + ' sent');
+    await fail(o.message_id, '919876500077', 131049);
+  }
+  [o] = await query(`SELECT status, retries, error FROM outbox WHERE id = $1`, [t.id]);
+  assert.equal(o.status, 'failed');
+  assert.equal(o.retries, 2);
+  // a "don't retry" code fails at once
+  const u = await send('9876500078');
+  await fail(u.message_id, '919876500078', 131050);
+  assert.equal((await query(`SELECT status FROM outbox WHERE id = $1`, [u.id]))[0].status, 'failed');
+  // they wrote to us before the retry → the old message is not sent again
+  const v = await send('9876500079');
+  await fail(v.message_id, '919876500079', 131049);
+  await hook({ messages: [{ from: '919876500079', id: 'wamid.IN79', timestamp: String(now() + 1), type: 'text', text: { body: 'Haan interested' } }], contacts: [{ wa_id: '919876500079', profile: { name: 'V' } }] });
+  await query(`UPDATE outbox SET scheduled_at = now() WHERE id = $1`, [v.id]);
+  const dl = Date.now() + 10000;
+  while (Date.now() < dl && (await query(`SELECT status FROM outbox WHERE id = $1`, [v.id]))[0].status === 'queued') await new Promise((r) => setTimeout(r, 100));
+  [o] = await query(`SELECT status, error FROM outbox WHERE id = $1`, [v.id]);
+  assert.equal(o.status, 'rejected');
+  assert.match(o.error, /they wrote to us/);
+});
+
 test('a status that arrives before the send is recorded is applied a moment later', async () => {
   const s = manager.get('api');
   await s.onCloudStatus({ id: 'wamid.EARLY', status: 'delivered' });

@@ -280,6 +280,8 @@ CREATE TABLE IF NOT EXISTS task_log (
   text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS task_log_task ON task_log (task_id, id);
+-- How many times Meta's "try later" failures were sent again automatically (e.g. 131049 after 25 h)
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS retries INT NOT NULL DEFAULT 0;
 
 -- Sent as a reply to someone who wrote in the last 24 h: goes out at once and isn't counted in the automated cap
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_reply BOOLEAN NOT NULL DEFAULT FALSE;

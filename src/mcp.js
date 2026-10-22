@@ -58,6 +58,14 @@ const localTime = (v) => {
   if (isNaN(new Date(t))) throw new Error(`Could not read the date "${v}" — use YYYY-MM-DD HH:MM`);
   return t;
 };
+/** "What to do" for an error that carries a Meta code, e.g. "(Meta 131049)". */
+let metaHelpFn = null;
+import('./wa/graph.js').then((g) => { metaHelpFn = g.metaHelp; }).catch(() => {});
+const helpFor = (err) => {
+  const code = String(err || '').match(/\(Meta (\d+)/)?.[1];
+  const todo = code && metaHelpFn ? metaHelpFn(code).todo : null;
+  return todo ? ` | what to do: ${todo}` : '';
+};
 const accountArg = z.string().optional().describe('Account id (e.g. "hiring") or its phone number. Omit for the default account.');
 // Meta Cloud API numbers: messages to someone who hasn't written in 24 h must be an approved Meta template.
 const waTemplateArg = z.object({
@@ -394,7 +402,7 @@ function buildServer(playbook = '') {
     const rows = await outbox.listOutbox({ account: a.account, status: a.status || 'draft,queued,failed', limit: a.limit || 20 });
     const p = await priceRows(rows, manager);
     return rows.length
-      ? rows.map((r, i) => `#${r.id} | ${r.account_id} | ${r.status} | ${money(p.items[i].price, p.currency)} | ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${trim(r.payload.text || r.payload.attachment?.caption || '[file]', 100)}${r.error ? ` | error: ${r.error}` : ''}`).join('\n')
+      ? rows.map((r, i) => `#${r.id} | ${r.account_id} | ${r.status} | ${money(p.items[i].price, p.currency)} | ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${trim(r.payload.text || r.payload.attachment?.caption || '[file]', 100)}${r.error ? ` | error: ${r.error}${helpFor(r.error)}` : ''}`).join('\n')
         + `\nTotal of these: ${money(p.total, p.currency)}`
       : 'Nothing.';
   });

@@ -474,6 +474,11 @@ export function buildApp() {
     await act(req, s.id, `Created task #${t.id} "${t.title}"`);
     res.json(t);
   }));
+  // Meta error codes: meaning, what to do, whether the hub retries (for "what to do" lines on failed cards)
+  api.get('/meta-errors', wrap(async (req, res) => {
+    const { metaHelpTable } = await import('./wa/graph.js');
+    res.json(metaHelpTable());
+  }));
   // A card's history (what happened and why) and its notes
   api.get('/tasks/:id/log', wrap(async (req, res) => res.json(await tasks.taskLog(req.params.id))));
   api.post('/tasks/:id/notes', wrap(async (req, res) => {

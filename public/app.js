@@ -978,6 +978,7 @@
 
     const filter = state.listFilter || '';
     const members = await api(`/api/lists/${sel.id}/members${filter ? '?status=' + filter : ''}`);
+    const help = await metaHelpTable();
     const f = sel.followup || {};
     const tabs = h('div', { class: 'seg', style: 'max-width:720px;margin:10px 0' },
       [['', `All ${sel.total}`], ['new', `Not messaged ${sel.new}`], ['sent', `No reply ${sel.sent}`], ['replied', `Replied ${sel.replied}`], ['failed', `Failed ${sel.failed}`], ['queued', `Queued ${sel.queued}`]].map(([k, l]) =>
@@ -1028,7 +1029,8 @@
         h('div', { class: 'p-head' },
           h('div', { class: 'grow' }, h('b', {}, m.row_ref ? `${m.row_ref}. ` : '', m.name || '–'), h('a', { class: 'mono muted', href: `#inbox`, onclick: () => { state.inbox.account = sel.account_id; state.inbox.q = m.phone; }, style: 'margin-left:6px;font-size:12px' }, '+' + m.phone)),
           h('span', { class: 'tag', style: m.status === 'replied' ? 'background:var(--accent-soft)' : m.status === 'failed' ? 'background:var(--bad-soft)' : '' }, STATUS_LABEL[m.status] || m.status)),
-        h('div', { class: 'p-meta muted' }, `Sent ${fmtD(m.last_sent_at)}`, m.followups_sent ? ` · ${m.followups_sent} follow-up(s)` : '', m.error ? h('span', { style: 'color:var(--bad)' }, ' · ' + m.error) : null),
+        h('div', { class: 'p-meta muted' }, `Sent ${fmtD(m.last_sent_at)}`, m.followups_sent ? ` · ${m.followups_sent} follow-up(s)` : ''),
+        m.error && m.status === 'failed' ? errorBox(m.error, help) : null,
         m.last_reply_at ? h('div', { class: 'p-reply' }, h('span', { class: 'muted' }, fmtD(m.last_reply_at) + ': '), m.last_reply_text || '') : null,
         h('div', { class: 'p-edit' },
           h('select', { 'aria-label': 'Stage', onchange: (e) => save(m, { stage: e.target.value }) },
@@ -1223,9 +1225,24 @@
   }
 
   // ---------- outbox ----------
+  // Meta error codes → meaning + what to do (loaded once)
+  async function metaHelpTable() {
+    if (!state.metaHelp) state.metaHelp = await api('/api/meta-errors').catch(() => ({}));
+    return state.metaHelp;
+  }
+  const errorBox = (err, help) => {
+    if (!err) return null;
+    const code = String(err).match(/\(Meta (\d+)/)?.[1];
+    const todo = code && help?.[code]?.todo;
+    const retrying = /retrying automatically/.test(err);
+    return h('div', { style: `margin:6px 0;padding:6px 8px;border-radius:8px;background:${retrying ? 'var(--accent-soft)' : 'var(--bad-soft)'}` },
+      h('div', { style: `color:${retrying ? 'inherit' : 'var(--bad)'};font-size:13px` }, retrying ? '🔁 ' : '⚠️ ', err),
+      todo ? h('div', { style: 'font-size:12px;margin-top:3px' }, h('b', {}, 'What to do: '), todo) : null);
+  };
   async function viewOutbox() {
     const tab = state.outboxTab || 'draft';
     if (!state.accounts.length) await loadAccounts();
+    const help = await metaHelpTable();
     const acc = state.outboxAccount || '';
     const rows = await api(`/api/outbox?limit=200${tab === 'all' ? '' : `&status=${tab}`}${state.outboxTask ? `&task=${state.outboxTask}` : ''}${acc ? `&account=${encodeURIComponent(acc)}` : ''}`);
     const labelOf = (id) => state.accounts.find((a) => a.id === id)?.label || id;
@@ -1300,7 +1317,7 @@
               h('button', { class: 'btn primary small', onclick: guard(async () => { await api(`/api/outbox/${r.id}/approve`, { body: r.payload.waTemplate ? {} : { text: ta.value } }); toast('Approved — queued'); viewOutbox(); }) }, 'Approve & send'),
               h('button', { class: 'btn small danger', onclick: guard(async () => { await api(`/api/outbox/${r.id}/reject`, { method: 'POST' }); viewOutbox(); }) }, 'Reject')))
           : h('div', {}, h('p', { style: 'white-space:pre-wrap;margin:6px 0' }, r.payload.text || r.payload.attachment?.caption || ''),
-              r.error ? h('p', { style: 'color:var(--bad);margin:0' }, r.error) : null,
+              errorBox(r.error, help),
               r.status === 'queued' ? h('button', { class: 'btn small danger', onclick: guard(async () => { await api(`/api/outbox/${r.id}/reject`, { method: 'POST' }); viewOutbox(); }) }, 'Cancel') : null,
               r.sent_at ? h('p', { class: 'muted', style: 'margin:0' }, 'Sent ', new Date(r.sent_at).toLocaleString()) : null),
       );

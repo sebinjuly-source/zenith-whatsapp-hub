@@ -300,3 +300,44 @@ button opens the free 24-hour window. There's no salary in the follow-up, as bef
 - Coexistence: https://docs.360dialog.com/partner/waba-management/whatsapp-coexistence ·
   https://www.wati.io/en/blog/whatsapp-coexistence-solution/ · https://help.seven.io/en/whatsapp/whatsapp-coexistence
 - Setup in India: https://hyperleap.ai/whatsapp-business-api-setup-guide-india
+
+## 6. Approvals, limits and errors: what Meta does and what the hub does
+
+Checked against Meta's developer docs on 22 Oct 2026.
+
+**Template approval**
+- Most templates are decided within minutes by automated review. Some go to a person, and Meta says a decision can
+  take up to 24 hours (48 h in practice). Until then the template is PENDING. Scheduled sends that use it wait and
+  retry every 15 minutes, so nothing fails.
+- Common reasons for rejection: the wrong category (marketing content submitted as utility), badly formatted
+  `{{1}}` fill-ins, a fill-in at the very start or end, too many fill-ins for the length, misleading or
+  spam-like content. Edit and resubmit, or appeal in WhatsApp Manager. A rejected template's name can't be reused
+  for 30 days.
+- Templates with low quality (people block or report them) are paused for 3 h, then 6 h. The third time they are
+  disabled (errors 132015 and 132016).
+
+**Sending limits**
+- The **messaging limit** counts unique people you start conversations with (outside their 24 h reply window) in a
+  rolling 24 hours. It is shared by all numbers in the business portfolio. Tiers: 250 → 2,000 → 10,000 → 100,000 →
+  unlimited. To reach 2,000: verify the business, or deliver 2,000 such messages to unique people within 30 days
+  with good quality. After that it rises automatically within about 6 hours once you use half your limit with good
+  quality. The hub keeps the Meta number under 250 a day.
+- **Speed** is not the problem: the Cloud API takes far more messages per second than we send. Pauses between
+  messages don't change delivery. The hub only waits if Meta answers "too fast" (130429 / 80007 / 4), and then
+  tries again by itself.
+- **Per-person caps** decide most failures:
+  - **131049**: Meta limits how many *marketing* messages one person receives from all businesses combined, to
+    protect engagement. Meta says wait at least 24 h, because retrying immediately fails again. The hub queues the
+    message again after **25 h, at most twice**, and drops the retry if the person has written to us meanwhile.
+    Utility templates and replies inside the 24 h window are not affected.
+  - **131056**: too many messages to the same person in a short time. Retried after 1 h.
+  - **131050**: the person stopped marketing messages from you. Never retried.
+  - **131026**: not on WhatsApp, an old app, or terms not accepted. Call them.
+
+**Where you see it**
+Every failed message shows the reason in plain words, and a **What to do** line, on Drafts/Outbox cards and in Lists.
+Messages that will be retried show 🔁 with the time. The AI sees the same advice in `list_outbox`. The full table
+is at `GET /api/meta-errors`, and the source is `src/wa/graph.js` (`EXPLAIN` + `META_HELP`).
+
+Sources: developers.facebook.com, WhatsApp Cloud API pages "Error codes", "Messaging limits", "Template review"
+and "Template pausing".

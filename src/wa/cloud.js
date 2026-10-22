@@ -11,7 +11,7 @@ import { Session } from './session.js';
 import { query, logEvent } from '../db.js';
 import config from '../config.js';
 import * as store from '../store.js';
-import { graph, uploadCloudMedia, downloadCloudMedia, explainMetaError, metaToken } from './graph.js';
+import { META_HELP, graph, uploadCloudMedia, downloadCloudMedia, explainMetaError, metaToken } from './graph.js';
 import { buildTemplateMessage, syncTemplates } from './cloud-templates.js';
 import { refreshTask } from '../tasks.js';
 import { postWebhook } from '../notify.js';
@@ -508,6 +508,25 @@ export class CloudSession extends Session {
     if (s.status === 'failed') {
       const reason = s.errors?.length ? explainMetaError(s.errors[0]) : 'Meta reported the message as not delivered';
       const msg = await query('UPDATE messages SET status = 0 WHERE account_id = $1 AND id = $2 RETURNING id', [this.id, s.id]);
+      // Meta says a later attempt can work (e.g. 131049: wait 24 h): queue it again, a limited number of times
+      const retry = META_HELP[s.errors?.[0]?.code]?.retry;
+      if (retry) {
+        const when = new Date(Date.now() + retry.afterMin * 60000);
+        const label = when.toLocaleString('en-IN', { timeZone: config.tz, weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+        const again = await query(
+          `UPDATE outbox SET status = 'queued', retries = retries + 1, message_id = NULL, sent_at = NULL,
+             scheduled_at = now() + ($4 || ' minutes')::interval,
+             error = $3 || ' — retrying automatically ' || $5 || ' (try ' || (retries + 2) || ' of ' || $6 || ')'
+           WHERE account_id = $1 AND message_id = $2 AND status = 'sent' AND retries < $7 RETURNING id, task_id, list_id, to_jid`,
+          [this.id, s.id, reason, String(retry.afterMin), label, String(retry.max + 1), retry.max],
+        );
+        if (again.length) {
+          await logEvent(this.id, 'info', `Message to ${s.recipient_id || again[0].to_jid.split('@')[0]} held back by Meta: ${reason} — retrying ${label}`);
+          if (again[0].task_id) await refreshTask(again[0].task_id).catch(() => {});
+          if (again[0].list_id) import('../lists.js').then((l) => l.refreshList(again[0].list_id)).catch(() => {});
+          return;
+        }
+      }
       const rows = await query(
         `UPDATE outbox SET status = 'failed', error = $3 WHERE account_id = $1 AND message_id = $2 AND status = 'sent'
          RETURNING id, task_id, list_id, to_jid`,
