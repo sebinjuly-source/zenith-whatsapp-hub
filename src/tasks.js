@@ -49,6 +49,8 @@ export async function bulkNote(ids, text, { aiTask = true, close = false, actor 
     });
   }
   if (close) for (const c of cards) if (!['done', 'cancelled'].includes(c.status)) await updateTask(c.id, { status: 'done', actor });
+  // the AI card carries the note from here, so these cards are not flagged as "owner note to act on"
+  if (task) for (const c of cards) await logTask(c.id, `Handed to the AI as task #${task.id}`, { actor: 'ai' });
   return { noted: cards.length, task };
 }
 

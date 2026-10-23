@@ -183,7 +183,8 @@ function buildServer(playbook = '') {
     const byKind = (rows, k) => rows.filter((t) => t.kind === k).length;
     out.push(`1. DUE NOW (${dueNow.length}): ${byKind(dueNow, 'reply')} replies to answer, ${byKind(dueNow, 'followup')} follow-ups, ${dueNow.filter((t) => /^Call notes needed/.test(t.title)).length} call notes needed, ${dueNow.filter((t) => t.priority && (t.assignee || 'you') === 'you').length} owner must-dos. → list_tasks(for="ai", due_now=true), list_tasks(kind="reply")`);
     for (const t of dueNow.filter((x) => x.priority || x.kind === 'reply' || x.kind === 'followup').slice(0, 12)) out.push(`   - #${t.id} ${(t.assignee || 'you') === 'ai' ? 'AI' : 'owner'}${t.priority ? ' PRIORITY' : ''}: ${trim(t.title, 90)}`);
-    const pendingNotes = open.filter((t) => t.owner_note_pending);
+    const recentlyClosed = (await tasks.listTasks({ past: true, limit: 300 })).filter((t) => t.completed_at && new Date(t.completed_at) > new Date(Date.now() - 7 * 86400e3));
+    const pendingNotes = [...open, ...recentlyClosed].filter((t) => t.owner_note_pending);
     if (pendingNotes.length) {
       out.push(`   OWNER NOTES TO ACT ON (${pendingNotes.length}) → list_tasks(owner_notes=true), do what each says, then add_task_note:`);
       for (const t of pendingNotes.slice(0, 8)) out.push(`   - #${t.id} ${trim(t.title, 60)} — "${trim(t.last_note, 120)}"`);
@@ -886,7 +887,11 @@ function buildServer(playbook = '') {
     let rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role, assignee: a.for,
       dueBefore: a.due_now ? new Date(Date.now() + 3600000) : undefined });
     if (a.kind) rows = rows.filter((t) => t.kind === a.kind);
-    if (a.owner_notes) rows = rows.filter((t) => t.owner_note_pending);
+    if (a.owner_notes) {
+      // also cards the owner closed while writing the note (last 7 days) — the note still asks for action
+      const closed = a.past ? [] : await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: true, role: a.role, limit: 300 });
+      rows = [...rows, ...closed.filter((t) => t.completed_at && new Date(t.completed_at) > new Date(Date.now() - 7 * 86400e3))].filter((t) => t.owner_note_pending);
+    }
     const chatOf = (t) => {
       const [k, x, j] = String(t.ref || '').split(':');
       return ['reply', 'remind'].includes(k) ? ` | chat ${j} on ${x}` : ['followup', 'visit'].includes(k) ? ` | chat ${j} on ${t.account_id} | list #${x}` : '';

@@ -1341,6 +1341,11 @@ test('owner feedback reaches the AI: rejections (with reason) land on the person
   assert.match(await mcp('hub_overview'), /OWNER NOTES TO ACT ON/);
   await mcp('add_task_note', { id: t3.id, text: 'Set follow-up for Monday 10:00' });
   assert.doesNotMatch(await mcp('list_tasks', { owner_notes: true }), new RegExp(`#${t3.id} `));
+  // a note written while closing the card still counts
+  const t4 = (await call('POST', '/api/tasks', { account: 'fb1', title: 'Call Hari again' })).data;
+  await call('POST', `/api/tasks/${t4.id}/notes`, { text: 'Follow up after 12 days' });
+  await call('PATCH', `/api/tasks/${t4.id}`, { status: 'done' });
+  assert.match(await mcp('list_tasks', { owner_notes: true }), new RegExp(`#${t4.id} .*OWNER NOTE TO ACT ON`));
 });
 
 test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {

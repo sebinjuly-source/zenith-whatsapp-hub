@@ -527,7 +527,7 @@ export function buildApp() {
     res.json({ ok: true, id: t.id });
   }));
   api.patch('/tasks/:id', wrap(async (req, res) => {
-    const t = await tasks.updateTask(req.params.id, { ...(req.body || {}), actor: actorOf(req) === 'you' ? 'you' : 'ai' });
+    const t = await tasks.updateTask(req.params.id, { ...(req.body || {}), actor: 'you' }); // the AI changes cards through MCP
     await act(req, t.account_id, `Updated task #${t.id} "${t.title}"${req.body?.status ? ` → ${t.status}` : ''}`);
     res.json(t);
   }));
