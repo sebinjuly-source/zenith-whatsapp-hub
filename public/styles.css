@@ -378,3 +378,16 @@ details.day .cardlist { margin: 6px 0; }
 .drawer-nav hr { border: 0; border-top: 1px solid var(--line); margin: 6px 8px; }
 .drawer-foot { border-top: 1px solid var(--line); background: var(--panel-2); padding: 8px; }
 @media (prefers-reduced-motion: reduce) { .drawer, .scrim { transition: none; } }
+
+/* board: room between ✓ Done and More; select cards for one note */
+.tc-actions { gap: 10px; }
+details.more { margin-top: 10px; }
+details.more > summary { display: inline-block; padding: 4px 10px; border: 1px solid var(--line); border-radius: 99px; background: var(--panel); }
+.tc-head .pick { width: 18px; height: 18px; margin: 1px 2px 0 0; accent-color: var(--accent); flex: 0 0 auto; cursor: pointer; }
+.taskcard.picked { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pickbar {
+  position: sticky; bottom: 10px; z-index: 20; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.25); margin-top: 10px;
+}
+.pickbar[hidden] { display: none; }
+.pickbar .btn:not(.primary) { background: transparent; color: var(--bg); border-color: rgba(255,255,255,.4); }

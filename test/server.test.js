@@ -1292,6 +1292,50 @@ test('settings for all numbers: numbers follow the defaults except settings they
   await call('PUT', '/api/settings/defaults', { dailyCap: 35, delayMinSec: 45, delayMaxSec: 120 });
 });
 
+test('owner feedback reaches the AI: rejections (with reason) land on the person\'s card; one note on several cards makes an AI task; wrong-number drafts are stopped', async () => {
+  const store = await import('../src/store.js');
+  const board = await import('../src/board.js');
+  await manager.create({ id: 'fb1', label: 'Fb1' });
+  await manager.create({ id: 'fb2', label: 'Fb2' });
+  fake('fb1');
+  fake('fb2');
+  await call('PATCH', '/api/accounts/fb1', { settings: { aiMode: 'approve' } });
+  await mcp('import_list', { account: 'fb1', name: 'Feedback batch', role: 'Chef', members: [{ phone: '9400000001', name: 'Gopal' }, { phone: '9400000002', name: 'Hari' }] });
+  const now = Math.floor(Date.now() / 1000);
+  await store.insertMessages('fb1', [
+    { id: 'FB1', fromMe: true, ts: now - 600, chatJid: '919400000001@s.whatsapp.net', type: 'text', body: 'invite', forwarded: false },
+    { id: 'FB2', fromMe: false, ts: now - 60, chatJid: '919400000001@s.whatsapp.net', type: 'text', body: 'Salary kitna?', forwarded: false },
+  ]);
+  await board.syncBoard();
+  const card = (await call('GET', '/api/tasks?kind=reply')).data.find((t) => t.ref === 'reply:fb1:919400000001@s.whatsapp.net');
+  assert.ok(card);
+  // the AI drafts; the owner rejects with a reason → a note on the card, shown to the AI
+  const d = await mcp('send_message', { account: 'fb1', to: '919400000001', text: 'Salary 15000' });
+  const id = Number(d.match(/#(\d+)/)[1]);
+  assert.equal((await call('POST', `/api/outbox/${id}/reject`, { reason: 'wrong salary, say 21-23k' })).status, 200);
+  const log = (await call('GET', `/api/tasks/${card.id}/log`)).data;
+  assert.ok(log.some((r) => r.kind === 'note' && /Owner rejected draft #\d+ — reason: wrong salary, say 21-23k/.test(r.text)), JSON.stringify(log));
+  assert.match(await mcp('list_tasks', { kind: 'reply', account: 'fb1' }), /latest: "Owner rejected draft/);
+  assert.match(await mcp('hub_overview'), /Owner REJECTED recently .* — wrong salary/);
+  // wrong number: Gopal chats with fb1, so fb2 may not start a chat with him
+  assert.match(await mcp('send_message', { account: 'fb2', to: '919400000001', text: 'Hi' }), /Not drafted: .* chat is on "fb1"/);
+  assert.match(await mcp('send_message', { account: 'fb2', to: '919400000001', text: 'Hi', other_number_ok: true }), /Draft #\d+|Queued #\d+/);
+  // several cards → one note, an AI task listing them, originals closed
+  const t1 = (await call('POST', '/api/tasks', { account: 'fb1', title: 'Call Gopal – tapped "Haan, interested"', details: 'From Gopal +919400000001', priority: true })).data;
+  const t2 = (await call('POST', '/api/tasks', { account: 'fb1', title: 'Call Hari – tapped "Haan, interested"', details: 'From Hari +919400000002', priority: true })).data;
+  const r = await call('POST', '/api/tasks/bulk-note', { ids: [t1.id, t2.id], text: 'Did not pick up my calls — follow up on WhatsApp', aiTask: true, close: true });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.noted, 2);
+  assert.equal(r.data.task.assignee, 'ai');
+  assert.match(r.data.task.title, /^Owner: Did not pick up my calls — follow up on WhatsApp \(2 people\)/);
+  assert.match(r.data.task.details, /#\d+ Call Gopal .*\+919400000001/);
+  const ai = await mcp('list_tasks', { for: 'ai', due_now: true });
+  assert.match(ai, /Owner: Did not pick up my calls/);
+  assert.equal((await query('SELECT status FROM tasks WHERE id = $1', [t1.id]))[0].status, 'done');
+  assert.ok((await call('GET', `/api/tasks/${t2.id}/log`)).data.some((x) => x.kind === 'note' && /follow up on WhatsApp/.test(x.text)));
+  assert.equal((await call('POST', '/api/tasks/bulk-note', { ids: [], text: 'x' })).status >= 400, true);
+});
+
 test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {
   const s = manager.get('hiring');
   const t0 = Date.now() - 600000;

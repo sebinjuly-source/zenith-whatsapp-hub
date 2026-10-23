@@ -25,6 +25,33 @@ export async function addNote(taskId, text, actor = 'you') {
   return t;
 }
 
+/** One note on several cards; optionally a card for the AI (due now) that lists them, and close the originals. */
+export async function bulkNote(ids, text, { aiTask = true, close = false, actor = 'you' } = {}) {
+  const list = [...new Set((ids || []).map(Number).filter(Boolean))];
+  if (!list.length) throw new Error('Select at least one card');
+  if (!String(text || '').trim()) throw new Error('Write the note first');
+  const cards = await query('SELECT * FROM tasks WHERE id = ANY($1::bigint[]) ORDER BY id', [list]);
+  for (const c of cards) await logTask(c.id, String(text).trim(), { actor, kind: 'note' });
+  let task = null;
+  if (aiTask) {
+    const lines = cards.map((c) => {
+      const [k, a, j] = String(c.ref || '').split(':');
+      const chat = ['reply', 'remind'].includes(k) ? ` | chat ${j} on ${a}` : ['followup', 'visit'].includes(k) ? ` | chat ${j} on ${c.account_id}` : '';
+      return `- #${c.id} ${c.title}${chat}${c.details ? ` — ${String(c.details).replace(/\s+/g, ' ').slice(0, 160)}` : ''}`;
+    });
+    const counts = {};
+    for (const c of cards) counts[c.account_id] = (counts[c.account_id] || 0) + 1;
+    const account = Object.entries(counts).sort((x, y) => y[1] - x[1])[0][0];
+    task = await createTask({
+      account, kind: 'todo', assignee: 'ai', dueAt: new Date().toISOString(), createdBy: actor,
+      title: `Owner: ${String(text).trim().replace(/\s+/g, ' ').slice(0, 70)} (${cards.length} people)`,
+      details: `${String(text).trim()}\n\nCards:\n${lines.join('\n')}\n\nDraft what the note asks on each person's own number, note each card, then mark this card done.`,
+    });
+  }
+  if (close) for (const c of cards) if (!['done', 'cancelled'].includes(c.status)) await updateTask(c.id, { status: 'done', actor });
+  return { noted: cards.length, task };
+}
+
 export async function taskLog(taskId) {
   return query('SELECT at, actor, kind, text FROM task_log WHERE task_id = $1 ORDER BY id', [taskId]);
 }

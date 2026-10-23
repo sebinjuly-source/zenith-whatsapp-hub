@@ -224,11 +224,30 @@ export async function approveAll({ account, taskId, ids } = {}) {
 }
 
 /** Reject the chosen drafts / queued messages. */
-export async function rejectMany(ids) {
+/**
+ * Note on the person's open Board cards (reply / follow-up) that a draft was rejected and why — the AI reads card
+ * notes before drafting, so it neither re-drafts the same message nor loses the owner's reason.
+ */
+export async function noteRejection(rows, { reason = '', actor = 'you' } = {}) {
+  const { logTask } = await import('./tasks.js');
+  for (const r of rows) {
+    const cards = await query(
+      `SELECT id FROM tasks WHERE status NOT IN ('done','cancelled')
+         AND (ref = $1 OR (ref LIKE 'followup:%' AND split_part(ref, ':', 3) = $2))`,
+      [`reply:${r.account_id}:${r.to_jid}`, r.to_jid],
+    ).catch(() => []);
+    const text = `${actor === 'ai' ? 'AI' : 'Owner'} rejected draft #${r.id}${reason ? ` — reason: ${reason}` : ' (no reason given — do not draft the same again; ask the owner if unsure)'}: "${String(r.payload?.text || r.payload?.waTemplate?.name || '').replace(/\s+/g, ' ').slice(0, 160)}"`;
+    for (const c of cards) await logTask(c.id, text, { actor, kind: 'note' });
+    if (reason) await query('UPDATE outbox SET error = $2 WHERE id = $1', [r.id, `Rejected: ${reason}`]).catch(() => {});
+  }
+}
+
+export async function rejectMany(ids, { reason = '', actor = 'you' } = {}) {
   const rows = await query(
-    `UPDATE outbox SET status = 'rejected' WHERE id = ANY($1::bigint[]) AND status IN ('draft','queued') RETURNING account_id, task_id, list_id`,
+    `UPDATE outbox SET status = 'rejected' WHERE id = ANY($1::bigint[]) AND status IN ('draft','queued') RETURNING id, account_id, task_id, list_id, to_jid, payload, source`,
     [ids.map(Number)],
   );
+  await noteRejection(rows.filter((r) => r.source !== 'campaign'), { reason, actor });
   await afterBatchChange(rows);
   return { rejected: rows.length, perAccount: countBy(rows, 'account_id') };
 }
@@ -302,12 +321,13 @@ async function afterBatchChange(rows) {
   }
 }
 
-export async function reject(id) {
+export async function reject(id, { reason = '', actor = 'you' } = {}) {
   const [row] = await query(
     `UPDATE outbox SET status = 'rejected' WHERE id = $1 AND status IN ('draft','queued') RETURNING *`,
     [id],
   );
   if (!row) throw new Error('Nothing to reject (already sent?)');
+  await noteRejection([row], { reason, actor });
   await refreshTask(row.task_id);
   return row;
 }

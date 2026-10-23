@@ -776,6 +776,7 @@
     const accs = state.accounts;
     if (!accs.length) return shell([h('h1', {}, 'Board'), h('p', { class: 'sub' }, 'Add and link a number first.')]);
     const b = (state.board ||= { account: '', past: false, who: '' });
+    const picked = (state.boardPicked ||= new Set());
     if (b.account && !accs.find((a) => a.id === b.account)) b.account = '';
     const formAccount = b.account || (accs.find((a) => a.isDefault) || accs[0]).id;
     const q = (extra) => `/api/tasks?${new URLSearchParams({ ...(b.account ? { account: b.account } : {}), ...(b.role ? { role: b.role } : {}), ...extra })}`;
@@ -832,7 +833,7 @@
       const doneBtn = closed ? null : h('button', { class: 'btn small', title: 'Mark done', onclick: guard(async () => {
         await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: 'done' } });
         viewBoard();
-      }) }, '✓');
+      }) }, '✓ Done');
       // More: details, latest note, history & notes, flag, move
       const logBox = h('div', { style: 'font-size:12px;margin-top:6px' });
       const noteIn = h('textarea', { rows: 2, placeholder: 'Add a note (e.g. call notes: what was discussed)', style: 'margin-top:6px' });
@@ -867,8 +868,11 @@
           toast('Note saved');
           loadLog();
         }) }, 'Save note'));
-      return h('div', { class: 'taskcard' + (t.priority ? ' prio' : '') + (overdue ? ' overdue' : '') },
+      const pick = closed ? null : h('input', { type: 'checkbox', class: 'pick', 'aria-label': `Select "${t.title}"`, title: 'Select — then write one note for several cards', checked: picked.has(t.id),
+        onchange: (e) => { if (e.target.checked) picked.add(t.id); else picked.delete(t.id); drawPickBar(); } });
+      return h('div', { class: 'taskcard' + (t.priority ? ' prio' : '') + (overdue ? ' overdue' : '') + (picked.has(t.id) ? ' picked' : '') },
         h('div', { class: 'tc-head' },
+          pick,
           t.priority ? icon(['⭐', 'Priority — must do']) : null,
           icon(KIND[t.kind] || KIND.todo),
           h('b', { class: 'grow tc-title' }, t.title),
@@ -964,6 +968,45 @@
       h('button', { class: 'btn primary', type: 'submit' }, 'Create bulk send'));
     bulkForm = bulk;
     const priorityNow = now.filter((t) => t.priority).length;
+    // Several cards → one note (e.g. "didn't pick up — follow up on WhatsApp") and a task for the AI to act on them
+    const byId = new Map([...active, ...past].map((t) => [t.id, t]));
+    for (const id of [...picked]) if (!byId.has(id)) picked.delete(id);
+    const pickBar = h('div', { class: 'pickbar', role: 'region', 'aria-label': 'Selected cards' });
+    function drawPickBar() {
+      document.querySelectorAll('.taskcard').forEach((el) => el.classList.toggle('picked', !!el.querySelector('.pick:checked')));
+      fill(pickBar, picked.size
+        ? [h('b', {}, `${picked.size} selected`),
+            h('button', { class: 'btn small primary', onclick: noteDialog }, '📝 Note for the AI'),
+            h('button', { class: 'btn small', onclick: () => { picked.clear(); document.querySelectorAll('.pick').forEach((c) => (c.checked = false)); drawPickBar(); } }, 'Clear')]
+        : []);
+      pickBar.hidden = !picked.size;
+    }
+    function noteDialog() {
+      const cards = [...picked].map((id) => byId.get(id)).filter(Boolean);
+      const allMine = cards.every((t) => (t.assignee || 'you') === 'you');
+      const done = () => back.remove();
+      const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && done() },
+        h('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Note for the AI', onsubmit: guard(async (e) => {
+          e.preventDefault();
+          const x = e.target;
+          const r = await api('/api/tasks/bulk-note', { body: { ids: cards.map((t) => t.id), text: x.text.value, aiTask: x.aiTask.checked, close: x.close.checked } });
+          done();
+          picked.clear();
+          toast(r.task ? `Noted on ${r.noted} cards — the AI picks it up on its next run` : `Noted on ${r.noted} cards`);
+          viewBoard();
+        }) },
+          h('h2', {}, `📝 Note on ${cards.length} card${cards.length > 1 ? 's' : ''}`),
+          h('div', { class: 'muted', style: 'font-size:12px;max-height:110px;overflow:auto;margin-bottom:8px' }, cards.map((t) => h('div', {}, '• ', t.title))),
+          h('label', { class: 'field' }, h('span', {}, 'What should happen?'),
+            h('textarea', { name: 'text', rows: 3, required: true, placeholder: 'These people did not pick up my calls — follow up with them on WhatsApp' })),
+          h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'aiTask', checked: true }), h('span', {}, '🤖 Give the AI a task to act on these', h('em', {}, 'A card "Owner: …" for the AI, due now, listing these people. It drafts what you asked; you approve the drafts.'))),
+          h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'close', checked: allMine }), h('span', {}, '✓ Mark the selected cards done', h('em', {}, 'The AI\'s card takes over from here.'))),
+          h('div', { class: 'row', style: 'justify-content:flex-end' },
+            h('button', { class: 'btn', type: 'button', onclick: done }, 'Cancel'),
+            h('button', { class: 'btn primary', type: 'submit' }, 'Save note'))));
+      document.body.append(back);
+      back.querySelector('textarea').focus();
+    }
     // replies come in bulk: one fold so they never bury the must-dos
     const nowReplies = now.filter((t) => t.kind === 'reply' && !t.priority);
     const nowMain = now.filter((t) => !nowReplies.includes(t));
@@ -979,7 +1022,9 @@
       b.past ? section('✅', 'Done & cancelled', past.length, h('div', { class: 'cardlist' }, past.map(card)), { open: false }) : null,
       h('details', { class: 'section' }, h('summary', {}, h('span', { class: 'sec-title' }, '➕ New to-do')), newTask),
       h('details', { class: 'section' }, h('summary', {}, h('span', { class: 'sec-title' }, '📤 Bulk send')), bulk),
+      pickBar,
     ]);
+    drawPickBar();
   }
 
   // ---------- role chips (Chef / Front office / Housekeeping …) ----------
@@ -1379,7 +1424,12 @@
         r.status === 'draft'
           ? h('div', {}, ta, h('div', { class: 'row', style: 'margin-top:8px' },
               h('button', { class: 'btn primary small', onclick: guard(async () => { await api(`/api/outbox/${r.id}/approve`, { body: r.payload.waTemplate ? {} : { text: ta.value } }); toast('Approved — queued'); viewOutbox(); }) }, 'Approve & send'),
-              h('button', { class: 'btn small danger', onclick: guard(async () => { await api(`/api/outbox/${r.id}/reject`, { method: 'POST' }); viewOutbox(); }) }, 'Reject')))
+              h('button', { class: 'btn small danger', title: 'Reject — you can say why, so the AI does better next time', onclick: guard(async () => {
+                const reason = prompt('Reject this draft. Why? (optional — the AI reads this before drafting for this person again)', '');
+                if (reason === null) return;
+                await api(`/api/outbox/${r.id}/reject`, { body: { reason } });
+                viewOutbox();
+              }) }, 'Reject')))
           : h('div', {}, h('p', { style: 'white-space:pre-wrap;margin:6px 0' }, r.payload.text || r.payload.attachment?.caption || ''),
               errorBox(r.error, help),
               r.status === 'queued' ? h('button', { class: 'btn small danger', onclick: guard(async () => { await api(`/api/outbox/${r.id}/reject`, { method: 'POST' }); viewOutbox(); }) }, 'Cancel') : null,
@@ -1418,8 +1468,10 @@ ${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel
         }) }, 'Approve selected') : null,
         h('button', { class: 'btn small danger', onclick: guard(async () => {
           if (!sel.size) return toast('Tick the messages first');
-          if (!confirm(`${tab === 'queued' ? 'Cancel' : 'Reject'} ${sel.size} selected messages? They will not be sent.`)) return;
-          const r = await api('/api/outbox/reject-selected', { body: { ids: [...sel] } });
+          const reason = prompt(`${tab === 'queued' ? 'Cancel' : 'Reject'} ${sel.size} selected messages? They will not be sent.
+Why? (optional — the AI reads it)`, '');
+          if (reason === null) return;
+          const r = await api('/api/outbox/reject-selected', { body: { ids: [...sel], reason } });
           toast(`${tab === 'queued' ? 'Cancelled' : 'Rejected'} ${r.rejected}`);
           viewOutbox();
         }) }, tab === 'queued' ? 'Cancel selected' : 'Reject selected')),

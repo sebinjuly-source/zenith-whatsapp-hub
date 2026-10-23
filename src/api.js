@@ -511,6 +511,14 @@ export function buildApp() {
     const { metaHelpTable } = await import('./wa/graph.js');
     res.json(metaHelpTable());
   }));
+  // One note on several cards, e.g. "these people did not pick up — follow up on WhatsApp". aiTask: also a card for
+  // the AI (due now) listing them; close: the selected cards are done (the AI card takes over).
+  api.post('/tasks/bulk-note', wrap(async (req, res) => {
+    const { ids = [], text = '', aiTask = true, close = false } = req.body || {};
+    const r = await tasks.bulkNote(ids, text, { aiTask, close, actor: actorOf(req) === 'you' ? 'you' : 'ai' });
+    await act(req, r.task?.account_id || null, `Note on ${r.noted} card(s)${r.task ? ` → task #${r.task.id} for the AI` : ''}: ${String(text).slice(0, 80)}`);
+    res.json(r);
+  }));
   // A card's history (what happened and why) and its notes
   api.get('/tasks/:id/log', wrap(async (req, res) => res.json(await tasks.taskLog(req.params.id))));
   api.post('/tasks/:id/notes', wrap(async (req, res) => {
@@ -567,7 +575,7 @@ export function buildApp() {
     res.json(r);
   }));
   api.post('/outbox/reject-selected', wrap(async (req, res) => {
-    const r = await outbox.rejectMany(idsOf(req));
+    const r = await outbox.rejectMany(idsOf(req), { reason: req.body?.reason || '', actor: 'you' });
     for (const [acc, n] of Object.entries(r.perAccount)) await act(req, acc, `Rejected ${n} selected messages`);
     res.json(r);
   }));
@@ -587,7 +595,7 @@ export function buildApp() {
     res.json(r);
   }));
   api.post('/outbox/:id/reject', wrap(async (req, res) => {
-    const r = await outbox.reject(req.params.id);
+    const r = await outbox.reject(req.params.id, { reason: req.body?.reason || '', actor: 'you' });
     await act(req, r.account_id, `Rejected ${r.status === 'rejected' ? 'draft' : 'message'} #${r.id} to ${r.to_jid.split('@')[0]}`);
     res.json(r);
   }));

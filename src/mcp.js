@@ -187,6 +187,8 @@ function buildServer(playbook = '') {
     out.push(`2. COMING UP: ${later.length} dated cards${upcomingVisits.length ? '; interviews: ' + upcomingVisits.map((t) => trim(t.title.replace(/^Interview: /, ''), 50)).join('; ') : ''}`);
     const [dr] = await query(`SELECT count(*)::int n, count(DISTINCT account_id)::int a FROM outbox WHERE status = 'draft'`);
     out.push(`3. DRAFTS WAITING FOR OWNER APPROVAL: ${dr.n}${dr.n ? ' (list_outbox status=draft) — the owner approves; never approve unless told to' : ''}`);
+    const rej = await query(`SELECT o.id, o.account_id, o.to_jid, o.error FROM outbox o WHERE o.status = 'rejected' AND o.source <> 'campaign' AND o.created_at > now() - interval '48 hours' ORDER BY o.id DESC LIMIT 8`);
+    if (rej.length) out.push(`   Owner REJECTED recently (don't draft the same again; the reason is a note on their card): ${rej.map((r) => `#${r.id} ${r.to_jid.split('@')[0]} on ${r.account_id}${r.error?.startsWith('Rejected:') ? ' — ' + r.error.slice(10, 90) : ''}`).join('; ')}`);
     out.push('4. NUMBERS:');
     for (const a of manager.list()) out.push(`   - ${a.id} (${a.label}, ${a.provider === 'cloud' ? 'Meta API' : 'linked phone'}): ${a.status}${await sendingLine(a)}`);
     const ls = await lists.listLists(null, null);
@@ -406,10 +408,19 @@ function buildServer(playbook = '') {
       wa_template: waTemplateArg.describe('Meta Cloud API numbers only: send this approved Meta template (required when the person has not written in the last 24 h)'),
       buttons: z.array(z.string()).max(3).optional().describe('Up to 3 tap-to-reply answers, e.g. ["Haan, aaunga","Nahi"] (≤20 chars). Meta numbers show buttons; linked numbers list them as "Reply: …"'),
       schedule_at: z.string().optional().describe('Send later: "YYYY-MM-DD HH:MM" (India time) or ISO. It shows on the Board as "Scheduled: …" until it goes out. In approve mode the owner still approves it first.'),
+      other_number_ok: z.boolean().optional().describe('Only if the owner asked: start a chat on this number although the person already chats with another number'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
       const jid = await resolveChat(s.id, a.to);
+      // Wrong-number guard: a person who chats with another number is answered from that number
+      if (!a.other_number_ok && !jid.endsWith('@g.us')) {
+        const [here] = await query('SELECT 1 FROM messages WHERE account_id = $1 AND chat_jid = $2 LIMIT 1', [s.id, jid]);
+        if (!here) {
+          const other = await query('SELECT account_id, max(ts) AS ts FROM messages WHERE chat_jid = $1 AND account_id <> $2 GROUP BY 1 ORDER BY 2 DESC', [jid, s.id]);
+          if (other.length) return `Not drafted: ${jid.split('@')[0]} has never chatted with "${s.id}" — their chat is on ${other.map((o) => `"${o.account_id}"`).join(', ')}. Draft on that number (account="${other[0].account_id}"). Use other_number_ok=true only if the owner asked.`;
+        }
+      }
       const scheduledAt = localTime(a.schedule_at) || undefined;
       if (s.isCloud && !a.wa_template) {
         const w = await s.windowFor(jid);
@@ -473,8 +484,8 @@ function buildServer(playbook = '') {
     return `Draft #${r.id} approved and queued.`;
   });
 
-  tool('reject_draft', 'Discard a draft or a queued message.', { id: z.number().int() }, async (a) => {
-    await outbox.reject(a.id);
+  tool('reject_draft', 'Discard a draft or a queued message (e.g. your own mistake). The reason is noted on the person\'s Board card.', { id: z.number().int(), reason: z.string().optional() }, async (a) => {
+    await outbox.reject(a.id, { reason: a.reason || '', actor: 'ai' });
     return `#${a.id} rejected.`;
   });
 
