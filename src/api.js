@@ -497,6 +497,31 @@ export function buildApp() {
     await act(req, s.id, `Created task #${t.id} "${t.title}"`);
     res.json(t);
   }));
+  // ---- Contact book (hub-wide, by group): GET ?q=&category=, groups, POST, PATCH, DELETE
+  api.get('/directory', wrap(async (req, res) => {
+    const d = await import('./directory.js');
+    res.json(await d.search({ q: req.query.q || '', category: req.query.category || '', limit: Number(req.query.limit) || 300 }));
+  }));
+  api.get('/directory/groups', wrap(async (req, res) => {
+    const d = await import('./directory.js');
+    res.json({ groups: await d.groups(), suggested: d.SUGGESTED_GROUPS });
+  }));
+  api.post('/directory', wrap(async (req, res) => {
+    const d = await import('./directory.js');
+    const b = req.body || {};
+    const row = await d.saveEntry({ ...b, createdBy: 'you' });
+    if (b.account && b.name) await store.updateContact(b.account, row.jid, { name: b.name }).catch(() => {});
+    await act(req, b.account || null, `Saved ${row.name || row.phone} in Contacts → ${row.category}`);
+    res.json(row);
+  }));
+  api.patch('/directory/:id', wrap(async (req, res) => {
+    const d = await import('./directory.js');
+    res.json(await d.update(req.params.id, req.body || {}));
+  }));
+  api.delete('/directory/:id', wrap(async (req, res) => {
+    const d = await import('./directory.js');
+    res.json(await d.remove(req.params.id));
+  }));
   // ---- Settings for all numbers (each number keeps the settings it changed itself)
   api.get('/settings/defaults', wrap(async (req, res) => {
     const d = await import('./defaults.js');

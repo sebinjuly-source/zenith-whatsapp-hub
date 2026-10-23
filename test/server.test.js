@@ -1378,7 +1378,36 @@ test('rules can be limited to a job role; contacts can be saved by name and keep
   // rename from the contact panel / AI
   await mcp('update_contact', { account: 'rl1', chat: '919508289325', name: 'Jay Raam' });
   assert.equal((await call('GET', '/api/accounts/rl1/contacts/919508289325@s.whatsapp.net')).data.name, 'Jay Raam');
-  assert.match(await mcp('save_contact', { account: 'rl1', phone: '9500000009', name: 'Sita' }), /Saved Sita \(919500000009@s\.whatsapp\.net\)/);
+  assert.match(await mcp('save_contact', { account: 'rl1', phone: '9500000009', name: 'Sita', group: 'Housekeeping hiring – Referred', reason: 'Test' }), /Saved Sita \(\+919500000009\) in "Housekeeping hiring – Referred"/);
+});
+
+test('contact book: people filed by group and found when the need comes up; a shared contact card files the referral and adds a call card', async () => {
+  await manager.create({ id: 'dir1', label: 'Dir1' });
+  fake('dir1');
+  // saved by purpose, kept apart
+  await mcp('save_contact', { phone: '9137014662', name: 'Manojkumar Yadav', group: 'Catering', reason: 'Pakati / catering cook, ₹2,500 per day' });
+  await mcp('save_contact', { phone: '9137014662', name: 'Manojkumar Yadav', group: 'Chef hiring – Referrers', reason: 'Said he will refer a chef' });
+  await mcp('save_contact', { phone: '9811100001', name: 'Sky Travels', group: 'Travel agents', reason: 'Sends corporate groups' });
+  const groupsText = await mcp('find_contacts', {});
+  for (const g of ['Catering: 1', 'Chef hiring – Referrers: 1', 'Travel agents: 1']) assert.ok(groupsText.includes(g), groupsText);
+  assert.match(await mcp('find_contacts', { query: 'caterer' }), /Manojkumar Yadav \| \+919137014662 \| Catering/);
+  const chef = await mcp('find_contacts', { query: 'chef' });
+  assert.match(chef, /Chef hiring – Referrers/);
+  assert.doesNotMatch(chef, /Sky Travels/);
+  assert.match(await mcp('find_contacts', { group: 'Travel' }), /Sky Travels/);
+  // saving again adds to the reason instead of losing it
+  await call('POST', '/api/directory', { phone: '9811100001', name: 'Sky Travels', category: 'Travel agents', reason: 'Booked 3 rooms in Oct' });
+  assert.match(await mcp('find_contacts', { query: 'sky' }), /Sends corporate groups · Booked 3 rooms in Oct/);
+  // a chef candidate shares a contact card → referred chef + referrer filed, owner card to call
+  await mcp('import_list', { account: 'dir1', name: 'Chef – Batch D', role: 'Chef', members: [{ phone: '9739452867', name: 'Roshan' }] });
+  const s = manager.get('dir1');
+  await s.afterIncoming({ id: 'VC1', chatJid: '919739452867@s.whatsapp.net', senderJid: '919739452867@s.whatsapp.net', fromMe: false, ts: Math.floor(Date.now() / 1000), type: 'contact', body: 'Shared contact', vcards: [{ name: 'Jay Raam', phones: ['919508289325'] }] });
+  const referred = await mcp('find_contacts', { query: 'jay' });
+  assert.match(referred, /Jay Raam \| \+919508289325 \| Chef hiring – Referred \| Referred by Roshan/);
+  assert.match(await mcp('find_contacts', { group: 'Chef hiring – Referrers' }), /Roshan \| \+919739452867 \| Chef hiring – Referrers \| Referred Jay Raam/);
+  assert.ok((await call('GET', '/api/tasks?account=dir1')).data.find((t) => /^Call Jay Raam – referred by Roshan/.test(t.title) && t.priority));
+  // the dashboard search works the same way
+  assert.equal((await call('GET', '/api/directory?q=referred%20roshan')).data.length >= 1, true);
 });
 
 test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {

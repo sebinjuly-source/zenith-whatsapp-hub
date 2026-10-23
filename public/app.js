@@ -153,6 +153,7 @@
     ['inbox', '💬', 'Inbox'],
     ['outbox', '✉️', 'Drafts'],
     null,
+    ['contacts', '📇', 'Contacts'],
     ['lists', '📋', 'Lists'],
     ['accounts', '📱', 'Numbers'],
     ['templates', '📝', 'Templates'],
@@ -477,14 +478,18 @@
 
   // ---------- inbox ----------
   /** Save a contact (number + name) on this number; linked phones can also save it in the phone's contacts. */
-  function contactDialog(accountId, { phone = '', name = '' } = {}, onSaved) {
-    const linked = !isCloud(accountId);
+  function contactDialog(accountId, { phone = '', name = '', group = '', reason = '' } = {}, onSaved) {
+    const linked = accountId && !isCloud(accountId);
+    const groupsList = h('datalist', { id: 'dir-groups' });
+    api('/api/directory/groups').then((g) => groupsList.append(...[...new Set([...g.groups.map((x) => x.category), ...g.suggested])].map((c) => h('option', { value: c })))).catch(() => {});
     const done = () => back.remove();
     const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && done() },
       h('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Save contact', onsubmit: guard(async (e) => {
         e.preventDefault();
         const x = e.target;
-        const r = await api(`/api/accounts/${accountId}/contacts`, { body: { phone: x.phone.value, name: x.name.value, savePhone: !!x.savePhone?.checked } });
+        // filed in the hub's Contacts under its group (found again when the reason comes up)
+        await api('/api/directory', { body: { phone: x.phone.value, name: x.name.value, category: x.group.value, reason: x.reason.value || undefined, account: accountId || undefined } });
+        const r = accountId ? await api(`/api/accounts/${accountId}/contacts`, { body: { phone: x.phone.value, name: x.name.value, savePhone: !!x.savePhone?.checked } }) : {};
         done();
         toast(r.phone_saved && !r.phone_saved.ok ? `Saved in the hub (phone: ${r.phone_saved.reason})` : r.phone_saved?.ok ? 'Saved — also in the phone\'s contacts' : 'Contact saved');
         onSaved?.(r);
@@ -492,12 +497,73 @@
         h('h2', {}, '👤 Save contact'),
         h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { type: 'text', name: 'name', required: true, value: name, placeholder: 'Jay Raam (chef, referred by Roshan)' })),
         h('label', { class: 'field' }, h('span', {}, 'WhatsApp number'), h('input', { type: 'text', name: 'phone', required: true, value: phone, inputmode: 'tel', placeholder: '98765 43210' }), h('em', {}, 'Indian numbers can be typed without 91.')),
-        linked ? h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'savePhone', checked: true }), h('span', {}, 'Also save in the phone\'s contacts', h('em', {}, 'Shows the name on the phone that runs this number.'))) : h('p', { class: 'muted', style: 'font-size:12px' }, 'Meta API number: saved in the hub (it has no phone address book).'),
+        h('label', { class: 'field' }, h('span', {}, 'Group'), h('input', { type: 'text', name: 'group', required: true, value: group, list: 'dir-groups', placeholder: 'Chef hiring – Referrers, Catering, Travel agents…' }), groupsList,
+          h('em', {}, 'Why they matter decides where they are kept — they come up again when that need comes up.')),
+        h('label', { class: 'field' }, h('span', {}, 'Reason / what they did'), h('input', { type: 'text', name: 'reason', value: reason, placeholder: 'Referred chef Jay Raam on 23 Oct' })),
+        linked ? h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'savePhone', checked: true }), h('span', {}, 'Also save in the phone\'s contacts', h('em', {}, 'Shows the name on the phone that runs this number.'))) : null,
         h('div', { class: 'row', style: 'justify-content:flex-end' },
           h('button', { class: 'btn', type: 'button', onclick: done }, 'Cancel'),
           h('button', { class: 'btn primary', type: 'submit' }, 'Save'))));
     document.body.append(back);
     back.querySelector(name ? 'input[name=phone]' : 'input[name=name]').focus();
+  }
+
+  // ---------- contacts (the hub's contact book, by group) ----------
+  async function viewContacts() {
+    await loadAccounts();
+    const st = (state.dir ||= { q: '', group: '' });
+    const [rows, g] = await Promise.all([
+      api(`/api/directory?${new URLSearchParams({ q: st.q, category: st.group })}`),
+      api('/api/directory/groups'),
+    ]);
+    const byGroup = new Map();
+    for (const r of rows) (byGroup.get(r.category) || byGroup.set(r.category, []).get(r.category)).push(r);
+    let t;
+    const search = h('input', { type: 'text', value: st.q, placeholder: '🔍 Who do you need? chef, caterer, travel agent, referred by…', 'aria-label': 'Search contacts',
+      oninput: (e) => { st.q = e.target.value; clearTimeout(t); t = setTimeout(viewContacts, 300); } });
+    const openChat = (r) => {
+      const acc = r.chat_accounts?.[0] || r.account_id;
+      if (!acc) return toast('No chat with them yet — save them with a number to message them');
+      Object.assign(state.inbox, { account: acc, q: r.phone, chat: null, state: '', open: r.jid });
+      location.hash = 'inbox';
+    };
+    const entry = (r) => h('div', { class: 'person' },
+      h('div', { class: 'p-head' }, h('b', { class: 'grow' }, r.name || '–'), h('a', { class: 'mono muted', href: `tel:+${r.phone}`, style: 'font-size:12px' }, '+' + r.phone)),
+      r.reason ? h('div', { style: 'font-size:13px' }, r.reason) : null,
+      r.referred_by_name ? h('div', { class: 'muted', style: 'font-size:12px' }, 'Referred by ', r.referred_by_name) : null,
+      r.notes ? h('div', { class: 'muted', style: 'font-size:12px' }, r.notes) : null,
+      h('div', { class: 'row', style: 'gap:6px;margin-top:4px' },
+        h('button', { class: 'btn small', onclick: () => openChat(r) }, '💬 Chat'),
+        h('button', { class: 'btn small', onclick: guard(async () => {
+          const notes = prompt('Notes', r.notes || '');
+          if (notes === null) return;
+          await api(`/api/directory/${r.id}`, { method: 'PATCH', body: { notes } });
+          viewContacts();
+        }) }, '✏️ Note'),
+        h('button', { class: 'btn small', onclick: guard(async () => {
+          const category = prompt('Move to group', r.category);
+          if (!category) return;
+          await api(`/api/directory/${r.id}`, { method: 'PATCH', body: { category } });
+          viewContacts();
+        }) }, '📁 Group'),
+        h('button', { class: 'btn small danger', onclick: guard(async () => {
+          if (!confirm(`Remove ${r.name || r.phone} from "${r.category}"?`)) return;
+          await api(`/api/directory/${r.id}`, { method: 'DELETE' });
+          viewContacts();
+        }) }, '🗑')));
+    shell([
+      h('div', { class: 'row', style: 'margin-bottom:6px' }, h('h1', { class: 'grow', style: 'margin:0' }, '📇 Contacts'),
+        h('button', { class: 'btn primary small', onclick: () => contactDialog(null, {}, () => viewContacts()) }, '👤＋ Add')),
+      h('p', { class: 'sub' }, 'People kept for a reason, in groups — referrers, referred candidates, caterers, agents, guests. The AI looks here first when that need comes up.'),
+      h('div', { class: 'row', style: 'margin-bottom:10px' }, h('div', { class: 'grow' }, search),
+        h('select', { class: 'small-select', 'aria-label': 'Group', onchange: (e) => { st.group = e.target.value; viewContacts(); } },
+          h('option', { value: '' }, '📁 All groups'), g.groups.map((x) => h('option', { value: x.category, selected: st.group === x.category }, `${x.category} (${x.n})`)))),
+      rows.length
+        ? [...byGroup].map(([cat, list], i) => h('details', { class: 'section', open: i < 3 || !!st.q },
+            h('summary', {}, h('span', { class: 'sec-title' }, '📁 ', cat), h('span', { class: 'count' }, list.length)),
+            h('div', { class: 'people' }, list.map(entry))))
+        : h('p', { class: 'muted' }, st.q || st.group ? 'Nobody matches.' : 'No contacts saved yet. Save people from a chat (Contact → Save to Contacts), from a shared contact card (💾 Save), or with 👤＋ Add.'),
+    ]);
   }
 
   async function viewInbox() {
@@ -730,7 +796,11 @@
         const otherNumbers = others.length
           ? h('div', {}, h('b', {}, 'Also on: '), others.map((p) => h('span', { class: 'tag' }, `${p.account_label}: ${p.messages} msgs, last ${fmt(p.last_ts) || '–'}${(p.tags || []).length ? ' · ' + p.tags.join(',') : ''}`)))
           : null;
+        const inBook = await api(`/api/directory?q=${c.jid.split('@')[0]}`).catch(() => []);
         fill(contactPanel,
+          h('div', { class: 'row', style: 'gap:6px' },
+            inBook.length ? inBook.map((d) => h('span', { class: 'tag', title: d.reason || '' }, '📁 ', d.category)) : h('span', { class: 'muted', style: 'font-size:12px' }, 'Not in Contacts yet'),
+            h('button', { class: 'btn small', type: 'button', onclick: () => contactDialog(ib.account, { phone: c.jid.split('@')[0], name: ct.saved_name || ct.name || ct.notify || '' }, () => loadContact()) }, '📇 Save to Contacts')),
           h('div', { class: 'muted' }, `Saved name: ${ct.name || '–'} · WhatsApp name: ${ct.notify || '–'} · ${nice(ct.message_count)} messages since ${fmt(ct.first_ts) || '–'}${ct.is_blocked ? ' · BLOCKED' : ''}`),
           ct.summary ? h('div', {}, h('b', {}, 'AI summary: '), ct.summary) : null,
           otherNumbers,
@@ -771,7 +841,7 @@
             : null;
           const vcards = (m.vcards || []).map((v) => h('div', { class: 'tag', style: 'display:inline-flex;gap:8px;align-items:center' },
             `👤 ${v.name}${v.org ? ' · ' + v.org : ''} ${v.phones.map((p) => '+' + p).join(', ')}`,
-            v.phones.length ? h('button', { class: 'btn small', type: 'button', title: 'Save this contact', onclick: () => contactDialog(ib.account, { phone: v.phones[0], name: v.name }) }, '💾 Save') : null));
+            v.phones.length ? h('button', { class: 'btn small', type: 'button', title: 'Save this contact', onclick: () => contactDialog(ib.account, { phone: v.phones[0], name: v.name, group: 'Chef hiring – Referred', reason: `Referred by ${c.name || c.jid.split('@')[0]}` }) }, '💾 Save') : null));
           nodes.push(h('div', { class: 'msg' + (m.from_me ? ' me' : '') + (m.deleted ? ' deleted' : '') },
             c.is_group && !m.from_me ? h('div', { class: 's' }, m.sender_name || (m.sender_jid || '').split('@')[0]) : null,
             m.quoted_body ? h('div', { class: 'q' }, m.quoted_body) : null,
@@ -1824,7 +1894,7 @@ Why? (optional — the AI reads it)`, '');
   }
 
   // ---------- routing & live updates ----------
-  const views = { lists: viewLists, templates: viewTemplates, rules: viewRules, board: viewBoard, accounts: viewAccounts, inbox: viewInbox, outbox: viewOutbox, settings: viewSettings, connect: viewConnect, activity: viewActivity };
+  const views = { contacts: viewContacts, lists: viewLists, templates: viewTemplates, rules: viewRules, board: viewBoard, accounts: viewAccounts, inbox: viewInbox, outbox: viewOutbox, settings: viewSettings, connect: viewConnect, activity: viewActivity };
   async function route() {
     state.route = location.hash.slice(1) || 'board';
     state.reloadChats = state.reloadThread = null;

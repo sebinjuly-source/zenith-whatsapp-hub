@@ -286,6 +286,24 @@ ALTER TABLE outbox ADD COLUMN IF NOT EXISTS retries INT NOT NULL DEFAULT 0;
 ALTER TABLE lists ADD COLUMN IF NOT EXISTS archived TEXT;
 -- A name the owner saved for a contact (kept even when WhatsApp sends a different one)
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS saved_name TEXT;
+-- Contact book: people kept for a reason, filed by group ("Chef hiring – Referrers", "Catering", "Travel agents"…)
+CREATE TABLE IF NOT EXISTS directory (
+  id BIGSERIAL PRIMARY KEY,
+  jid TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  name TEXT,
+  category TEXT NOT NULL,
+  reason TEXT,
+  notes TEXT,
+  tags TEXT[] NOT NULL DEFAULT '{}',
+  account_id TEXT,
+  referred_by TEXT,
+  created_by TEXT NOT NULL DEFAULT 'you',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (jid, category)
+);
+CREATE INDEX IF NOT EXISTS directory_category ON directory (category);
 
 -- Sent as a reply to someone who wrote in the last 24 h: goes out at once and isn't counted in the automated cap
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_reply BOOLEAN NOT NULL DEFAULT FALSE;

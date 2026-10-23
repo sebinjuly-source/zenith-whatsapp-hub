@@ -602,6 +602,8 @@ export class Session extends EventEmitter {
     const board = await import('../board.js');
     await board.noteIncoming(this.id, r).catch((err) => this.log.warn({ err: err.message }, 'board card failed'));
     await board.syncReminder(this.id, r.chatJid, { state: 'open' }).catch(() => {});
+    // A shared contact card is a referral: file both people in Contacts and add a "Call …" card
+    if (r.vcards?.length) await import('../directory.js').then((d) => d.noteSharedContacts(this.id, r)).catch((err) => this.log.warn({ err: err.message }, 'referral save failed'));
     // Opt-out replies ("stop", "not interested" …) tag the contact so campaigns skip them.
     if (r.body && !isJidGroup(r.chatJid)) {
       const text = r.body.trim().toLowerCase();

@@ -462,14 +462,32 @@ function buildServer(playbook = '') {
     },
   );
 
-  tool('save_contact', 'Save a new contact (number + name) on a number, e.g. a chef someone referred or a shared contact card. It appears in that number\'s inbox so it can be messaged. Only when the owner asks, or for a shared contact the owner wants kept.', {
-    account: accountArg, phone: z.string(), name: z.string(), notes: z.string().optional(), add_tags: z.array(z.string()).optional(),
+  tool('save_contact', 'Save a person in the hub\'s Contacts, filed in a GROUP by why they matter — e.g. "Chef hiring – Referrers" (gave a reference), "Chef hiring – Referred" (a referred candidate), "Catering", "Placement agents", "Vendors & services", "Travel agents", "Corporate clients", "Guests". Always give the reason (what they did / why keep them). Save anyone who helped (referrals, suppliers, agents) so they are found when the need comes up again. With account, the name also shows in that number\'s inbox.', {
+    phone: z.string(), name: z.string(), group: z.string().describe('e.g. "Chef hiring – Referrers", "Catering", "Travel agents"'),
+    reason: z.string().describe('Why they are worth keeping, e.g. "Referred chef Jay Raam on 23 Oct"'),
+    notes: z.string().optional(), tags: z.array(z.string()).optional(), referred_by: z.string().optional().describe('Phone of the person who referred them'),
+    account: z.string().optional().describe('Number whose inbox should also show this name (makes a chat to message them)'),
   }, async (a) => {
-    const s = await manager.resolve(a.account);
-    const c = await store.saveContact(s.id, a.phone, a.name);
-    if (a.notes || a.add_tags?.length) await store.updateContact(s.id, c.jid, { notes: a.notes, addTags: a.add_tags });
-    await ai(s.id, `Saved contact ${c.name} +${c.jid.split('@')[0]}`);
-    return `Saved ${c.name} (${c.jid}) on ${s.id}.`;
+    const d = await import('./directory.js');
+    const row = await d.saveEntry({ phone: a.phone, name: a.name, category: a.group, reason: a.reason, notes: a.notes, tags: a.tags, referredBy: a.referred_by, account: a.account ? (await manager.resolve(a.account)).id : null, createdBy: 'ai' });
+    if (a.account) await store.saveContact((await manager.resolve(a.account)).id, a.phone, a.name);
+    await ai(a.account ? (await manager.resolve(a.account)).id : null, `Saved ${row.name} in Contacts → ${row.category}`);
+    return `Saved ${row.name} (+${row.phone}) in "${row.category}" — ${row.reason || ''}`;
+  });
+
+  tool('find_contacts', 'Search the hub\'s Contacts (people kept for a reason) — use it FIRST whenever a need comes up: hiring a role ("chef"), a supplier ("caterer"), agents, a guest campaign, or "who referred…". Every word must match name, group, reason, notes or tags. No query → the list of groups with counts.', {
+    query: z.string().optional(), group: z.string().optional(),
+  }, async (a) => {
+    const d = await import('./directory.js');
+    if (!a.query && !a.group) {
+      const g = await d.groups();
+      return g.length ? 'Contact groups:\n' + g.map((x) => `${x.category}: ${x.n}`).join('\n') : 'No contacts saved yet.';
+    }
+    const rows = await d.search({ q: a.query || '', category: a.group || '' });
+    return rows.length
+      ? rows.map((r) => [`${r.name || '-'} | +${r.phone} | ${r.category}`, r.reason, r.notes ? `notes: ${trim(r.notes, 120)}` : null, r.referred_by_name ? `referred by ${r.referred_by_name}` : null,
+          r.tags?.length ? `tags: ${r.tags.join(',')}` : null, r.chat_accounts?.length ? `chat on ${r.chat_accounts.join(', ')}` : 'no chat yet'].filter(Boolean).join(' | ')).join('\n')
+      : 'Nobody matches. Try fewer or different words, or find_contacts() for the groups.';
   });
 
   tool('list_outbox', 'List drafts / queued / sent / failed messages created by agents, campaigns or the API.', {
