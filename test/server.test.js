@@ -1348,6 +1348,39 @@ test('owner feedback reaches the AI: rejections (with reason) land on the person
   assert.match(await mcp('list_tasks', { owner_notes: true }), new RegExp(`#${t4.id} .*OWNER NOTE TO ACT ON`));
 });
 
+test('rules can be limited to a job role; contacts can be saved by name and keep that name through WhatsApp sync', async () => {
+  const store = await import('../src/store.js');
+  const rules = await import('../src/rules.js');
+  await manager.create({ id: 'rl1', label: 'Rl1' });
+  fake('rl1');
+  await mcp('import_list', { account: 'rl1', name: 'Reception – Batch 1', role: 'Front office', members: [{ phone: '9500000001', name: 'Rekha' }] });
+  await mcp('import_list', { account: 'rl1', name: 'Chef – Batch R', role: 'Chef', members: [{ phone: '9500000002', name: 'Ramu' }] });
+  await mcp('save_rule', { account: 'rl1', name: 'Chef Haan', words: ['haan, interested'], role: 'Chef', add_tags: ['chef-yes'] });
+  await mcp('save_rule', { account: 'rl1', name: 'Reception Haan', words: ['haan, interested'], role: 'Front office', add_tags: ['fo-yes'] });
+  const tagsFor = async (jid) => (await query(`SELECT tags FROM contacts WHERE account_id = 'rl1' AND jid = $1`, [jid]))[0]?.tags || [];
+  const ctx = (jid) => ({ updateContact: (a) => store.updateContact('rl1', jid, a), saveMedia: async () => {}, createTask: async () => {}, sendTemplate: async () => {}, snooze: async () => {} });
+  for (const [jid, id] of [['919500000001@s.whatsapp.net', 'RL1'], ['919500000002@s.whatsapp.net', 'RL2']]) {
+    await rules.runRules('rl1', { id, chatJid: jid, type: 'text', body: 'Haan, interested' }, { isGroup: false, isNew: false }, ctx(jid));
+  }
+  assert.deepEqual(await tagsFor('919500000001@s.whatsapp.net'), ['fo-yes']);
+  assert.deepEqual(await tagsFor('919500000002@s.whatsapp.net'), ['chef-yes']);
+  // save a contact by number + name: appears in the inbox, keeps the name when WhatsApp syncs another one
+  const r = await call('POST', '/api/accounts/rl1/contacts', { phone: '9508289325', name: 'Jay Raam (chef, ref Roshan)', savePhone: true });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.jid, '919508289325@s.whatsapp.net');
+  assert.equal(r.data.phone_saved.ok, false); // the fake test phone can't save; the hub save still worked
+  const chats = (await call('GET', '/api/accounts/rl1/chats?q=9508289325')).data;
+  assert.equal(chats[0]?.name, 'Jay Raam (chef, ref Roshan)');
+  await store.upsertContacts('rl1', [{ jid: '919508289325@s.whatsapp.net', name: 'JR', notify: 'Jay' }]);
+  await store.upsertChats('rl1', [{ jid: '919508289325@s.whatsapp.net', name: 'JR' }]);
+  assert.equal((await call('GET', '/api/accounts/rl1/contacts/919508289325@s.whatsapp.net')).data.name, 'Jay Raam (chef, ref Roshan)');
+  assert.equal((await call('GET', '/api/accounts/rl1/chats?q=9508289325')).data[0].name, 'Jay Raam (chef, ref Roshan)');
+  // rename from the contact panel / AI
+  await mcp('update_contact', { account: 'rl1', chat: '919508289325', name: 'Jay Raam' });
+  assert.equal((await call('GET', '/api/accounts/rl1/contacts/919508289325@s.whatsapp.net')).data.name, 'Jay Raam');
+  assert.match(await mcp('save_contact', { account: 'rl1', phone: '9500000009', name: 'Sita' }), /Saved Sita \(919500000009@s\.whatsapp\.net\)/);
+});
+
 test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {
   const s = manager.get('hiring');
   const t0 = Date.now() - 600000;

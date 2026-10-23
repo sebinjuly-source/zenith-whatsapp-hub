@@ -383,13 +383,14 @@ function buildServer(playbook = '') {
       notes: z.string().optional(),
       summary: z.string().optional().describe('One or two lines'),
       mark_reviewed: z.boolean().optional(),
+      name: z.string().optional().describe('Save the contact under this name (kept even when WhatsApp reports another)'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
       const jid = await resolveChat(s.id, a.chat);
       await ai(s.id, `Updated contact ${jid.split('@')[0]}${a.add_tags?.length ? ' +' + a.add_tags.join(',') : ''}${a.remove_tags?.length ? ' -' + a.remove_tags.join(',') : ''}${a.lead_status ? ' status ' + a.lead_status : ''}`);
       const c = await store.updateContact(s.id, jid, {
-        addTags: a.add_tags, removeTags: a.remove_tags, leadStatus: a.lead_status, notes: a.notes, summary: a.summary, markReviewed: a.mark_reviewed,
+        addTags: a.add_tags, removeTags: a.remove_tags, leadStatus: a.lead_status, notes: a.notes, summary: a.summary, markReviewed: a.mark_reviewed, name: a.name,
       });
       return `Saved ${jid}: tags=${c.tags.join(',') || '-'} status=${c.lead_status || '-'}`;
     },
@@ -460,6 +461,16 @@ function buildServer(playbook = '') {
         : `Queued #${row.id} for ${jid}${later ? `; it goes out${later}` : '; it goes out after the random delay, within sending hours and the daily cap'}.`;
     },
   );
+
+  tool('save_contact', 'Save a new contact (number + name) on a number, e.g. a chef someone referred or a shared contact card. It appears in that number\'s inbox so it can be messaged. Only when the owner asks, or for a shared contact the owner wants kept.', {
+    account: accountArg, phone: z.string(), name: z.string(), notes: z.string().optional(), add_tags: z.array(z.string()).optional(),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    const c = await store.saveContact(s.id, a.phone, a.name);
+    if (a.notes || a.add_tags?.length) await store.updateContact(s.id, c.jid, { notes: a.notes, addTags: a.add_tags });
+    await ai(s.id, `Saved contact ${c.name} +${c.jid.split('@')[0]}`);
+    return `Saved ${c.name} (${c.jid}) on ${s.id}.`;
+  });
 
   tool('list_outbox', 'List drafts / queued / sent / failed messages created by agents, campaigns or the API.', {
     account: z.string().optional(),
@@ -662,6 +673,7 @@ function buildServer(playbook = '') {
     types: z.array(z.string()).optional().describe('Message types, e.g. ["document","image"]; empty = any'),
     words: z.array(z.string()).optional().describe('Match if the text or file name contains any of these'),
     sender: z.enum(['any', 'new', 'known']).optional().describe('new = never messaged by this number before'),
+    role: z.string().optional().describe('Only people on a list of this job role (e.g. Chef, Front office, Housekeeping); empty = anyone'),
     add_tags: z.array(z.string()).optional(), lead_status: z.string().optional(), save_media: z.boolean().optional(),
     create_task: z.string().optional().describe('Task title, may use {name}'),
     reply_template: z.string().optional().describe('Template to auto-reply with (once per person per day)'),
@@ -670,7 +682,7 @@ function buildServer(playbook = '') {
     const s = await manager.resolve(a.account);
     const r = await rules.saveRule({
       id: a.id, account: s.id, name: a.name, enabled: a.enabled ?? true,
-      conditions: { chat: a.chat, types: a.types, words: a.words, sender: a.sender },
+      conditions: { chat: a.chat, types: a.types, words: a.words, sender: a.sender, role: a.role },
       actions: { addTags: a.add_tags, leadStatus: a.lead_status, saveMedia: a.save_media, createTask: a.create_task, replyTemplate: a.reply_template, snoozeDays: a.snooze_days },
     });
     await ai(s.id, `Saved rule "${r.name}"`);

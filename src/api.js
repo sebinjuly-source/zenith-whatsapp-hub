@@ -261,13 +261,35 @@ export function buildApp() {
     res.json({ ok: true });
   }));
   api.get('/accounts/:id/contacts/:jid', wrap(async (req, res) => res.json(await store.getContact(req.params.id, req.params.jid))));
+  // Phone address book (linked numbers only): never fails the save — the result says what happened
+  const savePhone = async (accountId, jid, name) => {
+    const s = manager.get(accountId);
+    if (!s || s.isCloud) return { ok: false, reason: 'Meta API numbers have no phone address book — saved in the hub only' };
+    try {
+      await s.saveContactToPhone(jid, name);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: err.message };
+    }
+  };
   api.patch('/accounts/:id/contacts/:jid', wrap(async (req, res) => {
     const b = req.body || {};
     const c = await store.updateContact(req.params.id, req.params.jid, b);
+    let phone = null;
+    if (b.name && b.savePhone) phone = await savePhone(req.params.id, req.params.jid, b.name);
     const what = [b.addTags?.length && `+tags ${b.addTags.join(',')}`, b.removeTags?.length && `-tags ${b.removeTags.join(',')}`,
-      b.leadStatus !== undefined && `status ${b.leadStatus || '(none)'}`, b.notes !== undefined && 'notes'].filter(Boolean).join(', ');
+      b.leadStatus !== undefined && `status ${b.leadStatus || '(none)'}`, b.notes !== undefined && 'notes', b.name && `name "${b.name}"`].filter(Boolean).join(', ');
     if (what) await act(req, req.params.id, `Edited contact ${req.params.jid.split('@')[0]}: ${what}`);
-    res.json(c);
+    res.json(phone ? { ...c, phone_saved: phone } : c);
+  }));
+  // New contact: { phone, name, savePhone } — saved in the hub (and the phone), with an empty chat to message them
+  api.post('/accounts/:id/contacts', wrap(async (req, res) => {
+    const s = await manager.resolve(req.params.id);
+    const { phone, name, savePhone: toPhone } = req.body || {};
+    const c = await store.saveContact(s.id, phone, name);
+    const phoneResult = toPhone ? await savePhone(s.id, c.jid, c.name) : null;
+    await act(req, s.id, `Saved contact ${c.name} +${c.jid.split('@')[0]}${phoneResult?.ok ? ' (also on the phone)' : ''}`);
+    res.json({ ...c, phone_saved: phoneResult });
   }));
 
   api.get('/search', wrap(async (req, res) => {

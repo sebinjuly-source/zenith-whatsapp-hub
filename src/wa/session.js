@@ -800,6 +800,14 @@ export class Session extends EventEmitter {
    * Send one message. content is a Baileys content object ({ text } | { document, mimetype, fileName, caption } | …).
    * typingMs > 0 shows "typing…" first.
    */
+  /** Save a name in the phone's own contacts (synced from this linked device). Throws if WhatsApp refuses. */
+  async saveContactToPhone(jid, name) {
+    if (!this.sock || this.status !== 'open') throw new Error('The number is not connected right now');
+    if (typeof this.sock.addOrEditContact !== 'function') throw new Error('This WhatsApp version cannot save contacts from a linked device');
+    const full = String(name).trim();
+    await this.sock.addOrEditContact(jid, { fullName: full, firstName: full.split(/\s+/)[0], saveOnPrimaryAddressbook: true });
+  }
+
   async send(jid, content, { typingMs = 0, quoted } = {}) {
     if (!this.sock || this.status !== 'open') throw new Error(`Number "${this.id}" is not connected`);
     if (!isJidGroup(jid)) {

@@ -8,6 +8,7 @@
  *   types: ['document','image','text',…]        (empty = any type)
  *   words: ['booking','room']                   (any of these, case-insensitive; empty = no word check)
  *   sender: 'any' | 'new' | 'known'             (new = never messaged by you before)
+ *   role: 'Chef'                                (only people on a list of this job role; empty = anyone)
  * }
  * actions: {
  *   addTags: ['candidate'], leadStatus: 'new', saveMedia: true,
@@ -57,6 +58,7 @@ function normalizeConditions(c) {
     types: list(c.types),
     words: list(c.words),
     sender: ['any', 'new', 'known'].includes(c.sender) ? c.sender : 'any',
+    role: String(c.role || '').trim(),
   };
 }
 
@@ -72,8 +74,9 @@ function normalizeActions(a) {
 }
 
 /** Does this incoming message match the rule's conditions? (pure; `isNew` = never messaged by you) */
-export function matches(rule, msg, { isGroup, isNew }) {
+export function matches(rule, msg, { isGroup, isNew, role = null }) {
   const c = rule.conditions || {};
+  if (c.role && String(role || '').toLowerCase() !== c.role.toLowerCase()) return false;
   if (c.chat === 'direct' && isGroup) return false;
   if (c.chat === 'group' && !isGroup) return false;
   if (c.types?.length && !c.types.includes(msg.type)) return false;
@@ -92,8 +95,17 @@ export function matches(rule, msg, { isGroup, isNew }) {
  */
 export async function runRules(accountId, msg, { isGroup, isNew }, ctx) {
   const rules = (await query(`SELECT * FROM rules WHERE account_id = $1 AND enabled ORDER BY id`, [accountId]));
+  // the sender's job role (latest list they are on, this number's lists first) — for role-specific rules
+  let role = null;
+  if (rules.some((r) => r.conditions?.role)) {
+    const [m] = await query(
+      `SELECT l.role FROM list_members m JOIN lists l ON l.id = m.list_id WHERE m.jid = $2 ORDER BY (l.account_id = $1) DESC, l.id DESC LIMIT 1`,
+      [accountId, msg.chatJid],
+    );
+    role = m?.role || null;
+  }
   for (const rule of rules) {
-    if (!matches(rule, msg, { isGroup, isNew })) continue;
+    if (!matches(rule, msg, { isGroup, isNew, role })) continue;
     const a = rule.actions || {};
     const done = [];
     try {

@@ -284,6 +284,8 @@ CREATE INDEX IF NOT EXISTS task_log_task ON task_log (task_id, id);
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS retries INT NOT NULL DEFAULT 0;
 -- An archived list never sends (bulk, follow-ups, pipeline) and is hidden unless asked for; the text says why
 ALTER TABLE lists ADD COLUMN IF NOT EXISTS archived TEXT;
+-- A name the owner saved for a contact (kept even when WhatsApp sends a different one)
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS saved_name TEXT;
 
 -- Sent as a reply to someone who wrote in the last 24 h: goes out at once and isn't counted in the automated cap
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_reply BOOLEAN NOT NULL DEFAULT FALSE;

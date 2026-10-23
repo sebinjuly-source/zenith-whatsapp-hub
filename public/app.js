@@ -476,6 +476,30 @@
   }
 
   // ---------- inbox ----------
+  /** Save a contact (number + name) on this number; linked phones can also save it in the phone's contacts. */
+  function contactDialog(accountId, { phone = '', name = '' } = {}, onSaved) {
+    const linked = !isCloud(accountId);
+    const done = () => back.remove();
+    const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && done() },
+      h('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Save contact', onsubmit: guard(async (e) => {
+        e.preventDefault();
+        const x = e.target;
+        const r = await api(`/api/accounts/${accountId}/contacts`, { body: { phone: x.phone.value, name: x.name.value, savePhone: !!x.savePhone?.checked } });
+        done();
+        toast(r.phone_saved && !r.phone_saved.ok ? `Saved in the hub (phone: ${r.phone_saved.reason})` : r.phone_saved?.ok ? 'Saved — also in the phone\'s contacts' : 'Contact saved');
+        onSaved?.(r);
+      }) },
+        h('h2', {}, '👤 Save contact'),
+        h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { type: 'text', name: 'name', required: true, value: name, placeholder: 'Jay Raam (chef, referred by Roshan)' })),
+        h('label', { class: 'field' }, h('span', {}, 'WhatsApp number'), h('input', { type: 'text', name: 'phone', required: true, value: phone, inputmode: 'tel', placeholder: '98765 43210' }), h('em', {}, 'Indian numbers can be typed without 91.')),
+        linked ? h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'savePhone', checked: true }), h('span', {}, 'Also save in the phone\'s contacts', h('em', {}, 'Shows the name on the phone that runs this number.'))) : h('p', { class: 'muted', style: 'font-size:12px' }, 'Meta API number: saved in the hub (it has no phone address book).'),
+        h('div', { class: 'row', style: 'justify-content:flex-end' },
+          h('button', { class: 'btn', type: 'button', onclick: done }, 'Cancel'),
+          h('button', { class: 'btn primary', type: 'submit' }, 'Save'))));
+    document.body.append(back);
+    back.querySelector(name ? 'input[name=phone]' : 'input[name=name]').focus();
+  }
+
   async function viewInbox() {
     await loadAccounts();
     const accs = state.accounts;
@@ -495,8 +519,13 @@
     let qTimer;
     const side = h('aside', { class: 'side' },
       h('div', { class: 'tools' },
-        h('select', { 'aria-label': 'Number', onchange: (e) => { ib.account = e.target.value; ib.chat = null; viewInbox(); } },
-          accs.map((a) => h('option', { value: a.id, selected: a.id === ib.account }, `${a.label}${a.phone ? ' (+' + a.phone + ')' : ''}`))),
+        h('div', { class: 'row', style: 'gap:6px;flex-wrap:nowrap' },
+          h('select', { 'aria-label': 'Number', style: 'flex:1;min-width:0', onchange: (e) => { ib.account = e.target.value; ib.chat = null; viewInbox(); } },
+            accs.map((a) => h('option', { value: a.id, selected: a.id === ib.account }, `${a.label}${a.phone ? ' (+' + a.phone + ')' : ''}`))),
+          h('button', { class: 'btn icon', type: 'button', title: 'New contact', 'aria-label': 'New contact', onclick: () => contactDialog(ib.account, {}, (r) => {
+            Object.assign(ib, { q: r.jid.split('@')[0], open: r.jid, state: '' });
+            viewInbox();
+          }) }, '👤＋')),
         h('input', { type: 'text', placeholder: '🔍 Search name or number', value: ib.q, 'aria-label': 'Search chats', oninput: (e) => { ib.q = e.target.value; clearTimeout(qTimer); qTimer = setTimeout(loadChats, 250); } }),
         stateEl,
         h('details', { class: 'fold' }, h('summary', {}, 'More filters', ib.kind !== 'all' || ib.waiting ? ' •' : ''),
@@ -691,6 +720,8 @@
 
       async function loadContact() {
         const ct = (await api(`/api/accounts/${ib.account}/contacts/${encodeURIComponent(c.jid)}`)) || {};
+        const nameIn = h('input', { type: 'text', value: ct.saved_name || ct.name || '', placeholder: ct.notify || 'Name' });
+        const toPhone = isCloud(ib.account) ? null : h('label', { class: 'switch', style: 'margin:0' }, h('input', { type: 'checkbox' }), h('span', {}, 'Also save in the phone\'s contacts'));
         const tags = h('input', { type: 'text', value: (ct.tags || []).join(', '), placeholder: 'candidate, guest, lead-hot' });
         const status = h('input', { type: 'text', value: ct.lead_status || '', placeholder: 'new / contacted / interested / booked…' });
         const notes = h('textarea', { rows: 2, value: ct.notes || '' });
@@ -703,6 +734,7 @@
           h('div', { class: 'muted' }, `Saved name: ${ct.name || '–'} · WhatsApp name: ${ct.notify || '–'} · ${nice(ct.message_count)} messages since ${fmt(ct.first_ts) || '–'}${ct.is_blocked ? ' · BLOCKED' : ''}`),
           ct.summary ? h('div', {}, h('b', {}, 'AI summary: '), ct.summary) : null,
           otherNumbers,
+          h('div', { class: 'row' }, h('label', { class: 'grow' }, 'Name', nameIn), toPhone),
           h('div', { class: 'row' }, h('label', { class: 'grow' }, 'Tags', tags), h('label', { class: 'grow' }, 'Status', status)),
           h('label', {}, 'Notes', notes),
           h('div', {}, h('button', { class: 'btn small primary', onclick: guard(async () => {
@@ -710,8 +742,8 @@
             const had = ct.tags || [];
             await api(`/api/accounts/${ib.account}/contacts/${encodeURIComponent(c.jid)}`, { method: 'PATCH', body: {
               addTags: want.filter((t) => !had.includes(t)), removeTags: had.filter((t) => !want.includes(t)), leadStatus: status.value, notes: notes.value,
-            } });
-            toast('Saved');
+              ...(nameIn.value.trim() && nameIn.value.trim() !== (ct.saved_name || ct.name || '') ? { name: nameIn.value.trim(), savePhone: !!toPhone?.querySelector('input').checked } : {}),
+            } }).then((r) => toast(r?.phone_saved && !r.phone_saved.ok ? `Saved in the hub (phone: ${r.phone_saved.reason})` : 'Saved'));
           }) }, 'Save contact')),
         );
       }
@@ -737,7 +769,9 @@
                   e.target.replaceWith(h('span', { class: 'muted' }, ' · saved'));
                 }) }, 'Keep a copy'))
             : null;
-          const vcards = (m.vcards || []).map((v) => h('div', { class: 'tag' }, `👤 ${v.name}${v.org ? ' · ' + v.org : ''} ${v.phones.map((p) => '+' + p).join(', ')}`));
+          const vcards = (m.vcards || []).map((v) => h('div', { class: 'tag', style: 'display:inline-flex;gap:8px;align-items:center' },
+            `👤 ${v.name}${v.org ? ' · ' + v.org : ''} ${v.phones.map((p) => '+' + p).join(', ')}`,
+            v.phones.length ? h('button', { class: 'btn small', type: 'button', title: 'Save this contact', onclick: () => contactDialog(ib.account, { phone: v.phones[0], name: v.name }) }, '💾 Save') : null));
           nodes.push(h('div', { class: 'msg' + (m.from_me ? ' me' : '') + (m.deleted ? ' deleted' : '') },
             c.is_group && !m.from_me ? h('div', { class: 's' }, m.sender_name || (m.sender_jid || '').split('@')[0]) : null,
             m.quoted_body ? h('div', { class: 'q' }, m.quoted_body) : null,
@@ -1338,7 +1372,7 @@
         const f = e.target;
         const body = {
           account: f.account.value, name: f.name.value, enabled: f.enabled.checked,
-          conditions: { chat: f.chat.value, sender: f.sender.value, types: [...f.querySelectorAll('input[name=type]:checked')].map((i) => i.value), words: f.words.value },
+          conditions: { chat: f.chat.value, sender: f.sender.value, types: [...f.querySelectorAll('input[name=type]:checked')].map((i) => i.value), words: f.words.value, role: f.role.value },
           actions: { addTags: f.addTags.value, leadStatus: f.leadStatus.value, saveMedia: f.saveMedia.checked, createTask: f.createTask.value, replyTemplate: f.replyTemplate.value, snoozeDays: f.snoozeDays.value },
         };
         await api(r.id ? `/api/rules/${r.id}` : '/api/rules', { method: r.id ? 'PATCH' : 'POST', body });
@@ -1355,6 +1389,7 @@
         h('div', { class: 'field' }, h('span', { style: 'display:block;font-weight:550;margin-bottom:4px' }, 'Sends (none ticked = anything)'),
           h('div', { class: 'daypick' }, ['text', 'document', 'image', 'video', 'voice', 'contact', 'location'].map((t) => h('label', {}, h('input', { type: 'checkbox', name: 'type', value: t, checked: (c.types || []).includes(t) }), t)))),
         h('label', { class: 'field' }, h('span', {}, 'Containing any of these words (optional, comma separated)'), h('input', { type: 'text', name: 'words', value: (c.words || []).join(', '), placeholder: 'booking, room, rate' })),
+        h('label', { class: 'field' }, h('span', {}, 'Only for candidates of this job role (optional)'), h('input', { type: 'text', name: 'role', value: c.role || '', placeholder: 'Chef, Front office, Housekeeping' }), h('em', {}, 'The person must be on a list of that role. Empty = anyone.')),
         h('h2', { style: 'margin-top:8px' }, 'Then'),
         h('label', { class: 'field' }, h('span', {}, 'Add tags'), h('input', { type: 'text', name: 'addTags', value: (a.addTags || []).join(', '), placeholder: 'candidate' })),
         h('label', { class: 'field' }, h('span', {}, 'Set status'), h('input', { type: 'text', name: 'leadStatus', value: a.leadStatus || '', placeholder: 'new' })),

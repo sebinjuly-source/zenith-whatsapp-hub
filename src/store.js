@@ -152,7 +152,7 @@ export async function upsertContacts(accountId, contacts) {
     rows,
     `ON CONFLICT (account_id, jid) DO UPDATE SET
        lid = COALESCE(EXCLUDED.lid, contacts.lid),
-       name = COALESCE(EXCLUDED.name, contacts.name),
+       name = COALESCE(contacts.saved_name, EXCLUDED.name, contacts.name), -- a name you saved is kept
        notify = COALESCE(EXCLUDED.notify, contacts.notify),
        verified_name = COALESCE(EXCLUDED.verified_name, contacts.verified_name),
        is_business = contacts.is_business OR EXCLUDED.is_business,
@@ -173,7 +173,7 @@ export async function upsertChats(accountId, chats) {
     ['account_id', 'jid', 'name', 'is_group', 'unread', 'archived', 'last_ts', 'participants'],
     rows,
     `ON CONFLICT (account_id, jid) DO UPDATE SET
-       name = COALESCE(EXCLUDED.name, chats.name),
+       name = COALESCE((SELECT c.saved_name FROM contacts c WHERE c.account_id = chats.account_id AND c.jid = chats.jid), EXCLUDED.name, chats.name),
        is_group = chats.is_group OR EXCLUDED.is_group,
        unread = EXCLUDED.unread,
        archived = EXCLUDED.archived,
@@ -456,7 +456,22 @@ export async function getContact(accountId, jid) {
   return rows[0] || null;
 }
 
-export async function updateContact(accountId, jid, { addTags, removeTags, leadStatus, notes, summary, markReviewed }) {
+/**
+ * Save a contact by number and name (e.g. a chef someone referred). Also makes an empty chat so it shows in the inbox
+ * and can be messaged right away. Returns { jid, name }.
+ */
+export async function saveContact(accountId, phoneOrJid, name) {
+  const jid = toJid(phoneOrJid);
+  if (!String(name || '').trim()) throw new Error('Give the contact a name');
+  await updateContact(accountId, jid, { name });
+  await query(
+    `INSERT INTO chats (account_id, jid, name, is_group, last_ts) VALUES ($1,$2,$3,false,$4) ON CONFLICT (account_id, jid) DO UPDATE SET name = EXCLUDED.name`,
+    [accountId, jid, String(name).trim().slice(0, 100), Math.floor(Date.now() / 1000)],
+  );
+  return { jid, name: String(name).trim() };
+}
+
+export async function updateContact(accountId, jid, { addTags, removeTags, leadStatus, notes, summary, markReviewed, name }) {
   await query(
     `INSERT INTO contacts (account_id, jid, phone) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
     [accountId, jid, phoneOf(jid)],
@@ -481,6 +496,12 @@ export async function updateContact(accountId, jid, { addTags, removeTags, leadS
     sets.push(`summary = $${p.length}`);
   }
   if (markReviewed) sets.push('reviewed_at = now()');
+  if (name !== undefined && String(name).trim()) {
+    // the name you saved wins over what WhatsApp reports; the chat list shows it too
+    p.push(String(name).trim().slice(0, 100));
+    sets.push(`name = $${p.length}, saved_name = $${p.length}`);
+    await query('UPDATE chats SET name = $3 WHERE account_id = $1 AND jid = $2', [accountId, jid, String(name).trim().slice(0, 100)]).catch(() => {});
+  }
   await query(`UPDATE contacts SET ${sets.join(', ')} WHERE account_id = $1 AND jid = $2`, p);
   return getContact(accountId, jid);
 }
