@@ -304,6 +304,11 @@ CREATE TABLE IF NOT EXISTS directory (
   UNIQUE (jid, category)
 );
 CREATE INDEX IF NOT EXISTS directory_category ON directory (category);
+-- Campaign (job role) on every message, so concurrent campaigns stay apart in the data too
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS role TEXT;
+CREATE INDEX IF NOT EXISTS outbox_role ON outbox (role);
+CREATE INDEX IF NOT EXISTS list_members_jid ON list_members (jid);
+UPDATE outbox o SET role = l.role FROM lists l WHERE o.list_id = l.id AND o.role IS NULL AND l.role IS NOT NULL;
 
 -- Sent as a reply to someone who wrote in the last 24 h: goes out at once and isn't counted in the automated cap
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_reply BOOLEAN NOT NULL DEFAULT FALSE;

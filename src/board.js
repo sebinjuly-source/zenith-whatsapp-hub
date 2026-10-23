@@ -237,6 +237,8 @@ export async function syncBoard() {
     if (!m?.followup_at) await closeRefTasks([t.ref], 'cancelled', 'follow-up date cleared');
   }
   const scheduled = await syncScheduled();
+  // campaign tags: messages added to a list after they were queued get the list's role
+  await query(`UPDATE outbox o SET role = l.role FROM lists l WHERE o.list_id = l.id AND o.role IS NULL AND l.role IS NOT NULL`).catch(() => {});
   const forgotten = await catchForgotten();
   // chat reminders
   const snoozed = await query(`SELECT account_id, jid, snoozed_until, snooze_note FROM chats WHERE state = 'snoozed' AND snoozed_until IS NOT NULL`);

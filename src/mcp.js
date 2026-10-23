@@ -173,11 +173,16 @@ function buildServer(playbook = '') {
     return lines.join('\n') || 'No accounts yet.';
   });
 
-  tool('hub_overview', 'START HERE. One screen, in priority order, across ALL numbers: what is due now on the Board (replies, follow-ups, call notes, interviews), drafts waiting, each number\'s sending state (and why it is held), Meta budget and spend today, lists per number, recent failures. Then use the specific tools.', {}, async () => {
+  tool('hub_overview', 'START HERE. One screen, in priority order, across ALL numbers: what is due now on the Board (replies, follow-ups, call notes, interviews), drafts waiting, each number\'s sending state (and why it is held), Meta budget and spend today, lists per number, recent failures. Give campaign (job role, e.g. "Front office") to focus on one campaign when you were asked to work on it — other campaigns are then left out. Then use the specific tools.', {
+    campaign: z.string().optional().describe('Campaign = job role, e.g. Chef, Front office, Housekeeping; "none" = chats on no list (hotel guests)'),
+  }, async (a) => {
     await manager.refresh();
     const out = [];
     const now = new Date();
-    const open = await tasks.listTasks({ limit: 500 });
+    const open = await tasks.listTasks({ limit: 500, role: a.campaign });
+    if (a.campaign) out.push(`FOCUS: campaign "${a.campaign}" only — other campaigns are hidden. Pass campaign="${a.campaign}" to list_tasks (role), list_chats, list_outbox and list_lists (role) too.`);
+    const campaigns = await query(`SELECT DISTINCT role FROM lists WHERE role IS NOT NULL AND archived IS NULL ORDER BY role`);
+    if (!a.campaign && campaigns.length > 1) out.push(`Campaigns running: ${campaigns.map((c) => c.role).join(', ')} — pass campaign=<role> to focus on one.`);
     const dueNow = open.filter((t) => !t.due_at || new Date(t.due_at) <= new Date(now.getTime() + 3600e3));
     const later = open.filter((t) => t.due_at && new Date(t.due_at) > new Date(now.getTime() + 3600e3));
     const byKind = (rows, k) => rows.filter((t) => t.kind === k).length;
@@ -191,13 +196,16 @@ function buildServer(playbook = '') {
     }
     const upcomingVisits = later.filter((t) => t.kind === 'visit').slice(0, 5);
     out.push(`2. COMING UP: ${later.length} dated cards${upcomingVisits.length ? '; interviews: ' + upcomingVisits.map((t) => trim(t.title.replace(/^Interview: /, ''), 50)).join('; ') : ''}`);
-    const [dr] = await query(`SELECT count(*)::int n, count(DISTINCT account_id)::int a FROM outbox WHERE status = 'draft'`);
+    const { roleOf, roleFilter } = await import('./campaign.js');
+    const [dr] = a.campaign
+      ? await query(`SELECT count(*)::int n FROM outbox o WHERE o.status = 'draft' AND ${roleFilter(`COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')})`, 1)}`, [a.campaign])
+      : await query(`SELECT count(*)::int n, count(DISTINCT account_id)::int a FROM outbox WHERE status = 'draft'`);
     out.push(`3. DRAFTS WAITING FOR OWNER APPROVAL: ${dr.n}${dr.n ? ' (list_outbox status=draft) — the owner approves; never approve unless told to' : ''}`);
     const rej = await query(`SELECT o.id, o.account_id, o.to_jid, o.error FROM outbox o WHERE o.status = 'rejected' AND o.source <> 'campaign' AND o.created_at > now() - interval '48 hours' ORDER BY o.id DESC LIMIT 8`);
     if (rej.length) out.push(`   Owner REJECTED recently (don't draft the same again; the reason is a note on their card): ${rej.map((r) => `#${r.id} ${r.to_jid.split('@')[0]} on ${r.account_id}${r.error?.startsWith('Rejected:') ? ' — ' + r.error.slice(10, 90) : ''}`).join('; ')}`);
     out.push('4. NUMBERS:');
     for (const a of manager.list()) out.push(`   - ${a.id} (${a.label}, ${a.provider === 'cloud' ? 'Meta API' : 'linked phone'}): ${a.status}${await sendingLine(a)}`);
-    const ls = await lists.listLists(null, null);
+    const ls = await lists.listLists(null, a.campaign && a.campaign !== 'none' ? a.campaign : null);
     const arch = (await query(`SELECT count(*)::int n FROM lists WHERE archived IS NOT NULL`))[0].n;
     out.push(`5. LISTS (all numbers${arch ? `; ${arch} archived hidden — list_lists(include_archived=true)` : ''}):`);
     for (const l of ls.slice(0, 15)) out.push(`   - #${l.id} ${l.name} on ${l.account_id}: ${l.total} people, ${l.new} new, ${l.queued} queued, ${l.replied} replied, ${l.failed} failed`);
@@ -216,6 +224,7 @@ function buildServer(playbook = '') {
       kind: z.enum(['direct', 'group', 'all']).optional(),
       tag: z.string().optional(),
       waiting_on_me: z.boolean().optional().describe('Only chats where the other side spoke last'),
+      campaign: z.string().optional().describe('Campaign = job role, e.g. Chef, Front office, Housekeeping; "none" = chats on no list (hotel guests)'),
       state: z.enum(['open', 'snoozed', 'due', 'done']).optional().describe('open (incl. due reminders), snoozed (reminder pending), due (reminder date reached), done'),
       active_since: z.string().optional().describe('Last message on/after this date (YYYY-MM-DD)'),
       inactive_since: z.string().optional().describe('Last message before this date (YYYY-MM-DD) — good for finding stale leads'),
@@ -225,7 +234,7 @@ function buildServer(playbook = '') {
     async (a) => {
       const s = await manager.resolve(a.account);
       const rows = await store.listChats(s.id, {
-        q: a.query, kind: a.kind === 'all' ? undefined : a.kind, tag: a.tag, waitingOnMe: a.waiting_on_me, state: a.state,
+        q: a.query, kind: a.kind === 'all' ? undefined : a.kind, tag: a.tag, waitingOnMe: a.waiting_on_me, state: a.state, role: a.campaign,
         sinceTs: toTs(a.active_since), beforeTs: toTs(a.inactive_since), limit: a.limit || 20, offset: a.offset || 0,
       });
       return rows.length ? rows.map(chatLine).join('\n') : 'No chats match.';
@@ -494,8 +503,9 @@ function buildServer(playbook = '') {
     account: z.string().optional(),
     status: z.string().optional().describe('Comma list: draft,queued,sent,failed,rejected (default draft,queued,failed)'),
     limit: z.number().int().min(1).max(100).optional(),
+    campaign: z.string().optional().describe('Campaign = job role, e.g. Chef, Front office, Housekeeping; "none" = chats on no list (hotel guests)'),
   }, async (a) => {
-    const rows = await outbox.listOutbox({ account: a.account, status: a.status || 'draft,queued,failed', limit: a.limit || 20 });
+    const rows = await outbox.listOutbox({ account: a.account, status: a.status || 'draft,queued,failed', limit: a.limit || 20, role: a.campaign });
     const p = await priceRows(rows, manager);
     return rows.length
       ? rows.map((r, i) => `#${r.id} | ${r.account_id} | ${r.status} | ${money(p.items[i].price, p.currency)} | ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${trim(r.payload.text || r.payload.attachment?.caption || '[file]', 100)}${r.error ? ` | error: ${r.error}${helpFor(r.error)}` : ''}`).join('\n')

@@ -4,6 +4,7 @@
  * from the state of those messages; plain to-do tasks are moved by you or the AI.
  */
 import { query } from './db.js';
+import { roleOf, roleFilter } from './campaign.js';
 import { toJid } from './store.js';
 
 export const COLUMNS = ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'];
@@ -184,7 +185,7 @@ export async function listTasks({ account, past = false, limit = 200, role, assi
   }
   if (role) {
     p.push(role);
-    where.push(`lower(t.role) = lower($${p.length})`);
+    where.push(roleFilter(`COALESCE(t.role, CASE WHEN t.ref LIKE 'reply:%' OR t.ref LIKE 'remind:%' THEN ${roleOf('t.account_id', "split_part(t.ref, ':', 3)")} END)`, p.length));
   }
   if (account) {
     p.push(account);

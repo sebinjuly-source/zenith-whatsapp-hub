@@ -5,6 +5,7 @@
  */
 import { jidNormalizedUser, isLidUser, isJidGroup } from '@whiskeysockets/baileys';
 import { query, insertMany } from './db.js';
+import { roleOf, roleFilter } from './campaign.js';
 
 export const phoneOf = (jid) => (jid && jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0] : null);
 
@@ -332,9 +333,13 @@ export async function hasChattedWith(accountId, jid) {
 // ---------------------------------------------------------------------------
 const DISPLAY = `COALESCE(NULLIF(ch.name, ''), ct.name, ct.notify, ct.verified_name, ct.phone, ch.jid)`;
 
-export async function listChats(accountId, { q, kind, tag, limit = 30, offset = 0, waitingOnMe, sinceTs, beforeTs, state } = {}) {
+export async function listChats(accountId, { q, kind, tag, limit = 30, offset = 0, waitingOnMe, sinceTs, beforeTs, state, role } = {}) {
   const where = ['ch.account_id = $1'];
   const p = [accountId];
+  if (role) {
+    p.push(role);
+    where.push(roleFilter(roleOf('ch.account_id', 'ch.jid'), p.length));
+  }
   // open = open, plus reminders whose date has come; snoozed = waiting for a date; due = reminder date reached
   if (state === 'open') where.push("(ch.state = 'open' OR (ch.state = 'snoozed' AND ch.snoozed_until <= now()))");
   if (state === 'snoozed') where.push("ch.state = 'snoozed' AND ch.snoozed_until > now()");
@@ -364,7 +369,8 @@ export async function listChats(accountId, { q, kind, tag, limit = 30, offset = 
     `SELECT ch.jid, ${DISPLAY} AS name, ch.is_group, ch.unread, ch.last_ts, ch.last_preview, ch.last_from_me,
             ch.participants, ct.phone, ct.tags, ct.lead_status, ct.summary, ct.is_blocked, ct.is_business,
             ch.state, ch.snoozed_until, ch.snooze_note,
-            (ch.state = 'snoozed' AND ch.snoozed_until <= now()) AS due
+            (ch.state = 'snoozed' AND ch.snoozed_until <= now()) AS due,
+            ${roleOf('ch.account_id', 'ch.jid')} AS campaign
      FROM chats ch LEFT JOIN contacts ct ON ct.account_id = ch.account_id AND ct.jid = ch.jid
      WHERE ${where.join(' AND ')}
      ORDER BY (ch.state = 'snoozed' AND ch.snoozed_until <= now()) DESC, ch.last_ts DESC NULLS LAST

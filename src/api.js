@@ -234,9 +234,9 @@ export function buildApp() {
 
   // ---- Chats, messages, contacts
   api.get('/accounts/:id/chats', wrap(async (req, res) => {
-    const { q, kind, tag, limit, offset, waiting, state } = req.query;
+    const { q, kind, tag, limit, offset, waiting, state, role } = req.query;
     res.json(await store.listChats(req.params.id, {
-      q, kind, tag, state, limit: parseInt(limit, 10) || 50, offset: parseInt(offset, 10) || 0, waitingOnMe: waiting === '1',
+      q, kind, tag, state, role, limit: parseInt(limit, 10) || 50, offset: parseInt(offset, 10) || 0, waitingOnMe: waiting === '1',
     }));
   }));
   api.get('/accounts/:id/chats/:jid/messages', wrap(async (req, res) => {
@@ -380,7 +380,18 @@ export function buildApp() {
     res.json(u);
   }));
   api.get('/pipeline', wrap(async (req, res) => res.json(await lists.pipelineSummary(req.query.account, req.query.role))));
-  api.get('/roles', wrap(async (req, res) => res.json((await query(`SELECT DISTINCT role FROM lists WHERE role IS NOT NULL ORDER BY role`)).map((r) => r.role))));
+  api.get('/roles', wrap(async (req, res) => res.json((await query(`SELECT DISTINCT role FROM lists WHERE role IS NOT NULL AND archived IS NULL ORDER BY role`)).map((r) => r.role))));
+  // Campaigns (job roles) with what is open in each: drafts, open cards, lists — for the campaign picker
+  api.get('/campaigns', wrap(async (req, res) => {
+    const { roleOf } = await import('./campaign.js');
+    res.json(await query(
+      `SELECT r.role,
+         (SELECT count(*)::int FROM lists l WHERE l.role = r.role AND l.archived IS NULL) AS lists,
+         (SELECT count(*)::int FROM outbox o WHERE o.status = 'draft' AND COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')}) = r.role) AS drafts,
+         (SELECT count(*)::int FROM tasks t WHERE t.status NOT IN ('done','cancelled') AND t.role = r.role) AS cards
+       FROM (SELECT DISTINCT role FROM lists WHERE role IS NOT NULL AND archived IS NULL) r ORDER BY r.role`,
+    ));
+  }));
   // Everyone already contacted for a role (all batches) — to de-duplicate a new batch before unlocking
   api.get('/known', wrap(async (req, res) => res.json(await lists.knownPeople(req.query.role, req.query.account))));
   api.get('/alerts', wrap(async (req, res) => res.json({ phones: await notify.alertPhones() })));
@@ -445,7 +456,7 @@ export function buildApp() {
 
   api.get('/outbox', wrap(async (req, res) => {
     const rows = await outbox.listOutbox({
-      account: req.query.account, status: req.query.status, taskId: req.query.task, limit: parseInt(req.query.limit, 10) || 50,
+      account: req.query.account, status: req.query.status, taskId: req.query.task, limit: parseInt(req.query.limit, 10) || 50, role: req.query.role,
     });
     // Each message's price (Meta numbers; linked phones are free), shown on the draft cards and summed in approvals
     const p = await priceRows(rows, manager);
@@ -659,7 +670,11 @@ export function buildApp() {
     if (!ref && req.query.save === '1') ref = await session.saveMedia(jid, msgId);
     const { buffer, mimetype } = ref ? await getMedia(ref) : { buffer: await session.downloadMedia(row), mimetype: row.media.mimetype };
     res.setHeader('Content-Type', mimetype || 'application/octet-stream');
-    if (row.media.fileName) res.setHeader('Content-Disposition', `inline; filename="${row.media.fileName.replace(/"/g, '')}"`);
+    // ?download=1 saves the file on the device (phones ignore 'open in new tab' for many types)
+    const ext = (mimetype || '').split('/')[1]?.split(';')[0]?.replace('jpeg', 'jpg').replace('quicktime', 'mov') || 'bin';
+    const fname = (row.media.fileName || `${jid.split('@')[0]}-${new Date(Number(row.ts) * 1000).toISOString().slice(0, 10)}-${msgId.slice(-6)}.${ext}`).replace(/["\\]/g, '');
+    res.setHeader('Content-Disposition', `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${fname}"`);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
     res.send(buffer);
   }));
 

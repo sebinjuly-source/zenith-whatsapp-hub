@@ -6,6 +6,7 @@
  */
 import { EventEmitter } from 'events';
 import { query, logEvent } from './db.js';
+import { roleOf, roleFilter } from './campaign.js';
 import config from './config.js';
 import logger from './logger.js';
 import { manager } from './wa/manager.js';
@@ -81,6 +82,8 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
     const [dup] = await query('SELECT * FROM outbox WHERE account_id = $1 AND idem_key = $2', [session.id, String(idemKey)]);
     return { ...dup, duplicate: true };
   }
+  // the campaign this message belongs to (from the person's list) — stored, so the data stays demarcated
+  await query(`UPDATE outbox SET role = ${roleOf('$2', '$3')} WHERE id = $1 AND role IS NULL`, [row.id, session.id, jid]).catch(() => {});
   if (taskId) await refreshTask(taskId);
   if (status === 'queued') wake(session.id);
   // A single message for later shows on the Board until it goes out
@@ -332,9 +335,13 @@ export async function reject(id, { reason = '', actor = 'you' } = {}) {
   return row;
 }
 
-export async function listOutbox({ account, status, taskId, limit = 50 } = {}) {
+export async function listOutbox({ account, status, taskId, limit = 50, role } = {}) {
   const p = [];
   const where = [];
+  if (role) {
+    p.push(role);
+    where.push(roleFilter(`COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')})`, p.length));
+  }
   if (account) {
     p.push(account);
     where.push(`o.account_id = $${p.length}`);
@@ -349,7 +356,8 @@ export async function listOutbox({ account, status, taskId, limit = 50 } = {}) {
   }
   p.push(Math.min(limit, 500));
   return query(
-    `SELECT o.*, COALESCE(NULLIF(ct.name, ''), NULLIF(lm.name, ''), ct.notify, ch.name) AS to_name, t.title AS task_title
+    `SELECT o.*, COALESCE(NULLIF(ct.name, ''), NULLIF(lm.name, ''), ct.notify, ch.name) AS to_name, t.title AS task_title,
+       COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')}) AS campaign
      FROM outbox o
      LEFT JOIN list_members lm ON lm.list_id = o.list_id AND lm.jid = o.to_jid
      LEFT JOIN contacts ct ON ct.account_id = o.account_id AND ct.jid = o.to_jid

@@ -646,7 +646,7 @@ export class Session extends EventEmitter {
     await runRules(this.id, r, { isGroup, isNew: !mine }, {
       updateContact: (u) => store.updateContact(this.id, isGroup ? r.senderJid : r.chatJid, u),
       saveMedia: () => this.saveMedia(r.chatJid, r.id),
-      createTask: (title) => createTask({ account: this.id, title: fill(title), details: `From ${fields.name || ''} +${r.chatJid.split('@')[0]}: ${(r.body || '[' + r.type + ']').slice(0, 200)}`, createdBy: 'rule', assignee: 'you', priority: true }),
+      createTask: async (title) => createTask({ role: (await query("SELECT l.role FROM list_members m JOIN lists l ON l.id = m.list_id WHERE m.jid = $1 ORDER BY (l.account_id = $2) DESC, l.id DESC LIMIT 1", [r.chatJid, this.id]))[0]?.role || null, account: this.id, title: fill(title), details: `From ${fields.name || ''} +${r.chatJid.split('@')[0]}: ${(r.body || '[' + r.type + ']').slice(0, 200)}`, createdBy: 'rule', assignee: 'you', priority: true }),
       sendTemplate: async (tpl, note) => {
         const { payload } = await outbox.renderTemplate(this.id, r.chatJid, tpl);
         // One auto-reply per person per rule per day, even when they send several messages at once (the key makes

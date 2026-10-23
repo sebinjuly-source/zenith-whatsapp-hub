@@ -7,14 +7,14 @@
   try {
     const saved = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}');
     Object.assign(state.inbox, saved.inbox || {});
-    for (const k of ['board', 'outboxTab', 'outboxAccount', 'listId', 'listRole', 'settingsFor']) if (saved[k] !== undefined) state[k] = saved[k];
+    for (const k of ['board', 'outboxTab', 'outboxAccount', 'listId', 'listRole', 'settingsFor', 'campaign']) if (saved[k] !== undefined) state[k] = saved[k];
   } catch {}
   function persist() {
     try {
       const ib = state.inbox;
       localStorage.setItem(SAVE_KEY, JSON.stringify({
         inbox: { account: ib.account, kind: ib.kind, state: ib.state, waiting: ib.waiting },
-        board: state.board, outboxTab: state.outboxTab, outboxAccount: state.outboxAccount, listId: state.listId, listRole: state.listRole, settingsFor: state.settingsFor,
+        board: state.board, outboxTab: state.outboxTab, outboxAccount: state.outboxAccount, listId: state.listId, listRole: state.listRole, settingsFor: state.settingsFor, campaign: state.campaign,
       }));
     } catch {}
   }
@@ -163,6 +163,23 @@
     ['connect', '🔌', 'Connect AI & apps'],
     ['activity', '🕘', 'Activity'],
   ];
+  // Campaign focus (job role): one picker for Board, Inbox, Drafts and Lists, so concurrent campaigns don't mix
+  const campaignLabel = (r) => (r === 'none' ? 'Hotel / no campaign' : r === 'Front office' ? 'Reception (Front office)' : r);
+  function campaignPicker() {
+    const sel = h('select', { class: 'campaign-pick', 'aria-label': 'Campaign', title: 'Focus on one campaign — Board, Inbox, Drafts and Lists show only it',
+      onchange: (e) => { state.campaign = e.target.value || ''; state.listRole = state.campaign && state.campaign !== 'none' ? state.campaign : ''; state.listId = null; route(); } },
+      h('option', { value: '' }, '🎯 All campaigns'));
+    const fillOpts = (list) => {
+      sel.append(...list.map((c) => h('option', { value: c.role, selected: state.campaign === c.role }, `🎯 ${campaignLabel(c.role)}${c.drafts || c.cards ? ` (${c.cards} cards, ${c.drafts} drafts)` : ''}`)),
+        h('option', { value: 'none', selected: state.campaign === 'none' }, '🏨 Hotel / no campaign'));
+      if (state.campaign && ![...sel.options].some((o) => o.value === state.campaign)) state.campaign = '';
+      sel.value = state.campaign || '';
+    };
+    if (state.campaigns && Date.now() - state.campaignsAt < 60000) fillOpts(state.campaigns);
+    else api('/api/campaigns').then((c) => { state.campaigns = c; state.campaignsAt = Date.now(); fillOpts(c); }).catch(() => fillOpts([]));
+    return sel;
+  }
+
   function shell(content, { flush = false } = {}) {
     persist();
     const tab = (r, ico, label, extra) =>
@@ -182,14 +199,16 @@
         h('a', { href: '#', onclick: guard(async (e) => { e.preventDefault(); close(); await api('/logout', { method: 'POST' }); renderLogin(); }) }, h('span', { class: 'ico' }, '↩️'), 'Log out'),
         h('div', { class: 'muted', style: 'font-size:12px;padding:6px 12px' }, 'Zenith WhatsApp Hub')));
     const scrim = h('div', { class: 'scrim', onclick: close, 'aria-hidden': 'true' });
-    const app = h('div', { class: 'app' },
+    const app = h('div', { class: 'app' + (state.campaign ? ' focused' : '') },
       h('header', { class: 'topbar' },
         menuBtn,
         h('div', { class: 'brand', title: 'Zenith WhatsApp Hub' }, 'WhatsApp Hub'),
         h('nav', { class: 'tabs', 'aria-label': 'Main' },
           tab('board', '🗂️', 'Board'),
           tab('inbox', '💬', 'Inbox'),
-          tab('outbox', '✉️', 'Drafts', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null))),
+          tab('outbox', '✉️', 'Drafts', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null)),
+        h('div', { class: 'spacer' }),
+        campaignPicker()),
       h('main', { class: flush ? 'flush' : '' }, content),
       scrim, drawer);
     document.onkeydown = (e) => { if (e.key === 'Escape' && app.classList.contains('drawer-open')) { close(); menuBtn.focus(); } };
@@ -610,6 +629,7 @@
       if (ib.kind !== 'all') p.set('kind', ib.kind);
       if (ib.waiting) p.set('waiting', '1');
       if (ib.state) p.set('state', ib.state);
+      if (state.campaign) p.set('role', state.campaign);
       const chats = await api(`/api/accounts/${ib.account}/chats?${p}`);
       list.replaceChildren(
         ...(chats.length
@@ -617,6 +637,7 @@
               h('div', { class: 'chatitem' + (c.jid === ib.chat ? ' on' : ''), role: 'listitem', tabindex: 0, onclick: () => openChat(c), onkeydown: (e) => e.key === 'Enter' && openChat(c) },
                 h('div', { class: 'top' }, h('span', { class: 'name' }, c.is_group ? '👥 ' : '', c.name || c.jid), h('span', { class: 'time' }, fmtShort(c.last_ts))),
                 h('div', { class: 'prev' }, c.last_from_me ? 'You: ' : '', c.last_preview || ''),
+                !state.campaign && c.campaign ? h('div', {}, h('span', { class: 'tag campaign-tag' }, '🎯 ', campaignLabel(c.campaign))) : null,
                 c.due ? h('div', {}, h('span', { class: 'tag', style: 'background:var(--warn-soft);color:var(--ink)' }, '⏰ Reminder due', c.snooze_note ? ': ' + c.snooze_note : '')) : null,
                 c.state === 'snoozed' && !c.due ? h('div', {}, h('span', { class: 'tag' }, '⏰ ' + new Date(c.snoozed_until).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }), c.snooze_note ? ' · ' + c.snooze_note : '')) : null,
                 c.tags?.length || c.is_blocked ? h('div', {}, c.is_blocked ? h('span', { class: 'tag' }, 'blocked') : null, (c.tags || []).map((t) => h('span', { class: 'tag' }, t))) : null,
@@ -831,8 +852,14 @@
             nodes.push(h('div', { class: 'daysep' }, new Date(m.ts * 1000).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })));
             lastDay = day;
           }
+          const mediaUrl = `/api/media/${ib.account}/${encodeURIComponent(c.jid)}/${m.id}`;
           const mediaLink = m.has_media
-            ? h('div', {}, h('a', { href: `/api/media/${ib.account}/${encodeURIComponent(c.jid)}/${m.id}`, target: '_blank', rel: 'noopener' }, `Open ${m.type}${m.file_name ? ': ' + m.file_name : ''}`),
+            ? h('div', {},
+                // photos show right in the chat (loaded when scrolled into view)
+                ['image', 'sticker'].includes(m.type) ? h('a', { href: mediaUrl, target: '_blank', rel: 'noopener', title: 'Open full size' },
+                  h('img', { src: mediaUrl, alt: 'Photo', loading: 'lazy', style: 'display:block;max-width:240px;max-height:240px;border-radius:8px;margin:4px 0;object-fit:cover;background:var(--panel-2)' })) : null,
+                h('a', { href: mediaUrl, target: '_blank', rel: 'noopener' }, `Open ${m.type}${m.file_name ? ': ' + m.file_name : ''}`),
+                h('a', { href: `${mediaUrl}?download=1`, download: m.file_name || '', style: 'margin-left:10px', title: 'Save to this device' }, '⬇ Download'),
                 m.media_saved ? h('span', { class: 'muted' }, ' · saved') : h('a', { href: '#', style: 'margin-left:8px', onclick: guard(async (e) => {
                   e.preventDefault();
                   await api(`/api/media/${ib.account}/${encodeURIComponent(c.jid)}/${m.id}?save=1`);
@@ -886,7 +913,7 @@
     const toggle = (id, on) => { if (on ?? !picked.has(id)) picked.add(id); else picked.delete(id); };
     if (b.account && !accs.find((a) => a.id === b.account)) b.account = '';
     const formAccount = b.account || (accs.find((a) => a.isDefault) || accs[0]).id;
-    const q = (extra) => `/api/tasks?${new URLSearchParams({ ...(b.account ? { account: b.account } : {}), ...(b.role ? { role: b.role } : {}), ...extra })}`;
+    const q = (extra) => `/api/tasks?${new URLSearchParams({ ...(b.account ? { account: b.account } : {}), ...(state.campaign ? { role: state.campaign } : {}), ...extra })}`;
     const [active, past, roles, tplList] = await Promise.all([
       api(q({})),
       b.past ? api(q({ past: '1' })) : Promise.resolve([]),
@@ -1064,7 +1091,7 @@
     const filters = h('div', { class: 'row filters' },
       sel('Number', b.account, [['', '📱 All numbers'], ...accs.map((a) => [a.id, a.label])], (v) => { b.account = v; viewBoard(); }),
       sel('Who does it', b.who, [['', '👥 Everyone'], ['you', '👤 Mine'], ['ai', '🤖 AI']], (v) => { b.who = v; viewBoard(); }),
-      roles.length ? sel('Job role', b.role, [['', '🧑‍🍳 All roles'], ...roles.map((r) => [r, r])], (v) => { b.role = v; viewBoard(); }) : null,
+      state.campaign ? h('span', { class: 'tag campaign-tag' }, '🎯 ', campaignLabel(state.campaign)) : null,
       h('button', { class: 'btn small', onclick: () => { b.past = !b.past; viewBoard(); } }, b.past ? 'Hide done' : '✓ Show done'));
 
     const newTask = h('form', { onsubmit: guard(async (e) => {
@@ -1191,6 +1218,7 @@
   const STATUS_LABEL = { new: 'Not messaged', queued: 'Queued', sent: 'Sent · no reply', replied: 'Replied', failed: 'Failed', opted_out: 'Opted out' };
   async function viewLists() {
     await loadAccounts();
+    if (state.campaign && state.campaign !== 'none') state.listRole = state.campaign;
     const all = await api(`/api/lists${state.listRole ? '?role=' + encodeURIComponent(state.listRole) : ''}`);
     const rolePick = await roleChips(state.listRole, (r) => { state.listRole = r; state.listId = null; viewLists(); });
     const sel = (state.listId && all.find((l) => l.id === state.listId)) || all[0];
@@ -1506,7 +1534,7 @@
     if (!state.accounts.length) await loadAccounts();
     const help = await metaHelpTable();
     const acc = state.outboxAccount || '';
-    const rows = await api(`/api/outbox?limit=200${tab === 'all' ? '' : `&status=${tab}`}${state.outboxTask ? `&task=${state.outboxTask}` : ''}${acc ? `&account=${encodeURIComponent(acc)}` : ''}`);
+    const rows = await api(`/api/outbox?limit=200${tab === 'all' ? '' : `&status=${tab}`}${state.outboxTask ? `&task=${state.outboxTask}` : ''}${acc ? `&account=${encodeURIComponent(acc)}` : ''}${state.campaign ? `&role=${encodeURIComponent(state.campaign)}` : ''}`);
     const labelOf = (id) => state.accounts.find((a) => a.id === id)?.label || id;
     const numberPick = h('div', { class: 'seg', style: 'max-width:640px;margin-bottom:10px' },
       [['', 'All numbers'], ...state.accounts.map((a) => [a.id, `${a.label}${a.phone ? ' · +' + a.phone : ''}`])].map(([k, l]) =>

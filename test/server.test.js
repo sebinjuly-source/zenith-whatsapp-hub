@@ -1410,6 +1410,46 @@ test('contact book: people filed by group and found when the need comes up; a sh
   assert.equal((await call('GET', '/api/directory?q=referred%20roshan')).data.length >= 1, true);
 });
 
+test('campaigns stay apart: every message stores its campaign; chats, drafts, cards and the overview filter by it; media can be downloaded', async () => {
+  const store = await import('../src/store.js');
+  await manager.create({ id: 'cmp1', label: 'Cmp1' });
+  fake('cmp1');
+  await call('PATCH', '/api/accounts/cmp1', { settings: { aiMode: 'approve' } });
+  await mcp('import_list', { account: 'cmp1', name: 'Reception – Batch 1', role: 'Front office', members: [{ phone: '9600000001', name: 'Priya' }] });
+  await mcp('import_list', { account: 'cmp1', name: 'Chef – Batch C', role: 'Chef', members: [{ phone: '9600000002', name: 'Ramesh' }] });
+  const now = Math.floor(Date.now() / 1000);
+  await store.insertMessages('cmp1', [
+    { id: 'CM1', fromMe: false, ts: now - 30, chatJid: '919600000001@s.whatsapp.net', type: 'image', body: null, forwarded: false, media: { kind: 'imageMessage', mimetype: 'image/jpeg' } },
+    { id: 'CM2', fromMe: false, ts: now - 20, chatJid: '919600000002@s.whatsapp.net', type: 'text', body: 'Haan', forwarded: false },
+    { id: 'CM3', fromMe: false, ts: now - 10, chatJid: '919677700003@s.whatsapp.net', type: 'text', body: 'Room available?', forwarded: false },
+  ]);
+  await store.upsertChats('cmp1', [{ jid: '919600000001@s.whatsapp.net' }, { jid: '919600000002@s.whatsapp.net' }, { jid: '919677700003@s.whatsapp.net' }]);
+  // drafts carry their campaign in the database
+  const d1 = await mcp('send_message', { account: 'cmp1', to: '919600000001', text: 'Kab aa sakte hain?' });
+  const d2 = await mcp('send_message', { account: 'cmp1', to: '919600000002', text: 'Cooking test kab?' });
+  const id1 = Number(d1.match(/#(\d+)/)[1]);
+  const id2 = Number(d2.match(/#(\d+)/)[1]);
+  assert.equal((await query('SELECT role FROM outbox WHERE id = $1', [id1]))[0].role, 'Front office');
+  assert.equal((await query('SELECT role FROM outbox WHERE id = $1', [id2]))[0].role, 'Chef');
+  // each view filters by campaign
+  const fo = (await call('GET', '/api/outbox?account=cmp1&status=draft&role=Front%20office')).data;
+  assert.deepEqual(fo.map((r) => r.id), [id1]);
+  const chats = (await call('GET', '/api/accounts/cmp1/chats?role=Chef')).data;
+  assert.deepEqual(chats.map((c) => c.jid), ['919600000002@s.whatsapp.net']);
+  const guests = (await call('GET', '/api/accounts/cmp1/chats?role=none')).data;
+  assert.deepEqual(guests.map((c) => c.jid), ['919677700003@s.whatsapp.net']);
+  assert.match(await mcp('list_chats', { account: 'cmp1', campaign: 'Front office' }), /919600000001/);
+  assert.doesNotMatch(await mcp('list_outbox', { account: 'cmp1', status: 'draft', campaign: 'Chef' }), /Kab aa sakte/);
+  assert.match(await mcp('hub_overview', { campaign: 'Front office' }), /FOCUS: campaign "Front office" only/);
+  const camps = (await call('GET', '/api/campaigns')).data;
+  assert.ok(camps.find((c) => c.role === 'Front office' && c.drafts >= 1));
+  // media download names the file and asks the browser to save it
+  manager.get('cmp1').downloadMedia = async () => Buffer.from('JPEG');
+  const res = await fetch(`${base}/api/media/cmp1/919600000001@s.whatsapp.net/CM1?download=1`, { headers: { 'x-api-key': 'k' } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-disposition'), /^attachment; filename="919600000001-\d{4}-\d{2}-\d{2}-CM1\.jpg"/);
+});
+
 test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {
   const s = manager.get('hiring');
   const t0 = Date.now() - 600000;
