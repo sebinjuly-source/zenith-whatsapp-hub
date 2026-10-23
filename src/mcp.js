@@ -945,9 +945,10 @@ function buildServer(playbook = '') {
   tool('create_task', 'Add a card to the Board. for="you" (default) = something the owner must do (call notes needed, take an interview, call someone) — set priority=true for must-dos. for="ai" = something an AI session must do at that time (e.g. "Send Ravi the menu on Friday"). Put who/what/which chat in details so a later session can act on it. For a candidate follow-up prefer update_list_member(available_from / follow_up_at), which keeps the card in step by itself.', {
     account: accountArg, title: z.string(), details: z.string().optional(), due: z.string().optional().describe('"YYYY-MM-DD HH:MM" (India time) or ISO'),
     for: z.enum(['you', 'ai']).optional(), priority: z.boolean().optional(),
+    campaign: z.string().optional().describe('Campaign (job role) the card belongs to, e.g. Chef, Front office. Found automatically when the card names a phone number on a list.'),
   }, async (a) => {
     const s = await manager.resolve(a.account);
-    const t = await tasks.createTask({ account: s.id, title: a.title, details: a.details, dueAt: localTime(a.due) || null, createdBy: 'ai', assignee: a.for, priority: a.priority });
+    const t = await tasks.createTask({ account: s.id, title: a.title, details: a.details, dueAt: localTime(a.due) || null, createdBy: 'ai', assignee: a.for, priority: a.priority, role: a.campaign || null });
     await ai(s.id, `Created task #${t.id} "${t.title}"`);
     return `Task #${t.id} created on ${s.id} (for ${t.assignee === 'ai' ? 'AI' : 'owner'}${t.priority ? ', priority' : ''}${t.due_at ? `, due ${d(t.due_at)}` : ''}).`;
   });
@@ -956,7 +957,9 @@ function buildServer(playbook = '') {
     id: z.number().int(), status: z.enum(['upcoming', 'in_progress', 'waiting', 'done', 'cancelled']).optional(),
     title: z.string().optional(), details: z.string().optional(), due: z.string().optional(),
     for: z.enum(['you', 'ai']).optional(), priority: z.boolean().optional(),
+    campaign: z.string().optional().describe('Set the card\'s campaign (job role); "" clears it'),
   }, async (a) => {
+    if (a.campaign !== undefined) await tasks.updateTask(a.id, { role: a.campaign, actor: 'ai' });
     const t = a.status === 'cancelled' ? await tasks.cancelTask(a.id, 'ai') : await tasks.updateTask(a.id, { status: a.status, title: a.title, details: a.details, dueAt: localTime(a.due), assignee: a.for, priority: a.priority, actor: 'ai' });
     return `Task #${t.id}: ${t.status} — ${t.title}`;
   });

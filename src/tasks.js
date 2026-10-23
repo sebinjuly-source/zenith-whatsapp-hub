@@ -91,8 +91,23 @@ const who = (a) => {
   return v;
 };
 
+/**
+ * The campaign of a card that names a person: the role of the latest list with any phone number in the text
+ * (so "Call Jagdish 9217687968" lands in the Chef campaign without anyone choosing it).
+ */
+export async function guessRole(accountId, text) {
+  const phones = [...new Set(String(text || '').match(/(?:\+?91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}/g) || [])]
+    .map((p) => p.replace(/\D/g, '')).map((d) => (d.length === 10 ? '91' + d : d)).filter((d) => d.length === 12);
+  for (const d of phones) {
+    const [r] = await query(`SELECT ${roleOf('$1', '$2')} AS role`, [accountId, `${d}@s.whatsapp.net`]);
+    if (r?.role) return r.role;
+  }
+  return null;
+}
+
 export async function createTask({ account, title, details, kind = 'todo', dueAt, createdBy = 'you', idemKey = null, role = null, assignee, priority = false }) {
   if (!title?.trim()) throw new Error('A task needs a title');
+  if (!role) role = await guessRole(account, `${title} ${details || ''}`).catch(() => null);
   const [row] = await query(
     `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, idem_key, role, assignee, priority)
      VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8,$9,$10) RETURNING *`,
@@ -141,7 +156,8 @@ export async function closeRefTasks(refs, status = 'done', reason = '') {
   return rows.length;
 }
 
-export async function updateTask(id, { title, details, status, dueAt, assignee, priority, actor = 'you' }) {
+export async function updateTask(id, { title, details, status, dueAt, assignee, priority, actor = 'you', role }) {
+  if (role !== undefined) await query('UPDATE tasks SET role = $2 WHERE id = $1', [id, role || null]);
   if (status && !COLUMNS.includes(status)) throw new Error(`Status must be one of ${COLUMNS.join(', ')}`);
   const [before] = await query('SELECT status, due_at, priority, assignee FROM tasks WHERE id = $1', [id]);
   const [row] = await query(

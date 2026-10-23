@@ -1448,6 +1448,11 @@ test('campaigns stay apart: every message stores its campaign; chats, drafts, ca
   const res = await fetch(`${base}/api/media/cmp1/919600000001@s.whatsapp.net/CM1?download=1`, { headers: { 'x-api-key': 'k' } });
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-disposition'), /^attachment; filename="919600000001-\d{4}-\d{2}-\d{2}-CM1\.jpg"/);
+  // a card that names a person on a list joins that campaign by itself
+  const card = await mcp('create_task', { account: 'cmp1', title: 'Interview: Ramesh 9600000002 tomorrow', for: 'you' });
+  const cid = Number(card.match(/#(\d+)/)[1]);
+  assert.equal((await query('SELECT role FROM tasks WHERE id = $1', [cid]))[0].role, 'Chef');
+  assert.ok((await call('GET', '/api/tasks?role=Chef')).data.some((t) => t.id === cid));
 });
 
 test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {

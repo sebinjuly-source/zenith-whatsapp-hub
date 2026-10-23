@@ -237,6 +237,13 @@ export async function syncBoard() {
     if (!m?.followup_at) await closeRefTasks([t.ref], 'cancelled', 'follow-up date cleared');
   }
   const scheduled = await syncScheduled();
+  // campaign tags: cards that name a person on a list get that list's role (so a campaign focus never hides them)
+  const untagged = await query(`SELECT id, account_id, title, details FROM tasks WHERE role IS NULL AND (status NOT IN ('done','cancelled') OR completed_at > now() - interval '7 days') LIMIT 300`);
+  const { guessRole } = await import('./tasks.js');
+  for (const t of untagged) {
+    const role = await guessRole(t.account_id, `${t.title} ${t.details || ''}`).catch(() => null);
+    if (role) await query('UPDATE tasks SET role = $2 WHERE id = $1 AND role IS NULL', [t.id, role]);
+  }
   // campaign tags: messages added to a list after they were queued get the list's role
   await query(`UPDATE outbox o SET role = l.role FROM lists l WHERE o.list_id = l.id AND o.role IS NULL AND l.role IS NOT NULL`).catch(() => {});
   const forgotten = await catchForgotten();
