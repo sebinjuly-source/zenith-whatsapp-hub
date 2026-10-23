@@ -464,7 +464,11 @@ export async function runPipeline() {
       // 1. interested but no date yet → ask for one
       const ask = await query(
         `SELECT m.* FROM list_members m WHERE m.list_id = $1 AND m.stage = 'interested' AND m.visit_at IS NULL AND m.asked_date_at IS NULL AND (m.followup_at IS NULL OR m.followup_at <= now()) /* a later follow-up was agreed: wait for it */
-           AND COALESCE(m.last_reply_at, m.stage_at, m.updated_at) <= now() - ($2 || ' hours')::interval AND ${pending('ask-date')}`,
+           AND COALESCE(m.last_reply_at, m.stage_at, m.updated_at) <= now() - ($2 || ' hours')::interval AND ${pending('ask-date')}
+           /* we already wrote to them since their last reply / the stage change (e.g. the AI or owner asked for a time):
+              the ball is in their court — a second, generic "which day?" only confuses them */
+           AND NOT EXISTS (SELECT 1 FROM messages x WHERE x.chat_jid = m.jid AND x.from_me
+                           AND x.ts > extract(epoch FROM COALESCE(m.last_reply_at, m.stage_at, m.updated_at))::bigint)`,
         [list.id, String(p.askDateAfterHours)],
       );
       let asked = 0;

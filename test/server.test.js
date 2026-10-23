@@ -1548,3 +1548,19 @@ test('other countries: bare numbers get COUNTRY_CODE, typed times use TZ_NAME (t
   assert.equal(localDate('2026-10-25 10:00', 'Asia/Kolkata').toISOString(), '2026-10-25T04:30:00.000Z');
   assert.equal(localDate('2026-10-25', 'Asia/Dubai').toISOString(), '2026-10-25T06:00:00.000Z');
 });
+
+test('pipeline: no generic "which day?" when we already wrote to them after they said interested (Jagdish, 24 Oct)', async () => {
+  const listsMod = await import('../src/lists.js');
+  await manager.create({ id: 'dbg3', label: 'Dbg3' });
+  fake('dbg3');
+  await manager.update('dbg3', { settings: { aiMode: 'approve' } });
+  await mcp('import_list', { account: 'dbg3', name: 'Chef – Dbg3', members: [{ phone: '9733200001', name: 'Jagdish' }, { phone: '9733200002', name: 'Mohan' }] });
+  const l = await listsMod.getList('Chef – Dbg3');
+  for (const p of ['9733200001', '9733200002']) await mcp('update_list_member', { list: 'Chef – Dbg3', phone: p, stage: 'interested' });
+  await query(`UPDATE list_members SET stage_at = now() - interval '6 hours', updated_at = now() - interval '6 hours' WHERE list_id = $1`, [l.id]);
+  // we asked Jagdish for his time 2 hours ago; Mohan heard nothing since saying interested
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('dbg3','919733200001@s.whatsapp.net','J1',true,$1,'text','Kal kitne baje aayenge?')`, [Math.floor(Date.now() / 1000) - 7200]);
+  await listsMod.runPipeline();
+  const asks = await query(`SELECT to_jid FROM outbox WHERE list_id = $1 AND note = 'ask-date'`, [l.id]);
+  assert.deepEqual(asks.map((r) => r.to_jid), ['919733200002@s.whatsapp.net'], 'only Mohan gets the automatic ask');
+});
