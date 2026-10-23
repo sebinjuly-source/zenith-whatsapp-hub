@@ -391,3 +391,7 @@ details.more > summary { display: inline-block; padding: 4px 10px; border: 1px s
 }
 .pickbar[hidden] { display: none; }
 .pickbar .btn:not(.primary) { background: transparent; color: var(--bg); border-color: rgba(255,255,255,.4); }
+.taskcard { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: manipulation; }
+.taskcard .tc-note, .taskcard details.more { -webkit-user-select: text; user-select: text; }
+.selall { margin-left: auto; }
+details.day > summary .selall { margin-left: 8px; }

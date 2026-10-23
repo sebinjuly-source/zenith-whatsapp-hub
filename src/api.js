@@ -427,7 +427,7 @@ export function buildApp() {
     });
     // Each message's price (Meta numbers; linked phones are free), shown on the draft cards and summed in approvals
     const p = await priceRows(rows, manager);
-    rows.forEach((r, i) => Object.assign(r, { price: p.items[i].price, price_category: p.items[i].category, price_note: p.items[i].note, currency: p.currency }));
+    rows.forEach((r, i) => Object.assign(r, { price: p.items[i].price, price_category: p.items[i].category, price_note: p.items[i].note, window_closes_at: p.items[i].closesAt || null, currency: p.currency }));
     // Picture the person will get: a Meta template's header image, or an attached photo (shown on the draft card)
     const headers = new Map((await query(`SELECT name, header_link FROM wa_templates WHERE header_link IS NOT NULL`)).map((t) => [t.name, t.header_link]));
     for (const r of rows) {
@@ -515,14 +515,15 @@ export function buildApp() {
   // the AI (due now) listing them; close: the selected cards are done (the AI card takes over).
   api.post('/tasks/bulk-note', wrap(async (req, res) => {
     const { ids = [], text = '', aiTask = true, close = false } = req.body || {};
-    const r = await tasks.bulkNote(ids, text, { aiTask, close, actor: actorOf(req) === 'you' ? 'you' : 'ai' });
+    const r = await tasks.bulkNote(ids, text, { aiTask, close, actor: 'you' });
     await act(req, r.task?.account_id || null, `Note on ${r.noted} card(s)${r.task ? ` → task #${r.task.id} for the AI` : ''}: ${String(text).slice(0, 80)}`);
     res.json(r);
   }));
   // A card's history (what happened and why) and its notes
   api.get('/tasks/:id/log', wrap(async (req, res) => res.json(await tasks.taskLog(req.params.id))));
   api.post('/tasks/:id/notes', wrap(async (req, res) => {
-    const t = await tasks.addNote(req.params.id, req.body?.text, actorOf(req) === 'you' ? 'you' : 'ai');
+    // dashboard and the owner's scripts write as the owner; the AI writes through MCP (add_task_note)
+    const t = await tasks.addNote(req.params.id, req.body?.text, 'you');
     res.json({ ok: true, id: t.id });
   }));
   api.patch('/tasks/:id', wrap(async (req, res) => {

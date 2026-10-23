@@ -71,10 +71,17 @@ export async function priceRows(rows, manager) {
            AND sent_at >= date_trunc('month', now())`, [s.id]);
       serviceUsed.set(s.id, c.n);
     }
+    // The 24 h reply window: free text can only go out until 24 h after their last message
+    const [w] = await query(`SELECT max(ts) AS ts FROM messages WHERE account_id = $1 AND chat_jid = $2 AND NOT from_me`, [s.id, r.to_jid]);
+    const closesAt = w?.ts ? new Date((Number(w.ts) + 86400) * 1000) : null;
+    if (!closesAt || closesAt <= new Date()) {
+      out.push({ price: 0, category: 'window_closed', closesAt, note: closesAt ? 'Reply window closed — free text can no longer be sent; send a Meta template instead (charged)' : 'They have never written to this number — only a Meta template can be sent' });
+      continue;
+    }
     const used = serviceUsed.get(s.id);
     serviceUsed.set(s.id, used + 1);
     const paid = used >= pricing.serviceFreePerMonth;
-    out.push({ price: paid ? pricing.service : 0, category: 'service', note: paid ? `Reply beyond the ${pricing.serviceFreePerMonth} free this month` : `Reply within 24 h — free (${used}/${pricing.serviceFreePerMonth} free replies used this month)` });
+    out.push({ price: paid ? pricing.service : 0, category: 'service', closesAt, note: paid ? `Reply beyond the ${pricing.serviceFreePerMonth} free this month` : `Reply within 24 h — free (${used}/${pricing.serviceFreePerMonth} free replies used this month)` });
   }
   return { items: out, total: out.reduce((a, b) => a + b.price, 0), currency: pricing.currency, pricing };
 }

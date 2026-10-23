@@ -1334,6 +1334,13 @@ test('owner feedback reaches the AI: rejections (with reason) land on the person
   assert.equal((await query('SELECT status FROM tasks WHERE id = $1', [t1.id]))[0].status, 'done');
   assert.ok((await call('GET', `/api/tasks/${t2.id}/log`)).data.some((x) => x.kind === 'note' && /follow up on WhatsApp/.test(x.text)));
   assert.equal((await call('POST', '/api/tasks/bulk-note', { ids: [], text: 'x' })).status >= 400, true);
+  // an owner note the AI hasn't acted on is flagged until the AI notes what it did
+  const t3 = (await call('POST', '/api/tasks', { account: 'fb1', title: 'Interview: Gopal' })).data;
+  await call('POST', `/api/tasks/${t3.id}/notes`, { text: 'Postponed — follow up on Monday' });
+  assert.match(await mcp('list_tasks', { owner_notes: true }), new RegExp(`#${t3.id} .*OWNER NOTE TO ACT ON`));
+  assert.match(await mcp('hub_overview'), /OWNER NOTES TO ACT ON/);
+  await mcp('add_task_note', { id: t3.id, text: 'Set follow-up for Monday 10:00' });
+  assert.doesNotMatch(await mcp('list_tasks', { owner_notes: true }), new RegExp(`#${t3.id} `));
 });
 
 test('calls: answered calls show "answered, m:ss" in the chat (so replies wait for the owner\'s notes); missed calls show as missed', async () => {

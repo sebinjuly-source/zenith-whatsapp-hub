@@ -777,6 +777,9 @@
     if (!accs.length) return shell([h('h1', {}, 'Board'), h('p', { class: 'sub' }, 'Add and link a number first.')]);
     const b = (state.board ||= { account: '', past: false, who: '' });
     const picked = (state.boardPicked ||= new Set());
+    // Selection mode starts with a long press on a card (no checkboxes otherwise); "Done" in the bar ends it
+    const selecting = !!state.boardSelecting;
+    const toggle = (id, on) => { if (on ?? !picked.has(id)) picked.add(id); else picked.delete(id); };
     if (b.account && !accs.find((a) => a.id === b.account)) b.account = '';
     const formAccount = b.account || (accs.find((a) => a.isDefault) || accs[0]).id;
     const q = (extra) => `/api/tasks?${new URLSearchParams({ ...(b.account ? { account: b.account } : {}), ...(b.role ? { role: b.role } : {}), ...extra })}`;
@@ -868,9 +871,9 @@
           toast('Note saved');
           loadLog();
         }) }, 'Save note'));
-      const pick = closed ? null : h('input', { type: 'checkbox', class: 'pick', 'aria-label': `Select "${t.title}"`, title: 'Select — then write one note for several cards', checked: picked.has(t.id),
-        onchange: (e) => { if (e.target.checked) picked.add(t.id); else picked.delete(t.id); drawPickBar(); } });
-      return h('div', { class: 'taskcard' + (t.priority ? ' prio' : '') + (overdue ? ' overdue' : '') + (picked.has(t.id) ? ' picked' : '') },
+      const pick = closed || !selecting ? null : h('input', { type: 'checkbox', class: 'pick', 'data-id': t.id, 'aria-label': `Select "${t.title}"`, checked: picked.has(t.id),
+        onchange: (e) => { toggle(t.id, e.target.checked); drawPickBar(); } });
+      const el = h('div', { class: 'taskcard' + (t.priority ? ' prio' : '') + (overdue ? ' overdue' : '') + (picked.has(t.id) ? ' picked' : ''), 'data-id': t.id },
         h('div', { class: 'tc-head' },
           pick,
           t.priority ? icon(['⭐', 'Priority — must do']) : null,
@@ -885,7 +888,50 @@
         t.total && t.status === 'in_progress' ? h('div', { class: 'progress', style: 'margin:6px 0' }, h('i', { style: `width:${pct}%` })) : null,
         h('div', { class: 'row tc-actions' }, primary, doneBtn, more),
       );
+      if (!closed) {
+        // long press (touch or mouse, ~0.5 s) → selection mode with this card ticked
+        let timer = null;
+        let start = null;
+        let fired = false;
+        const cancel = () => { clearTimeout(timer); timer = null; };
+        el.addEventListener('pointerdown', (e) => {
+          if (e.button > 0) return;
+          fired = false;
+          start = [e.clientX, e.clientY];
+          timer = setTimeout(() => {
+            fired = true;
+            navigator.vibrate?.(30);
+            state.boardSelecting = true;
+            picked.add(t.id);
+            const y = document.querySelector('main')?.scrollTop || 0;
+            viewBoard().then(() => { const m = document.querySelector('main'); if (m) m.scrollTop = y; });
+          }, 550);
+        });
+        el.addEventListener('pointermove', (e) => { if (timer && start && Math.hypot(e.clientX - start[0], e.clientY - start[1]) > 10) cancel(); });
+        ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => el.addEventListener(ev, cancel));
+        el.addEventListener('contextmenu', (e) => { if (fired || selecting) e.preventDefault(); });
+        // in selection mode a tap on the card (not on its buttons) ticks it; the click after a long press is swallowed
+        el.addEventListener('click', (e) => {
+          if (fired) { e.preventDefault(); e.stopPropagation(); fired = false; return; }
+          if (!selecting || e.target.closest('button, a, select, textarea, input, summary, details.more')) return;
+          toggle(t.id);
+          const box = el.querySelector('.pick');
+          if (box) box.checked = picked.has(t.id);
+          drawPickBar();
+        }, true);
+      }
+      return el;
     };
+    const selectAll = (cards) => (selecting && cards.length
+      ? h('button', { class: 'btn small selall', type: 'button', onclick: (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const ids = cards.filter((t) => !['done', 'cancelled'].includes(t.status)).map((t) => t.id);
+          const all = ids.every((id) => picked.has(id));
+          ids.forEach((id) => toggle(id, !all));
+          drawPickBar();
+        } }, '☑ Select all')
+      : null);
     // Future: one fold per day, the next two open
     const dayKey = (d) => new Date(d).toLocaleDateString('en-CA');
     const tomorrow = dayKey(Date.now() + 86400000);
@@ -899,14 +945,14 @@
     const dayLabel = (k) => (k === tomorrow ? 'Tomorrow' : new Date(k + 'T12:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' }));
     const futureEl = days.length
       ? days.map((g, i) => h('details', { class: 'day', open: i < 2 },
-          h('summary', {}, h('b', {}, dayLabel(g.k)), h('span', { class: 'muted' }, ` · ${g.items.length}`),
+          h('summary', {}, h('b', {}, dayLabel(g.k)), h('span', { class: 'muted' }, ` · ${g.items.length}`), selectAll(g.items),
             g.items.some((t) => t.priority) ? h('span', { class: 'ico', title: 'Has a must-do' }, ' ⭐') : null,
             h('span', { class: 'muted day-peek' }, ' — ', g.items.slice(0, 3).map((t) => `${fmtTime(due(t))} ${t.title.replace(/^(Interview|Follow up|Scheduled): /, '').replace(/ — .*$/, '')}`).join(' · '))),
           h('div', { class: 'cardlist' }, g.items.map(card))))
       : [h('p', { class: 'muted' }, 'Nothing planned yet.')];
-    const section = (titleIcon, title, items, body, { open = true, hint } = {}) =>
+    const section = (titleIcon, title, items, body, { open = true, hint, cards } = {}) =>
       h('details', { class: 'section', open },
-        h('summary', {}, h('span', { class: 'sec-title' }, titleIcon, ' ', title), h('span', { class: 'count' }, items), hint ? h('span', { class: 'muted sec-hint' }, hint) : null),
+        h('summary', {}, h('span', { class: 'sec-title' }, titleIcon, ' ', title), h('span', { class: 'count' }, items), hint ? h('span', { class: 'muted sec-hint' }, hint) : null, cards ? selectAll(cards) : null),
         body);
     // filters: compact selects
     const sel = (label, value, options, onPick) => h('select', { class: 'small-select', 'aria-label': label, title: label, onchange: (e) => onPick(e.target.value) },
@@ -974,12 +1020,14 @@
     const pickBar = h('div', { class: 'pickbar', role: 'region', 'aria-label': 'Selected cards' });
     function drawPickBar() {
       document.querySelectorAll('.taskcard').forEach((el) => el.classList.toggle('picked', !!el.querySelector('.pick:checked')));
-      fill(pickBar, picked.size
+      document.querySelectorAll('.pick').forEach((c) => (c.checked = picked.has(Number(c.dataset.id))));
+      fill(pickBar, selecting
         ? [h('b', {}, `${picked.size} selected`),
-            h('button', { class: 'btn small primary', onclick: noteDialog }, '📝 Note for the AI'),
-            h('button', { class: 'btn small', onclick: () => { picked.clear(); document.querySelectorAll('.pick').forEach((c) => (c.checked = false)); drawPickBar(); } }, 'Clear')]
+            h('button', { class: 'btn small primary', disabled: !picked.size, onclick: noteDialog }, '📝 Note for the AI'),
+            h('button', { class: 'btn small', onclick: () => { picked.clear(); state.boardSelecting = false; viewBoard(); } }, 'Done')]
         : []);
-      pickBar.hidden = !picked.size;
+      pickBar.hidden = !selecting;
+      document.querySelectorAll('.taskcard').forEach((el) => el.classList.toggle('picked', picked.has(Number(el.dataset.id))));
     }
     function noteDialog() {
       const cards = [...picked].map((id) => byId.get(id)).filter(Boolean);
@@ -1016,7 +1064,7 @@
         nowMain.length ? h('div', { class: 'cardlist' }, nowMain.map(card)) : !nowReplies.length ? h('p', { class: 'muted' }, 'All clear — nothing due now.') : null,
         nowReplies.length ? h('details', { class: 'day', open: nowReplies.length <= 3 }, h('summary', {}, h('b', {}, `💬 ${nowReplies.length} candidate${nowReplies.length > 1 ? 's' : ''} waiting for a reply`), h('span', { class: 'muted' }, ' — the AI drafts these; open to see them')),
           h('div', { class: 'cardlist' }, nowReplies.map(card))) : null),
-        { hint: priorityNow ? `${priorityNow} must-do` : 'overdue, due today, or waiting on someone' }),
+        { hint: selecting ? 'tap cards to select' : priorityNow ? `${priorityNow} must-do · long-press a card to select several` : 'long-press a card to select several', cards: now }),
       section('📅', 'Future', future.length, h('div', {}, futureEl), { hint: 'by day' }),
       running.length ? section('⏳', 'Sending now', running.length, h('div', { class: 'cardlist' }, running.map(card)), { open: false }) : null,
       b.past ? section('✅', 'Done & cancelled', past.length, h('div', { class: 'cardlist' }, past.map(card)), { open: false }) : null,
@@ -1415,7 +1463,13 @@
           cb,
           h('b', { class: 'grow' }, r.to_name || '+' + r.to_jid.split('@')[0]),
           from, h('span', { class: 'tag' }, { mcp: 'AI', campaign: 'bulk', api: 'script', dashboard: 'you' }[r.source] || r.source), h('span', { class: 'muted' }, new Date(r.created_at).toLocaleString()),
-          h('span', { class: 'muted', style: 'font-size:12px;white-space:nowrap', title: r.price_note || '' }, r.price ? money(r.price, r.currency) : (r.price_category === 'free' ? 'free' : money(0, r.currency)))),
+          h('span', { class: 'muted', style: 'font-size:12px;white-space:nowrap', title: r.price_note || '' }, r.price ? money(r.price, r.currency) : (r.price_category === 'free' ? 'free' : r.price_category === 'window_closed' ? '' : money(0, r.currency)))),
+        // Meta number, free text: free only inside their 24 h window — say until when (or that it has closed)
+        r.price_category === 'window_closed' && ['draft', 'queued'].includes(r.status)
+          ? h('div', { class: 'tag', style: 'background:var(--bad-soft);color:var(--ink);margin:4px 0' }, '⛔ ', r.price_note)
+          : r.price_category === 'service' && r.window_closes_at && ['draft', 'queued'].includes(r.status)
+            ? h('div', { class: 'tag', style: `margin:4px 0;${new Date(r.window_closes_at) - Date.now() < 4 * 3600e3 ? 'background:var(--warn-soft);color:var(--ink)' : ''}` }, '⏳ Free until ', new Date(r.window_closes_at).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }), ' — after that it cannot be sent as text')
+            : null,
         r.note ? h('p', { class: 'muted', style: 'margin:6px 0' }, 'Why: ', r.note) : null,
         r.payload.waTemplate ? h('p', { style: 'margin:6px 0' }, h('span', { class: 'tag' }, `Meta template: ${r.payload.waTemplate.name}`)) : null,
         r.preview_image ? h('a', { href: r.preview_image.startsWith('data:') ? undefined : r.preview_image, target: '_blank', rel: 'noopener', title: 'Image the person will receive' },

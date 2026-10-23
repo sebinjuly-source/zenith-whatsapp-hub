@@ -183,6 +183,11 @@ function buildServer(playbook = '') {
     const byKind = (rows, k) => rows.filter((t) => t.kind === k).length;
     out.push(`1. DUE NOW (${dueNow.length}): ${byKind(dueNow, 'reply')} replies to answer, ${byKind(dueNow, 'followup')} follow-ups, ${dueNow.filter((t) => /^Call notes needed/.test(t.title)).length} call notes needed, ${dueNow.filter((t) => t.priority && (t.assignee || 'you') === 'you').length} owner must-dos. → list_tasks(for="ai", due_now=true), list_tasks(kind="reply")`);
     for (const t of dueNow.filter((x) => x.priority || x.kind === 'reply' || x.kind === 'followup').slice(0, 12)) out.push(`   - #${t.id} ${(t.assignee || 'you') === 'ai' ? 'AI' : 'owner'}${t.priority ? ' PRIORITY' : ''}: ${trim(t.title, 90)}`);
+    const pendingNotes = open.filter((t) => t.owner_note_pending);
+    if (pendingNotes.length) {
+      out.push(`   OWNER NOTES TO ACT ON (${pendingNotes.length}) → list_tasks(owner_notes=true), do what each says, then add_task_note:`);
+      for (const t of pendingNotes.slice(0, 8)) out.push(`   - #${t.id} ${trim(t.title, 60)} — "${trim(t.last_note, 120)}"`);
+    }
     const upcomingVisits = later.filter((t) => t.kind === 'visit').slice(0, 5);
     out.push(`2. COMING UP: ${later.length} dated cards${upcomingVisits.length ? '; interviews: ' + upcomingVisits.map((t) => trim(t.title.replace(/^Interview: /, ''), 50)).join('; ') : ''}`);
     const [dr] = await query(`SELECT count(*)::int n, count(DISTINCT account_id)::int a FROM outbox WHERE status = 'draft'`);
@@ -861,6 +866,7 @@ function buildServer(playbook = '') {
       `#${t.id}`,
       t.account_id,
       t.status,
+      t.owner_note_pending ? 'OWNER NOTE TO ACT ON' : null,
       t.priority ? 'PRIORITY' : null,
       (t.assignee || 'you') === 'ai' ? 'for AI' : 'for owner',
       trim(t.title, 80),
@@ -875,10 +881,12 @@ function buildServer(playbook = '') {
     kind: z.enum(['reply', 'followup', 'visit', 'scheduled', 'reminder', 'bulk', 'todo']).optional(),
     for: z.enum(['you', 'ai']).optional().describe('"you" = the owner cards, "ai" = the AI cards'),
     due_now: z.boolean().optional().describe('Only cards due by now (plus 1 hour)'),
+    owner_notes: z.boolean().optional().describe('Only cards where the owner wrote a note the AI has not acted on yet — act on each (follow-up date, scheduled message, draft, …), then add_task_note saying what you did'),
   }, async (a) => {
     let rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role, assignee: a.for,
       dueBefore: a.due_now ? new Date(Date.now() + 3600000) : undefined });
     if (a.kind) rows = rows.filter((t) => t.kind === a.kind);
+    if (a.owner_notes) rows = rows.filter((t) => t.owner_note_pending);
     const chatOf = (t) => {
       const [k, x, j] = String(t.ref || '').split(':');
       return ['reply', 'remind'].includes(k) ? ` | chat ${j} on ${x}` : ['followup', 'visit'].includes(k) ? ` | chat ${j} on ${t.account_id} | list #${x}` : '';

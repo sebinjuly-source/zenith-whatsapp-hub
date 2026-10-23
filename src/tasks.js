@@ -194,7 +194,9 @@ export async function listTasks({ account, past = false, limit = 200, role, assi
     `SELECT t.*,
        COALESCE(o.total, 0) AS total, COALESCE(o.sent, 0) AS sent, COALESCE(o.failed, 0) AS failed,
        COALESCE(o.drafts, 0) AS drafts, COALESCE(o.pending, 0) AS pending, o.next_at, o.replied,
-       n.notes, n.last_note
+       n.notes, n.last_note,
+       -- the owner wrote a note and the AI has not acted on the card since
+       (SELECT l.actor FROM task_log l WHERE l.task_id = t.id AND (l.kind = 'note' OR l.actor = 'ai') ORDER BY l.id DESC LIMIT 1) = 'you' AS owner_note_pending
      FROM tasks t
      LEFT JOIN LATERAL (
        SELECT count(*)::int AS notes, (array_agg(l.text ORDER BY l.id DESC))[1] AS last_note
