@@ -363,7 +363,10 @@ function makePgDriver() {
     // A connection killed while idle fails the next query at once ("Connection terminated unexpectedly") before
     // the statement runs. Retry those on a fresh connection instead of failing a send or the outbox loop.
     const transient = (err) => /Connection terminated|ECONNRESET|EPIPE|connection timeout|Client has encountered a connection error|terminating connection/i.test(err?.message || '')
-      || ['57P01', '57P02', '57P03', '08006', '08003'].includes(err?.code);
+      || ['57P01', '57P02', '57P03', '08006', '08003'].includes(err?.code)
+      // deadlock / serialization failure: Postgres rolled the statement back, so running it again is safe
+      // (seen when two servers overlap during a deploy and both re-check lists at once)
+      || ['40P01', '40001'].includes(err?.code);
     return {
       kind: 'postgres',
       async query(text, params = []) {
@@ -373,7 +376,7 @@ function makePgDriver() {
           } catch (err) {
             if (attempt >= 2 || !transient(err)) throw err;
             logger.warn({ err: err.message, attempt }, 'Database connection dropped — retrying');
-            await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+            await new Promise((r) => setTimeout(r, 300 * (attempt + 1) + Math.floor(Math.random() * 300)));
           }
         }
       },

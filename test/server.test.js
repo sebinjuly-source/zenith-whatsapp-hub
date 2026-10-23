@@ -1473,3 +1473,38 @@ test('calls: answered calls show "answered, m:ss" in the chat (so replies wait f
   const p = parseMessage({ key: { id: 'L1', remoteJid: '919800002003@s.whatsapp.net' }, messageTimestamp: 1, message: { callLogMesssage: { isVideo: false, callOutcome: 0, durationSecs: 75 } } });
   assert.equal(p.row.body, '📞 Voice call — answered, 1:15');
 });
+
+test('debug run 23 Oct: reply drafts don\'t hold follow-ups; a visit date always makes an Interview card; closing cancels automatic messages; scheduled cards keep their text; undated AI to-dos are due', async () => {
+  const listsMod = await import('../src/lists.js');
+  const outboxMod = await import('../src/outbox.js');
+  const board = await import('../src/board.js');
+  await manager.create({ id: 'dbg1', label: 'Dbg1' });
+  fake('dbg1');
+  const now = Math.floor(Date.now() / 1000);
+  const J = (n) => `91973300000${n}@s.whatsapp.net`;
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('dbg1',$1,'D1',false,$2,'text','kab aana hai?')`, [J(1), now - 600]);
+  await mcp('import_list', { account: 'dbg1', name: 'Chef – Dbg', members: [{ phone: '9733000001', name: 'Ravi Kumar' }, { phone: '9733000002', name: 'Sunil' }] });
+  // a reply drafted for someone already chatting is not "new outreach" — follow-ups may still go today
+  await mcp('send_message', { account: 'dbg1', to: '9733000001', text: 'Kal 11 baje aaiye' });
+  assert.equal(await outboxMod.newOutreachToday('dbg1'), false, 'a pending reply draft must not block follow-ups');
+  // "interested" sent together with a visit date → date_given + Interview card for the owner
+  await mcp('update_list_member', { list: 'Chef – Dbg', phone: '9733000001', stage: 'interested', visit_at: '2026-12-01 11:00' });
+  const l = await listsMod.getList('Chef – Dbg');
+  const [m] = await query('SELECT stage FROM list_members WHERE list_id = $1 AND jid = $2', [l.id, J(1)]);
+  assert.equal(m.stage, 'date_given');
+  const [card] = await query(`SELECT assignee, priority FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled')`, [`visit:${l.id}:${J(1)}`]);
+  assert.ok(card && card.assignee === 'you' && card.priority, 'interview card for the owner, priority');
+  // closing a person cancels the automatic messages still waiting for them
+  await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, note, list_id) VALUES ('dbg1',$1,'{"text":"follow up"}','campaign','draft','follow-up',$2)`, [J(2), l.id]);
+  await mcp('update_list_member', { list: 'Chef – Dbg', phone: '9733000002', stage: 'not_interested' });
+  const [fu] = await query(`SELECT status FROM outbox WHERE to_jid = $1 AND note = 'follow-up'`, [J(2)]);
+  assert.equal(fu.status, 'rejected', 'no follow-up to a not-interested person');
+  // a scheduled message card keeps every letter
+  await outboxMod.enqueue({ account: 'dbg1', to: '9733000001', payload: { text: 'Namaste sir, kal milte hain' }, source: 'dashboard', scheduledAt: new Date(Date.now() + 3 * 3600e3).toISOString() });
+  await board.syncScheduled();
+  const [sc] = await query(`SELECT details FROM tasks WHERE ref LIKE 'sched:%' AND account_id = 'dbg1' ORDER BY id DESC LIMIT 1`);
+  assert.match(sc.details, /Namaste sir, kal milte hain/);
+  // an AI to-do without a date shows in due_now
+  await mcp('create_task', { account: 'dbg1', title: 'Send Ravi the menu', for: 'ai' });
+  assert.match(await mcp('list_tasks', { for: 'ai', due_now: true, account: 'dbg1' }), /Send Ravi the menu/);
+});

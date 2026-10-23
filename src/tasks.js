@@ -128,7 +128,7 @@ export async function upsertRefTask(ref, { account, title, details, kind = 'todo
     const now = dueAt ? new Date(dueAt).getTime() : null;
     if (was !== now) await logTask(open.id, `Due ${now ? new Date(now).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : 'cleared'}`);
     const [row] = await query(
-      `UPDATE tasks SET title = $2, details = $3, due_at = $4, account_id = $5, role = COALESCE($6, role), assignee = $7, priority = $8, updated_at = now()
+      `UPDATE tasks SET title = $2, details = $3, due_at = $4, account_id = $5, role = COALESCE($6, role), assignee = $7, priority = priority OR $8, updated_at = now() -- a priority the owner set stays
        WHERE id = $1 RETURNING *`,
       [open.id, title, details || null, dueAt, account, role, assignee, !!priority],
     );
@@ -197,7 +197,8 @@ export async function listTasks({ account, past = false, limit = 200, role, assi
   }
   if (dueBefore) {
     p.push(new Date(dueBefore).toISOString());
-    where.push(`t.due_at <= $${p.length}::timestamptz`);
+    // an undated to-do is due now (else an AI card made without a date would never come up); bulk sends aren't to-dos
+    where.push(`(t.due_at <= $${p.length}::timestamptz OR (t.due_at IS NULL AND t.kind <> 'bulk'))`);
   }
   if (role) {
     p.push(role);

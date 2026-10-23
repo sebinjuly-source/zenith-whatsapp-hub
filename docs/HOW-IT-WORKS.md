@@ -202,4 +202,101 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
 - Failures are shown with a plain reason (WhatsApp/Meta error codes translated); Meta's actual delivery events are
   kept 14 days.
 - Alerts by WhatsApp when a number is logged out or offline 15+ minutes.
-- Tests: `npm test` (89 end-to-end tests, including a fake Meta server).
+- Tests: `npm test` (90 end-to-end tests, including a fake Meta server).
+
+---
+
+## 10. Internals & debugging (step by step, for whoever fixes it next)
+
+### 10.1 Start-up (`src/index.js`)
+1. `initDb()` (`db.js`) runs the whole SCHEMA (every `CREATE … IF NOT EXISTS` / `ALTER … ADD COLUMN IF NOT EXISTS`
+   and one-off back-fills) — safe to run on every start.
+2. `buildApp()` (`api.js`) mounts `/health`, `/login`, `/meta/webhook`, `/mcp/<key>`, the dashboard files and `/api/*`.
+3. `manager.init()` (`wa/manager.js`) loads every row of `accounts` and starts a session per number:
+   linked numbers = `wa/session.js` (Baileys), Meta numbers = `wa/cloud.js`. Every 30 s it re-reads the table.
+4. `startOutbox()` (`outbox.js`) sweeps sends stuck in "sending" and starts one sender loop per number.
+5. After 1 min and then every 10 min: `runPipeline` → `runFollowups` (`lists.js`) → `syncBoard` (`board.js`).
+   A run never overlaps the previous one; the result of `syncBoard` is `/health → board`.
+
+### 10.2 One server per linked number (leases)
+A linked number may only be connected from one server. `session.js` claims `accounts.lease_owner` for 90 s and
+renews it; a second server (e.g. the new one during a Render deploy) shows **elsewhere** until the old lease runs
+out. So: "Running on another server" for about a minute after a deploy is normal. Only the lease holder sends,
+runs follow-ups and pipeline steps for that number (`session.status === 'open'`). Meta numbers need no lease.
+
+### 10.3 A message comes in
+- Linked: Baileys `messages.upsert` → `wa/parse.js` turns it into a row → `store.insertMessages` (also updates the
+  chat preview) → `session.afterIncoming`.
+- Meta: Meta POSTs `/meta/webhook` → `meta.js dispatch` (checks the signature, finds the number by
+  phone_number_id) → `cloud.js onWebhook` (skips ids already stored) → `insertMessages` → `afterIncoming`.
+- `afterIncoming` in order: reopen a snoozed/done chat → `board.noteIncoming` ("Reply to X" card if they are on a
+  list and not closed) → close their chat reminder → `noteSharedContacts` (contact cards → Contacts + "Call Y" card)
+  → opt-out words → auto-save media → `rules.runRules` (tags, task, auto-reply template once a day) → webhook URL.
+
+### 10.4 A message goes out (`outbox.js`)
+1. Everything is a row in `outbox`. `enqueue` (one message) / `bulkSend` / `lists.sendToList` insert rows.
+   `source`: dashboard/api = yours (sent at once, priority 10); mcp/campaign = AI and bulk (drafts in approve
+   mode); rule = auto-replies (pre-approved). Each row stores its campaign in `outbox.role`.
+2. Drafts wait for **approve** (`approve`, `approveAll`, `approveTask`). Approving a free-text draft on a Meta
+   number after the 24 h window closed is refused with the reason.
+3. The sender loop (`startWorker → tick`) claims ONE row atomically (`FOR UPDATE SKIP LOCKED`), in this order:
+   replies to people who wrote in 24 h, then priority, then age. It holds back automated rows outside sending hours,
+   over the daily cap, during the random gap, follow-ups on days with new outreach, and new numbers over the
+   new-number limit. `queueStatus` explains the current hold in words (hub_overview "sending: held — …").
+4. `session.send` sends; the row becomes `sent` (with `message_id`) or `failed` (with the reason).
+   Meta: a delivery failure arrives later by webhook (`cloud.js onCloudStatus`) and turns `sent` into `failed`;
+   codes marked retry in `graph.js META_HELP` (e.g. 131049) are queued again after 25 h (max 2), and dropped if the
+   person wrote meanwhile. A template still in review keeps the row queued (checked every 15 min).
+5. A row stuck in `sending` > 4 min (restart mid-send) is marked sent if the message is in the chat, else failed
+   ("check the chat before resending") — never sent twice.
+
+### 10.5 Lists, funnel and follow-ups (`lists.js`)
+- A list member's **status** (new/queued/sent/replied/failed/opted_out) is always recomputed from real messages and
+  the outbox (`refreshList`, one SQL statement; one run at a time per list). The **stage** (interested →
+  date_given → visited/trial → selected → joined; no_show, not_interested, rejected) is set by you or the AI.
+- `updateMember`: `visit_at` → stage date_given + Interview card; `available_from` → follow-up the day before at
+  10:00 + Follow-up card; closed stage → closes their Reply cards and cancels automatic messages still waiting.
+- `runPipeline`: interested with no date for N hours → "ask-date" message; visit within 18 h → reminder; visit
+  3 h past and still date_given → "Did X come?" card.
+- `runFollowups`: members sent-but-silent for `afterDays` get a follow-up (Meta: the list's follow-up template),
+  only after `followupStart`, max `followupDailyMax` a day, and not on days the number reaches out to new people
+  (`newOutreachToday` — replies to existing chats don't count).
+
+### 10.6 The Board (`board.js`, `tasks.js`)
+- Cards with a `ref` are kept in step by the hub: `reply:<acc>:<jid>`, `followup:<list>:<jid>`,
+  `visit:<list>:<jid>`, `remind:<acc>:<jid>`, `sched:<outboxId>`. `upsertRefTask` updates the open one;
+  `closeRefTasks` closes it with a reason (visible in History).
+- Events update cards at once (incoming message, reply sent, stage/date changed, scheduled send). `syncBoard`
+  re-derives all of them every 10 min, tags cards with their campaign, and runs the safety net (`catchForgotten`).
+- `task_log` = each card's history and notes. "Owner note to act on" = the latest note/AI entry is the owner's.
+
+### 10.7 Campaigns (`campaign.js`)
+A campaign is a list's job role. `roleOf(acc, jid)` = role of the latest list the person is on (this number's
+lists first); `roleFilter` turns a picked campaign ("none" = on no list) into SQL. Stored on `outbox.role` and
+`tasks.role`; chats are filtered live.
+
+### 10.8 AI access (`mcp.js`) and REST (`api.js`)
+- MCP: `POST /mcp/<API_KEY>`, stateless — every call builds a fresh server with the playbook (from `config` key
+  `playbook`) as its instructions. Every tool returns short text; errors come back as `Error: …` text.
+  Dates the AI gives without a timezone are India time (`localTime`).
+- REST: `/api/*` with `x-api-key` or the dashboard cookie; the dashboard (`public/app.js`) uses only these.
+  `/webhook` is the old dental-bot format for Apps Script.
+
+### 10.9 Data model (main tables)
+`accounts` (numbers, settings, lease) · `wa_auth` (linked-number keys) · `chats`, `contacts`, `messages`, `lid_map`
+· `outbox` (every send) · `tasks` + `task_log` (Board) · `lists` + `list_members` (batches, status, stage, dates)
+· `templates`, `rules`, `directory` (Contacts book) · `config` (playbook, defaults, alerts, prices) · `events`
+(activity log, pruned after 30/365 days) · `meta_events` (Meta webhooks, 14 days) · `wa_templates` · `jobs`.
+
+### 10.10 Debugging recipes
+| Symptom | Look at |
+|---|---|
+| "Errors on the hub" | `recent_activity(who="system")` / Activity page: failed follow-ups, Meta holds, disconnects, rule failures |
+| Message not going out | hub_overview "sending: held — reason"; `list_outbox status=queued` (scheduled time shown) |
+| Meta message failed | the draft card's "what to do"; `meta_health_check`; `message_timeline <phone>` |
+| Card missing / closed | `task_history <id>` (who closed it and why); `/health → board` (last re-check) |
+| Interview not on the Board | the member needs `visit_at` and a stage of interested/date_given (not closed) |
+| Follow-ups never go | number setting "Follow-ups not before", daily max, new outreach today, list follow-up on? |
+| "deadlock detected" | two servers overlapping in a deploy — statements are retried automatically now |
+| Wrong number drafted | `send_message` refuses numbers whose chat is elsewhere unless `other_number_ok` |
+| Anything else | Render logs (pino JSON), then reproduce in a test: `npm test` runs the whole hub on PGlite with a fake WhatsApp and a fake Meta server |

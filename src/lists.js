@@ -215,9 +215,31 @@ export async function removeMembers(listId, phones = []) {
   return { list: l, removed, kept };
 }
 
-/** Recompute every member's status from the WhatsApp messages and the outbox (one query). */
+/**
+ * Recompute every member's status from the WhatsApp messages and the outbox (one query). Runs one at a time per
+ * list (two overlapping updates of the same rows deadlocked in Postgres): calls that arrive meanwhile share one
+ * more run after it, so they still see their own change.
+ */
+const refreshing = new Map(); // listId -> { running, next }
+export function refreshList(listId) {
+  const k = String(listId);
+  const cur = refreshing.get(k);
+  if (cur) {
+    cur.next ||= cur.running.catch(() => {}).then(() => {
+      cur.next = null;
+      cur.running = doRefreshList(listId);
+      return cur.running;
+    });
+    return cur.next;
+  }
+  const st = { running: doRefreshList(listId), next: null };
+  refreshing.set(k, st);
+  const cleanup = () => { if (!st.next) refreshing.delete(k); else st.next.finally(cleanup).catch(() => {}); };
+  st.running.finally(cleanup).catch(() => {});
+  return st.running;
+}
 // Messages from the list's number AND from any number its messages were moved to (e.g. when a number is blocked).
-export async function refreshList(listId) {
+async function doRefreshList(listId) {
   await query(
     `WITH l AS (SELECT id, account_id, extract(epoch FROM since)::bigint AS since,
        ARRAY(SELECT DISTINCT o.account_id FROM outbox o WHERE o.list_id = $1) || account_id AS accs FROM lists WHERE id = $1),
@@ -316,7 +338,8 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
   }
   let visit = visitAt === undefined ? undefined : visitAt ? new Date(visitAt) : null;
   if (visit && isNaN(visit)) throw new Error('Could not read the visit date');
-  if (visit && stage === undefined) stage = 'date_given'; // giving a date moves them to "date given"
+  // giving a date moves them to "date given" (also when "interested" is sent with it: the date is the newer fact)
+  if (visit && (stage === undefined || stage === null || stage === '' || stage === 'interested')) stage = 'date_given';
   // Follow-up: an exact time, or worked out from when they said they'll be free. A visit date replaces it.
   let fu = followupAt === undefined ? undefined : followupAt ? new Date(followupAt) : null;
   if (fu && isNaN(fu)) throw new Error('Could not read the follow-up date');
@@ -350,6 +373,17 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
     const { closeRefTasks } = await import('./tasks.js');
     const accs = await query(`SELECT DISTINCT account_id FROM messages WHERE chat_jid = $1`, [jid]);
     await closeRefTasks(accs.map((a) => `reply:${a.account_id}:${jid}`), 'done', `candidate closed (${m.stage || m.outcome})`).catch(() => {});
+    // never message a closed person: cancel the list's unsent messages and automatic ones (follow-up, ask-date,
+    // reminder) to them. A reply the AI drafted by hand stays, for the owner to decide.
+    const dropped = await query(
+      `UPDATE outbox SET status = 'rejected', error = $3 WHERE to_jid = $1 AND status IN ('draft','queued')
+         AND (list_id = $2 OR note IN ('follow-up','ask-date','visit-reminder')) RETURNING task_id, list_id`,
+      [jid, listId, `Not sent: candidate closed (${m.stage || m.outcome})`],
+    );
+    if (dropped.length) {
+      for (const t of new Set(dropped.map((d) => d.task_id).filter(Boolean))) await refreshTask(t).catch(() => {});
+      await refreshList(listId).catch(() => {});
+    }
   }
   return m;
 }

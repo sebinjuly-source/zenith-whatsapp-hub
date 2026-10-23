@@ -184,6 +184,14 @@ export async function approve(id, { text } = {}) {
     if (payload.attachment && !payload.text) payload.attachment = { ...payload.attachment, caption: text };
     else payload.text = text;
   }
+  // Meta number, free text: say now if the 24 h window has closed, instead of a "failed" card later
+  const session = manager.sessions.get(row.account_id);
+  if (session?.isCloud && !payload.waTemplate) {
+    const w = await session.windowFor(row.to_jid).catch(() => ({ open: true }));
+    if (!w.open) {
+      throw new Error(`Can't send: the 24-hour reply window with ${row.to_jid.split('@')[0]} has closed, so Meta only allows an approved template now. Reject this draft and send a template, or move it to a linked number.`);
+    }
+  }
   const [updated] = await query(
     `UPDATE outbox SET status = 'queued', payload = $2, scheduled_at = GREATEST(scheduled_at, now())
      WHERE id = $1 AND status = 'draft' RETURNING *`,
@@ -331,7 +339,7 @@ export async function reject(id, { reason = '', actor = 'you' } = {}) {
   );
   if (!row) throw new Error('Nothing to reject (already sent?)');
   await noteRejection([row], { reason, actor });
-  await refreshTask(row.task_id);
+  await afterBatchChange([row]); // its task and list show the change at once
   return row;
 }
 
@@ -370,14 +378,20 @@ export async function listOutbox({ account, status, taskId, limit = 50, role } =
 }
 
 /**
- * Is this number reaching out to NEW people today? True if a first-contact message (bulk/AI, not a
- * follow-up) was sent today, or is still waiting as a draft/queued. Follow-ups wait for days when this is false.
+ * Is this number reaching out to NEW people today? True if a first-contact message (bulk/AI to someone this number
+ * never chatted with, not a follow-up) was sent today, is queued, or was drafted in the last 24 h. Follow-ups wait
+ * for days when this is true. Replies to people already in a chat don't count (a pending AI reply draft used to
+ * hold every follow-up back), nor does a forgotten old draft.
  */
 export async function newOutreachToday(accountId) {
   const [r] = await query(
-    `SELECT 1 FROM outbox WHERE account_id = $1 AND source = ANY($2) AND note IS DISTINCT FROM 'follow-up'
-       AND (status IN ('draft','queued','sending')
-            OR (status = 'sent' AND sent_at >= (date_trunc('day', now() AT TIME ZONE $3) AT TIME ZONE $3)))
+    `SELECT 1 FROM outbox o WHERE o.account_id = $1 AND o.source = ANY($2) AND o.note IS DISTINCT FROM 'follow-up'
+       AND o.to_jid NOT LIKE '%@g.us'
+       AND (((o.status IN ('queued','sending') OR (o.status = 'draft' AND o.created_at > now() - interval '24 hours'))
+             AND ${IS_NEW_CHAT('o.account_id', 'o.to_jid')})
+            OR (o.status = 'sent' AND o.sent_at >= (date_trunc('day', now() AT TIME ZONE $3) AT TIME ZONE $3)
+                AND NOT EXISTS (SELECT 1 FROM messages x WHERE x.account_id = o.account_id AND x.chat_jid = o.to_jid
+                                AND x.ts < extract(epoch FROM o.sent_at)::bigint - 60)))
      LIMIT 1`,
     [accountId, ['campaign', 'mcp'], config.tz],
   );

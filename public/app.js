@@ -714,9 +714,10 @@
         const t = (state.templates || []).find((x) => String(x.id) === e.target.value);
         e.target.value = '';
         if (!t) return;
-        const ct = (await api(`/api/accounts/${ib.account}/contacts/${encodeURIComponent(c.jid)}`)) || {};
+        // a chat with no contact record yet (404) still gets the template, with "there" for the name
+        const ct = (await api(`/api/accounts/${ib.account}/contacts/${encodeURIComponent(c.jid)}`).catch(() => null)) || {};
         const name = (ct.name || ct.notify || '').trim();
-        ta.value = t.body.replace(/\{name\}/g, name || 'there').replace(/\{first_name\}/g, name.split(/\s+/)[0] || 'there').replace(/\{phone\}/g, c.jid.split('@')[0]);
+        ta.value = String(t.body || '').replace(/\{name\}/g, name || 'there').replace(/\{first_name\}/g, name.split(/\s+/)[0] || 'there').replace(/\{phone\}/g, c.jid.split('@')[0]);
         if (t.attachment?.url) toast('This template has a file — send it from the Board or via the AI, or attach it here');
         ta.focus();
       }) }, h('option', { value: '' }, '📝'));

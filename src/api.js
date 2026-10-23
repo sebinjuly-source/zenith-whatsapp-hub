@@ -339,7 +339,7 @@ export function buildApp() {
   // ---- Contact lists (candidate batches) + follow-ups
   api.get('/lists', wrap(async (req, res) => {
     // ?archived=1 includes archived lists
-    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1)', [req.query.account || null])) await lists.refreshList(l.id);
+    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND ($2 OR archived IS NULL)', [req.query.account || null, req.query.archived === '1'])) await lists.refreshList(l.id);
     res.json(await lists.listLists(req.query.account, req.query.role, { includeArchived: req.query.archived === '1' }));
   }));
   // Create/extend a list: { account, name, since?, source?, members: [{ phone, name, message?, ...fields }], followup? }

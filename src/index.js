@@ -18,7 +18,17 @@ async function main() {
   // Automatic follow-ups (and fresh list statuses) every 10 minutes
   const { runFollowups, runPipeline } = await import('./lists.js');
   const { syncBoard, lastSync } = await import('./board.js');
+  let ticking = false; // a slow run (big lists, slow database) must not overlap the next one
   const tick = async () => {
+    if (ticking) return logger.warn('Previous 10-minute check still running — skipped this one');
+    ticking = true;
+    try {
+      await runTick();
+    } finally {
+      ticking = false;
+    }
+  };
+  const runTick = async () => {
     await runPipeline().catch((err) => logger.error({ err: err.message }, 'pipeline failed')); // warm leads first
     await runFollowups().catch((err) => logger.error({ err: err.message }, 'follow-ups failed'));
     // Re-check the board: unanswered candidate replies, visit dates, reminders — nothing may wait unseen

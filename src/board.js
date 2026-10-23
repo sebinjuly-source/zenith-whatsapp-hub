@@ -14,6 +14,8 @@ import config from './config.js';
 const CLOSED_STAGES = ['joined', 'not_interested', 'rejected'];
 const CLOSED_OUTCOME = /^\s*(rejected|not[\s-]?interested|hired|joined|do[\s-]?not[\s-]?contact)/i;
 const isClosed = (m) => CLOSED_STAGES.includes(m.stage) || CLOSED_OUTCOME.test(m.outcome || '');
+/** An interview is planned: a visit date and they haven't come yet (stage interested/date_given or none) and aren't closed. */
+export const hasVisit = (m) => !!m?.visit_at && !isClosed(m) && (!m.stage || ['interested', 'date_given'].includes(m.stage));
 const when = (t) => new Date(t).toLocaleString('en-IN', { timeZone: config.tz, weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 const phone = (jid) => String(jid).split('@')[0];
 
@@ -80,14 +82,14 @@ export async function noteSent(accountId, jids) {
 /** Follow-up card for one person: due at followup_at, for the AI to message them (gone if cleared or they're closed). */
 export async function syncFollowup(list, m) {
   const ref = `followup:${list.id}:${m.jid}`;
-  if (m.followup_at && !isClosed(m) && !(m.stage === 'date_given' && m.visit_at && new Date(m.visit_at) > new Date())) {
+  if (m.followup_at && !isClosed(m) && !(hasVisit(m) && new Date(m.visit_at) > new Date())) {
     return upsertRefTask(ref, {
       account: list.account_id, kind: 'followup', role: list.role, assignee: 'ai', dueAt: new Date(m.followup_at).toISOString(),
       title: `Follow up: ${m.name || phone(m.jid)} — ${when(m.followup_at)}`,
       details: `${m.followup_note || 'Said they will be free around then.'} · ${list.name} · +${phone(m.jid)}. Message them to fix the day and time for the interview.`,
     });
   }
-  return closeRefTasks([ref], 'cancelled', isClosed(m) ? `stage ${m.stage || m.outcome}` : m.stage === 'date_given' && m.visit_at ? 'interview date set instead' : 'follow-up date cleared');
+  return closeRefTasks([ref], 'cancelled', isClosed(m) ? `stage ${m.stage || m.outcome}` : hasVisit(m) ? 'interview date set instead' : 'follow-up date cleared');
 }
 
 /** Single messages waiting to go out more than 15 minutes from now get a card, so nothing scheduled is invisible. */
@@ -101,7 +103,7 @@ export async function syncScheduled() {
      WHERE o.task_id IS NULL AND o.status IN ('queued','draft') AND o.scheduled_at > now() + interval '15 minutes'`,
   );
   for (const o of rows) {
-    const text = (o.payload?.text || (o.payload?.waTemplate ? `Meta template "${o.payload.waTemplate.name}"` : '[file]')).replace(/s+/g, ' ').slice(0, 120);
+    const text = (o.payload?.text || (o.payload?.waTemplate ? `Meta template "${o.payload.waTemplate.name}"` : '[file]')).replace(/\s+/g, ' ').slice(0, 120);
     await upsertRefTask(`sched:${o.id}`, {
       account: o.account_id, kind: 'scheduled', assignee: o.status === 'draft' ? 'you' : 'ai', dueAt: new Date(o.scheduled_at).toISOString(),
       title: `Scheduled: message to ${o.name || phone(o.to_jid)} — ${when(o.scheduled_at)}`,
@@ -119,7 +121,7 @@ export async function syncScheduled() {
 /** Visit card for one person (called when a visit date or stage changes). */
 export async function syncVisit(list, m) {
   const ref = `visit:${list.id}:${m.jid}`;
-  if (m.stage === 'date_given' && m.visit_at) {
+  if (hasVisit(m)) {
     return upsertRefTask(ref, {
       account: list.account_id, kind: 'visit', role: list.role, assignee: 'you', priority: true, dueAt: new Date(m.visit_at).toISOString(),
       title: `Interview: ${m.name || phone(m.jid)} — ${when(m.visit_at)}`,
@@ -216,14 +218,14 @@ export async function syncBoard() {
   // visits: every date set; cards whose person moved on are closed
   const visits = await query(
     `SELECT m.*, l.account_id, l.name AS list_name, l.role FROM list_members m JOIN lists l ON l.id = m.list_id
-     WHERE m.stage = 'date_given' AND m.visit_at > now() - interval '2 days'`,
+     WHERE COALESCE(m.stage, 'date_given') IN ('interested', 'date_given') AND m.visit_at > now() - interval '2 days'`,
   );
   for (const v of visits) await syncVisit({ id: v.list_id, account_id: v.account_id, name: v.list_name, role: v.role }, v);
   const openVisits = await query(`SELECT ref FROM tasks WHERE ref LIKE 'visit:%' AND status NOT IN ('done','cancelled')`);
   for (const t of openVisits) {
     const [, listId, jid] = t.ref.split(':');
     const [m] = await query(`SELECT m.*, l.account_id, l.name AS list_name, l.role FROM list_members m JOIN lists l ON l.id = m.list_id WHERE m.list_id = $1 AND m.jid = $2`, [listId, jid]);
-    if (!m || m.stage !== 'date_given' || !m.visit_at) await syncVisit({ id: Number(listId), account_id: m?.account_id }, m || { jid, stage: null });
+    if (!hasVisit(m)) await syncVisit({ id: Number(listId), account_id: m?.account_id }, m || { jid, stage: null });
   }
   // follow-ups: every date set; cards whose person moved on (or got a visit date) are closed
   const fus = await query(

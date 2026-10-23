@@ -508,7 +508,7 @@ function buildServer(playbook = '') {
     const rows = await outbox.listOutbox({ account: a.account, status: a.status || 'draft,queued,failed', limit: a.limit || 20, role: a.campaign });
     const p = await priceRows(rows, manager);
     return rows.length
-      ? rows.map((r, i) => `#${r.id} | ${r.account_id} | ${r.status} | ${money(p.items[i].price, p.currency)} | ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${trim(r.payload.text || r.payload.attachment?.caption || '[file]', 100)}${r.error ? ` | error: ${r.error}${helpFor(r.error)}` : ''}`).join('\n')
+      ? rows.map((r, i) => `#${r.id} | ${r.account_id} | ${r.status}${['draft', 'queued'].includes(r.status) && new Date(r.scheduled_at) > new Date(Date.now() + 60000) ? ` (for ${d(r.scheduled_at)})` : ''}${r.campaign ? ` | ${r.campaign}` : ''} | ${money(p.items[i].price, p.currency)} | ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${trim(r.payload.text || r.payload.attachment?.caption || '[file]', 100)}${r.error ? ` | error: ${r.error}${helpFor(r.error)}` : ''}`).join('\n')
         + `\nTotal of these: ${money(p.total, p.currency)}`
       : 'Nothing.';
   });
@@ -671,7 +671,7 @@ function buildServer(playbook = '') {
     const jid = await resolveChat(s.id, a.chat);
     let until;
     if (a.state === 'snoozed') {
-      until = a.until ? new Date(a.until).toISOString() : a.in_days ? new Date(Date.now() + a.in_days * 86400000).toISOString() : null;
+      until = a.until ? new Date(localTime(a.until)).toISOString() : a.in_days ? new Date(Date.now() + a.in_days * 86400000).toISOString() : null;
       if (!until) return 'For a reminder give until or in_days.';
     }
     await store.setChatState(s.id, jid, a.state, { until, note: a.note });
@@ -796,7 +796,7 @@ function buildServer(playbook = '') {
     schedule_at: z.string().optional().describe('Start sending at this time (ISO, e.g. 2026-10-22T09:00:00+05:30); default now'),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, waTemplate: a.wa_template, onlyPhones: a.only_phones, createdBy: 'ai', source: 'mcp', scheduledAt: a.schedule_at });
+    const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, waTemplate: a.wa_template, onlyPhones: a.only_phones, createdBy: 'ai', source: 'mcp', scheduledAt: localTime(a.schedule_at) || undefined });
     await ai(l.account_id, `List "${l.name}": ${r.queued} messages ${r.mode === 'approve' ? 'drafted' : 'queued'}`, l.role);
     const skipped = r.skipped.length ? ` Skipped: ${r.skipped.map((x) => x.to + ' (' + x.reason + ')').join('; ')}` : '';
     const cost = r.task ? await taskCostText(r.task.id) : '';
@@ -842,7 +842,7 @@ function buildServer(playbook = '') {
     account: z.string().optional(), role: z.string().optional(),
   }, async (a) => {
     const acc = a.account ? (await manager.resolve(a.account)).id : null;
-    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1)', [acc])) await lists.refreshList(l.id);
+    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND archived IS NULL', [acc])) await lists.refreshList(l.id);
     const { counts, visits } = await lists.pipelineSummary(acc, a.role);
     const byList = {};
     for (const c of counts) (byList[c.name] ||= []).push(`${c.stage}: ${c.n}`);
@@ -924,7 +924,7 @@ function buildServer(playbook = '') {
     due_now: z.boolean().optional().describe('Only cards due by now (plus 1 hour)'),
     owner_notes: z.boolean().optional().describe('Only cards where the owner wrote a note the AI has not acted on yet — act on each (follow-up date, scheduled message, draft, …), then add_task_note saying what you did'),
   }, async (a) => {
-    let rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role, assignee: a.for,
+    let rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role, assignee: a.for, limit: 500,
       dueBefore: a.due_now ? new Date(Date.now() + 3600000) : undefined });
     if (a.kind) rows = rows.filter((t) => t.kind === a.kind);
     if (a.owner_notes) {
@@ -1000,7 +1000,7 @@ function buildServer(playbook = '') {
       const r = await outbox.bulkSend({
         account: a.account, title: a.title, details: a.details, text: a.text, template: a.template, waTemplate: a.wa_template, recipients: a.recipients,
         attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : undefined,
-        scheduledAt: a.schedule_at, source: 'mcp', createdBy: 'ai',
+        scheduledAt: localTime(a.schedule_at) || undefined, source: 'mcp', createdBy: 'ai',
         skipIfContactedDays: a.skip_if_contacted_days ?? 30, allowRepeat: a.skip_if_contacted_days === 0, idemKey: a.idempotency_key,
       });
       if (r.duplicate) return `Already created earlier as task #${r.task.id} — nothing new queued.`;
