@@ -964,13 +964,24 @@
             }) }, `✅ Approve ${t.drafts}`)
           : t.total ? h('button', { class: 'btn small', onclick: () => { state.outboxTask = t.id; state.outboxTab = 'all'; location.hash = 'outbox'; } }, '✉️ Messages') : null;
       const closed = ['done', 'cancelled'].includes(t.status);
-      const doneBtn = closed ? null : h('button', { class: 'btn small', title: 'Mark done', onclick: guard(async () => {
+      // a note typed in the box is never lost: it is saved before the card is closed, moved or flagged
+      const flushNote = async () => {
+        const text = noteIn?.value.trim();
+        if (!text || noteIn.dataset.saved === text) return;
+        await api(`/api/tasks/${t.id}/notes`, { body: { text } });
+        noteIn.dataset.saved = text;
+        noteIn.value = '';
+        toast('Note saved');
+      };
+      const doneBtn = closed ? null : h('button', { class: 'btn small', title: 'Mark done (a note you typed is saved first)', onclick: guard(async () => {
+        await flushNote();
         await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: 'done' } });
         viewBoard();
       }) }, '✓ Done');
       // More: details, latest note, history & notes, flag, move
       const logBox = h('div', { style: 'font-size:12px;margin-top:6px' });
-      const noteIn = h('textarea', { rows: 2, placeholder: 'Add a note (e.g. call notes: what was discussed)', style: 'margin-top:6px' });
+      const noteIn = h('textarea', { rows: 2, placeholder: 'Add a note (e.g. call notes: what was discussed) — saved when you leave the box', style: 'margin-top:6px',
+        onblur: () => flushNote().then(() => loadLog()).catch((e) => toast(e.message)) });
       const loadLog = async () => {
         const rows = await api(`/api/tasks/${t.id}/log`).catch(() => []);
         logBox.replaceChildren(...(rows.length ? rows.map((r) => h('div', { style: `padding:3px 0;border-bottom:1px solid var(--line);${r.kind === 'note' ? 'font-weight:600' : ''}` },
@@ -979,6 +990,7 @@
       };
       const move = h('select', { 'aria-label': 'Move task', class: 'small-select', onchange: guard(async (e) => {
         const v = e.target.value;
+        await flushNote();
         if (v === 'cancelled') {
           if (!confirm('Cancel this task and its unsent messages?')) return (e.target.value = '');
           await api(`/api/tasks/${t.id}/cancel`, { method: 'POST' });
@@ -990,7 +1002,7 @@
         h('summary', {}, t.notes ? `More · 📝 ${t.notes}` : 'More'),
         t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, t.details) : null,
         closed ? null : h('div', { class: 'row', style: 'margin:6px 0' },
-          h('button', { class: 'btn small', onclick: guard(async () => { await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { priority: !t.priority } }); viewBoard(); }) }, t.priority ? '☆ Remove priority' : '⭐ Make priority'),
+          h('button', { class: 'btn small', onclick: guard(async () => { await flushNote(); await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { priority: !t.priority } }); viewBoard(); }) }, t.priority ? '☆ Remove priority' : '⭐ Make priority'),
           move),
         h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, 'History & notes'),
         logBox,
