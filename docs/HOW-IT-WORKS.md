@@ -202,7 +202,7 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
 - Failures are shown with a plain reason (WhatsApp/Meta error codes translated); Meta's actual delivery events are
   kept 14 days.
 - Alerts by WhatsApp when a number is logged out or offline 15+ minutes.
-- Tests: `npm test` (90 end-to-end tests, including a fake Meta server).
+- Tests: `npm test` (92 end-to-end tests, including a fake Meta server).
 
 ---
 
@@ -217,6 +217,12 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
 4. `startOutbox()` (`outbox.js`) sweeps sends stuck in "sending" and starts one sender loop per number.
 5. After 1 min and then every 10 min: `runPipeline` → `runFollowups` (`lists.js`) → `syncBoard` (`board.js`).
    A run never overlaps the previous one; the result of `syncBoard` is `/health → board`.
+
+### 10.1b Country and time zone
+`TZ_NAME` (default Asia/Kolkata) decides sending hours, follow-up times and how any typed date without a zone is
+read (`util.localDate` — the server itself runs in UTC). `COUNTRY_CODE` + `LOCAL_NUMBER_LENGTH` (default 91 + 10)
+decide what a bare local number becomes (`store.toJid`). Meta senders who use a WhatsApp username and hide
+their number arrive as `<user id>@bsuid` chats.
 
 ### 10.2 One server per linked number (leases)
 A linked number may only be connected from one server. `session.js` claims `accounts.lease_owner` for 90 s and
@@ -291,7 +297,7 @@ lists first); `roleFilter` turns a picked campaign ("none" = on no list) into SQ
 ### 10.10 Debugging recipes
 | Symptom | Look at |
 |---|---|
-| "Errors on the hub" | `recent_activity(who="system")` / Activity page: failed follow-ups, Meta holds, disconnects, rule failures |
+| "Errors on the hub" | Activity → ⚠️ Only problems (`/api/events?problems=1`) or `recent_activity(who="system")`: failed follow-ups, Meta holds, disconnects, rule failures |
 | Message not going out | hub_overview "sending: held — reason"; `list_outbox status=queued` (scheduled time shown) |
 | Meta message failed | the draft card's "what to do"; `meta_health_check`; `message_timeline <phone>` |
 | Card missing / closed | `task_history <id>` (who closed it and why); `/health → board` (last re-check) |

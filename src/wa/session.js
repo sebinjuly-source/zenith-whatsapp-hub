@@ -312,7 +312,7 @@ export class Session extends EventEmitter {
     const was = this.reachout?.isActive;
     this.reachout = next;
     if (next.isActive && !was) {
-      const when = until ? new Date(until).toLocaleString('en-IN', { timeZone: process.env.TZ_NAME || 'Asia/Kolkata' }) : 'unknown';
+      const when = until ? new Date(until).toLocaleString('en-IN', { timeZone: config.tz }) : 'unknown';
       await logEvent(this.id, 'warn', `WhatsApp says this number may not message new people until ${when}. Messages to new numbers wait; existing chats continue.`);
     } else if (!next.isActive && was) await logEvent(this.id, 'info', 'WhatsApp lifted the block on messaging new people.');
     this.emit('change', this.info());

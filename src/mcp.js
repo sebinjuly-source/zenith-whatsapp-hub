@@ -13,7 +13,7 @@ import { query } from './db.js';
 import { manager } from './wa/manager.js';
 import * as store from './store.js';
 import * as outbox from './outbox.js';
-import { toTs } from './util.js';
+import { toTs, localDate } from './util.js';
 import * as tasks from './tasks.js';
 import * as templates from './templates.js';
 import * as rules from './rules.js';
@@ -48,15 +48,14 @@ const safe = (fn) => async (args) => {
   }
 };
 
-/** "YYYY-MM-DD" → 10:00; no timezone given → India time. '' stays '' (clear), undefined stays undefined. */
+/** "YYYY-MM-DD" → 10:00; no timezone given → the owner's time zone (TZ_NAME). '' stays '' (clear), undefined stays undefined. */
 const localTime = (v) => {
   if (v === undefined || v === null) return undefined;
-  let t = String(v).trim();
+  const t = String(v).trim();
   if (!t) return '';
-  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) t += ' 10:00';
-  if (!/[zZ]|[+-]\d\d:?\d\d$/.test(t)) t = t.replace(' ', 'T') + '+05:30';
-  if (isNaN(new Date(t))) throw new Error(`Could not read the date "${v}" — use YYYY-MM-DD HH:MM`);
-  return t;
+  const d = localDate(t);
+  if (!d || isNaN(d)) throw new Error(`Could not read the date "${v}" — use YYYY-MM-DD HH:MM`);
+  return d.toISOString();
 };
 /** "What to do" for an error that carries a Meta code, e.g. "(Meta 131049)". */
 let metaHelpFn = null;
@@ -79,8 +78,8 @@ async function sendingLine(a) {
         `SELECT count(*) FILTER (WHERE payload->'pricing'->>'category' = 'marketing')::int AS mk,
                 count(*) FILTER (WHERE payload->'pricing'->>'category' IN ('utility','authentication'))::int AS ut
          FROM meta_events WHERE account_id = $1 AND kind = 'status' AND status = 'sent' AND (payload->'pricing'->>'billable')::boolean
-           AND created_at >= date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata'`,
-        [a.id],
+           AND created_at >= date_trunc('day', now() AT TIME ZONE $2) AT TIME ZONE $2`,
+        [a.id, config.tz],
       );
       parts.push(`Meta budget today: ${Math.max(0, nc.limit - nc.count)} of ${nc.limit} new people left; spent today ≈ ${money(c.mk * pr.marketing + c.ut * pr.utility, pr.currency)} (${c.mk} marketing, ${c.ut} utility); health ${a.cloud?.canSend || '?'}, quality ${a.cloud?.quality || '?'}`);
     }
@@ -793,7 +792,7 @@ function buildServer(playbook = '') {
     list: listArg, statuses: z.array(z.enum(['new', 'failed', 'sent', 'replied'])).optional(),
     text: z.string().optional(), template: z.string().optional(), only_phones: z.array(z.string()).optional(),
     wa_template: waTemplateArg.describe('Meta Cloud API numbers: the approved Meta template for people who have not written in 24 h (all first messages)'),
-    schedule_at: z.string().optional().describe('Start sending at this time (ISO, e.g. 2026-10-22T09:00:00+05:30); default now'),
+    schedule_at: z.string().optional().describe('Start sending at this time ("YYYY-MM-DD HH:MM", owner time zone, or ISO); default now'),
   }, async (a) => {
     const l = await lists.getList(a.list);
     const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, waTemplate: a.wa_template, onlyPhones: a.only_phones, createdBy: 'ai', source: 'mcp', scheduledAt: localTime(a.schedule_at) || undefined });

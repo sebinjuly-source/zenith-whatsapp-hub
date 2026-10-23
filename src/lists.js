@@ -19,6 +19,7 @@ import { createTask, refreshTask, fillTemplate } from './tasks.js';
 import { getTemplate } from './templates.js';
 import { afterTime } from './settings.js';
 import config from './config.js';
+import { localDate } from './util.js';
 
 export const STATUSES = ['new', 'queued', 'sent', 'replied', 'failed', 'opted_out'];
 
@@ -324,10 +325,10 @@ export async function listMembers(listId, { status, outcome, limit = 500 } = {})
  * the day before at 10:00 India time — or in an hour if that has already passed.
  */
 export function followupBefore(availableFrom) {
-  const d = new Date(availableFrom);
-  if (isNaN(d)) throw new Error('Could not read the date they will be available');
+  const d = availableFrom instanceof Date ? availableFrom : localDate(availableFrom); // "2026-11-10" = that day, owner's time
+  if (!d || isNaN(d)) throw new Error('Could not read the date they will be available');
   const day = new Date(d.getTime() - 86400000).toLocaleDateString('en-CA', { timeZone: config.tz });
-  const at = new Date(`${day}T10:00:00+05:30`);
+  const at = localDate(`${day} 10:00`);
   return at > new Date() ? at : new Date(Date.now() + 3600000);
 }
 
@@ -420,7 +421,7 @@ async function chatAccountFor(list, jid) {
   return r?.account_id || list.account_id;
 }
 
-const fmtVisit = (t) => new Date(t).toLocaleString('en-IN', { timeZone: process.env.TZ_NAME || 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+const fmtVisit = (t) => new Date(t).toLocaleString('en-IN', { timeZone: config.tz, weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 
 /**
  * Warm-lead automation (runs with follow-ups every 10 min, on the server holding the number):
@@ -605,7 +606,7 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
  */
 export async function runFollowups() {
   const lists = await query(`SELECT * FROM lists WHERE (followup->>'enabled')::boolean AND archived IS NULL`);
-  const tz = process.env.TZ_NAME || 'Asia/Kolkata';
+  const tz = config.tz;
   // Per number (shared by all lists): may it send follow-ups now, and how many more today?
   const numbers = new Map();
   const numberState = async (id) => {
@@ -701,7 +702,7 @@ export async function runFollowups() {
 export async function exportRows(listId) {
   await refreshList(listId);
   const rows = await listMembers(listId);
-  const d = (t) => (t ? new Date(t).toLocaleString('en-GB', { timeZone: process.env.TZ_NAME || 'Asia/Kolkata' }).slice(0, 17) : '');
+  const d = (t) => (t ? new Date(t).toLocaleString('en-GB', { timeZone: config.tz }).slice(0, 17) : '');
   return rows.map((m) => ({
     phone: m.phone, name: m.name, row: m.row_ref, status: m.status, outcome: m.outcome || '', notes: m.notes || '',
     first_sent: d(m.first_sent_at), last_sent: d(m.last_sent_at), last_reply: d(m.last_reply_at), replies: m.replies,

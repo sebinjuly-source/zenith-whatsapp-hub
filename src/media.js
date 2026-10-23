@@ -86,11 +86,16 @@ export async function loadOutgoing({ url, base64, mimetype, fileName }) {
   const fetchUrl = drive ? `https://drive.google.com/uc?export=view&id=${drive[1]}` : url;
   const res = await fetch(fetchUrl, { redirect: 'follow', signal: AbortSignal.timeout(60000) });
   if (!res.ok) throw new Error(`Could not download attachment (${res.status})`);
-  const buffer = Buffer.from(await res.arrayBuffer());
   const ctype = (res.headers.get('content-type') || '').split(';')[0];
+  // A Drive file that isn't shared "Anyone with the link" answers with Google's sign-in/preview page (HTML):
+  // never send that page to someone as the "file".
+  if (drive && ctype === 'text/html') throw new Error('The Google Drive file is not shared publicly — set sharing to "Anyone with the link" and try again');
+  if (Number(res.headers.get('content-length')) > 100 * 1024 * 1024) throw new Error('The file is larger than 100 MB — WhatsApp won\'t accept it');
+  const buffer = Buffer.from(await res.arrayBuffer());
   const disp = res.headers.get('content-disposition') || '';
   const dispName = disp.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i)?.[1];
-  let name = fileName || (dispName && decodeURIComponent(dispName)) || decodeURIComponent(new URL(url).pathname.split('/').pop() || '') || 'file';
+  const decode = (s) => { try { return decodeURIComponent(s); } catch { return s; } }; // "100%.pdf" is not valid %-encoding
+  let name = fileName || (dispName && decode(dispName)) || decode(new URL(url).pathname.split('/').pop() || '') || 'file';
   const type = mimetype || (ctype && ctype !== 'application/octet-stream' ? ctype : mime.lookup(name) || 'application/octet-stream');
   // Links like Drive's ".../uc" carry no extension — add one so the file opens on the phone.
   if (!/\.[a-z0-9]{2,5}$/i.test(name) && mime.extension(type)) name = `${name === 'uc' || name === 'view' ? 'file' : name}.${mime.extension(type)}`;

@@ -159,7 +159,8 @@ export async function buildTemplateMessage(wabaId, waTemplate, { allowPending = 
   if (d.vars.length) {
     components.push({
       type: 'body',
-      parameters: d.vars.map((v, i) => ({ type: 'text', text: String(values[i]).replace(/\s*\n\s*/g, ' ').slice(0, 1024), ...(d.named ? { parameter_name: v } : {}) })),
+      // Meta refuses new lines, tabs and 4+ spaces in a fill-in value
+      parameters: d.vars.map((v, i) => ({ type: 'text', text: String(values[i]).replace(/\s*\n\s*/g, ' ').replace(/\t/g, ' ').replace(/ {4,}/g, '   ').slice(0, 1024), ...(d.named ? { parameter_name: v } : {}) })),
     });
   }
   d.buttons.forEach((b, i) => {
@@ -173,7 +174,8 @@ export async function buildTemplateMessage(wabaId, waTemplate, { allowPending = 
     const i = d.vars.indexOf(k);
     return i >= 0 ? String(values[i]) : m;
   });
-  const preview = [d.headerText ? fill(d.headerText).replace(VAR, () => String(waTemplate.header || '')) : null, fill(d.body), d.footer]
+  // the header's own {{1}} is the header value, not body value 1
+  const preview = [d.headerText ? d.headerText.replace(VAR, () => String(waTemplate.header || '')) : null, fill(d.body), d.footer]
     .filter(Boolean).join('\n\n');
   return { template: { name: t.name, language: { code: t.language }, ...(components.length ? { components } : {}) }, preview, row: t };
 }

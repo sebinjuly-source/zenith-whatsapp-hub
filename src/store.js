@@ -6,6 +6,7 @@
 import { jidNormalizedUser, isLidUser, isJidGroup } from '@whiskeysockets/baileys';
 import { query, insertMany } from './db.js';
 import { roleOf, roleFilter } from './campaign.js';
+import config from './config.js';
 
 export const phoneOf = (jid) => (jid && jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0] : null);
 
@@ -13,8 +14,9 @@ export function toJid(phoneOrJid) {
   const s = String(phoneOrJid).trim();
   if (s.includes('@')) return jidNormalizedUser(s);
   let digits = s.replace(/\D/g, '');
-  if (digits.length === 10) digits = '91' + digits; // bare Indian mobile number
-  if (digits.length === 11 && digits.startsWith('0')) digits = '91' + digits.slice(1);
+  // a bare local number (or one with a leading 0) gets the owner's country code (COUNTRY_CODE, default 91)
+  if (digits.length === config.localLen) digits = config.countryCode + digits;
+  else if (digits.length === config.localLen + 1 && digits.startsWith('0')) digits = config.countryCode + digits.slice(1);
   return `${digits}@s.whatsapp.net`;
 }
 

@@ -14,6 +14,9 @@ const config = {
     bucket: process.env.SUPABASE_BUCKET || 'whatsapp-media',
   },
   tz: process.env.TZ_NAME || 'Asia/Kolkata',
+  // Numbers typed without a country code: a bare local number of this length gets this code (India: 91 + 10 digits)
+  countryCode: String(process.env.COUNTRY_CODE || '91').replace(/\D/g, ''),
+  localLen: parseInt(process.env.LOCAL_NUMBER_LENGTH || '10', 10),
   // Tests only: shrink send gaps (1 = real time).
   timeScale: parseFloat(process.env.TIME_SCALE || '1'),
   logLevel: process.env.LOG_LEVEL || 'info',

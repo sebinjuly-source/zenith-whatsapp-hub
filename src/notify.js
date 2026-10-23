@@ -7,14 +7,15 @@ import crypto from 'crypto';
 import config from './config.js';
 import logger from './logger.js';
 import { logEvent, query } from './db.js';
+import { toJid } from './store.js';
 
 /** Phones that get connection alerts: hub setting (Settings page) plus ALERT_PHONE env. */
 export async function alertPhones() {
   const [r] = await query(`SELECT value FROM config WHERE key = 'alerts'`).catch(() => []);
   const fromDb = r?.value?.phones || [];
   const fromEnv = (process.env.ALERT_PHONE || '').split(',');
-  return [...new Set([...fromDb, ...fromEnv].map((p) => String(p).replace(/\D/g, '')).filter((p) => p.length >= 10)
-    .map((p) => (p.length === 10 ? '91' + p : p)))];
+  return [...new Set([...fromDb, ...fromEnv].map((p) => String(p).replace(/\D/g, '')).filter((p) => p.length >= 8)
+    .map((p) => toJid(p).split('@')[0]))];
 }
 
 export async function setAlertPhones(phones) {

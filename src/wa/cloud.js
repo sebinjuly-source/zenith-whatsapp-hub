@@ -21,7 +21,17 @@ const WINDOW_SEC = 24 * 3600;
 const WEBHOOK_FIELDS = ['messages', 'message_template_status_update', 'phone_number_quality_update', 'account_update'];
 const STATUS = { sent: 2, delivered: 3, read: 4 }; // same scale as linked numbers (0 failed … 4 read)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const jidOf = (waId) => `${String(waId).replace(/\D/g, '')}@s.whatsapp.net`;
+/**
+ * Chat id for a Meta sender. Normally the phone number. People who use a WhatsApp username can hide it: Meta then
+ * sends only a business-scoped user id ("IN.AbC123"), kept as "<id>@bsuid" so each such person gets their own chat
+ * (stripping it to digits merged them all into one broken chat). Replies go to that id. (Pattern from Chatwoot.)
+ */
+export const jidOf = (waId, userId) => {
+  const digits = String(waId ?? '').replace(/\D/g, '');
+  if (digits) return `${digits}@s.whatsapp.net`;
+  const id = String(userId ?? '').replace(/[^A-Za-z0-9.]/g, '');
+  return id ? `${id}@bsuid` : null;
+};
 
 export const cloudConfigured = () => !!metaToken();
 
@@ -425,8 +435,8 @@ export class CloudSession extends Session {
   // Webhook (one "value" of entry[].changes[] with field = messages)
   // ---------------------------------------------------------------------------
   async onWebhook(value) {
-    const names = new Map((value.contacts || []).map((c) => [String(c.wa_id), c.profile?.name || null]));
-    if (names.size) await store.upsertContacts(this.id, [...names].map(([w, n]) => ({ jid: jidOf(w), notify: n })));
+    const names = new Map((value.contacts || []).map((c) => [jidOf(c.wa_id, c.user_id), c.profile?.name || null]).filter(([j]) => j));
+    if (names.size) await store.upsertContacts(this.id, [...names].map(([jid, n]) => ({ jid, notify: n })));
     const incoming = [];
     for (const m of value.messages || []) {
       await logMetaEvent(this.id, 'in', { wamid: m.id, peer: m.from, status: m.type, payload: m });
@@ -448,10 +458,14 @@ export class CloudSession extends Session {
 
   /** One Cloud API message → a stored row (or null for reactions etc., which are applied directly). */
   async rowFromCloud(m, names) {
-    const chatJid = jidOf(m.from);
+    const chatJid = jidOf(m.from, m.from_user_id);
+    if (!chatJid) {
+      this.log.warn({ id: m.id }, 'Meta message without a sender — skipped');
+      return null;
+    }
     const base = {
       id: m.id, fromMe: false, ts: Number(m.timestamp) || Math.floor(Date.now() / 1000), chatJid, senderJid: chatJid,
-      senderName: names.get(String(m.from)) || null, quotedId: m.context?.id || null, quotedBody: null,
+      senderName: names.get(chatJid) || null, quotedId: m.context?.id || null, quotedBody: null,
       forwarded: !!(m.context?.forwarded || m.context?.frequently_forwarded), forwardScore: m.context?.frequently_forwarded ? 5 : m.context?.forwarded ? 1 : 0,
       media: null, vcards: null, status: null, fromHistory: false, type: 'text', body: null,
     };

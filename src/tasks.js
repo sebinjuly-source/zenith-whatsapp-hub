@@ -6,6 +6,7 @@
 import { query } from './db.js';
 import { roleOf, roleFilter } from './campaign.js';
 import { toJid } from './store.js';
+import config from './config.js';
 
 export const COLUMNS = ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'];
 
@@ -96,8 +97,9 @@ const who = (a) => {
  * (so "Call Jagdish 9217687968" lands in the Chef campaign without anyone choosing it).
  */
 export async function guessRole(accountId, text) {
-  const phones = [...new Set(String(text || '').match(/(?:\+?91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}/g) || [])]
-    .map((p) => p.replace(/\D/g, '')).map((d) => (d.length === 10 ? '91' + d : d)).filter((d) => d.length === 12);
+  // any 8–15 digit number in the text (spaces/dashes allowed), local numbers get the country code
+  const phones = [...new Set(String(text || '').match(/\+?\d[\d\s-]{6,17}\d/g) || [])]
+    .map((p) => p.replace(/\D/g, '')).filter((d) => d.length >= 8 && d.length <= 15).map((d) => toJid(d).split('@')[0]);
   for (const d of phones) {
     const [r] = await query(`SELECT ${roleOf('$1', '$2')} AS role`, [accountId, `${d}@s.whatsapp.net`]);
     if (r?.role) return r.role;
@@ -126,7 +128,7 @@ export async function upsertRefTask(ref, { account, title, details, kind = 'todo
   if (open) {
     const was = open.due_at ? new Date(open.due_at).getTime() : null;
     const now = dueAt ? new Date(dueAt).getTime() : null;
-    if (was !== now) await logTask(open.id, `Due ${now ? new Date(now).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : 'cleared'}`);
+    if (was !== now) await logTask(open.id, `Due ${now ? new Date(now).toLocaleString('en-IN', { timeZone: config.tz, dateStyle: 'medium', timeStyle: 'short' }) : 'cleared'}`);
     const [row] = await query(
       `UPDATE tasks SET title = $2, details = $3, due_at = $4, account_id = $5, role = COALESCE($6, role), assignee = $7, priority = priority OR $8, updated_at = now() -- a priority the owner set stays
        WHERE id = $1 RETURNING *`,
@@ -174,7 +176,7 @@ export async function updateTask(id, { title, details, status, dueAt, assignee, 
     before && row.status !== before.status && `Moved to ${LABEL[row.status]}`,
     before && row.priority !== before.priority && (row.priority ? 'Marked priority' : 'Priority removed'),
     before && (row.assignee || 'you') !== (before.assignee || 'you') && `Now for ${row.assignee === 'ai' ? 'the AI' : 'the owner'}`,
-    before && String(row.due_at || '') !== String(before.due_at || '') && (row.due_at ? `Due ${new Date(row.due_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })}` : 'Due date removed'),
+    before && String(row.due_at || '') !== String(before.due_at || '') && (row.due_at ? `Due ${new Date(row.due_at).toLocaleString('en-IN', { timeZone: config.tz, dateStyle: 'medium', timeStyle: 'short' })}` : 'Due date removed'),
     title && 'Title edited',
     details && 'Details edited',
   ].filter(Boolean);

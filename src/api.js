@@ -673,18 +673,22 @@ export function buildApp() {
     // ?download=1 saves the file on the device (phones ignore 'open in new tab' for many types)
     const ext = (mimetype || '').split('/')[1]?.split(';')[0]?.replace('jpeg', 'jpg').replace('quicktime', 'mov') || 'bin';
     const fname = (row.media.fileName || `${jid.split('@')[0]}-${new Date(Number(row.ts) * 1000).toISOString().slice(0, 10)}-${msgId.slice(-6)}.${ext}`).replace(/["\\]/g, '');
-    res.setHeader('Content-Disposition', `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${fname}"`);
+    // Headers must be plain ASCII (a Hindi or accented file name made Node throw): ASCII fallback + the real name in filename*
+    const ascii = fname.replace(/[^\x20-\x7e]/g, '_');
+    res.setHeader('Content-Disposition', `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${ascii}"${ascii !== fname ? `; filename*=UTF-8''${encodeURIComponent(fname)}` : ''}`);
     res.setHeader('Cache-Control', 'private, max-age=86400');
     res.send(buffer);
   }));
 
   api.get('/events', wrap(async (req, res) => {
-    const p = [parseInt(req.query.limit, 10) || 100];
+    const p = [Math.min(parseInt(req.query.limit, 10) || 100, 1000)];
     const conds = [];
     if (req.query.account) {
       p.push(req.query.account);
       conds.push(`account_id = $${p.length}`);
     }
+    // ?problems=1 → only warnings and errors (the first place to look when "something is going wrong")
+    if (req.query.problems === '1') conds.push(`level IN ('warn','error')`);
     if (req.query.actor) {
       p.push(req.query.actor.split(','));
       conds.push(`actor = ANY($${p.length})`);

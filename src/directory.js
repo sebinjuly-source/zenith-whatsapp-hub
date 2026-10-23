@@ -7,6 +7,7 @@
  */
 import { query } from './db.js';
 import { toJid } from './store.js';
+import config from './config.js';
 
 export const SUGGESTED_GROUPS = [
   'Chef hiring – Referrers', 'Chef hiring – Referred', 'Front office hiring – Referrers', 'Front office hiring – Referred',
@@ -106,7 +107,7 @@ export async function noteSharedContacts(accountId, r) {
   const senderName = m?.name || ct?.name || r.senderName || r.chatJid.split('@')[0];
   const role = m?.role || null;
   const prefix = role ? `${role} hiring` : 'Referrals';
-  const day = new Date((Number(r.ts) || Date.now() / 1000) * 1000).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' });
+  const day = new Date((Number(r.ts) || Date.now() / 1000) * 1000).toLocaleDateString('en-IN', { timeZone: config.tz, day: 'numeric', month: 'short', year: 'numeric' });
   const { createTask } = await import('./tasks.js');
   let saved = 0;
   for (const v of r.vcards) {

@@ -774,8 +774,10 @@ test('pipeline: stages, visit dates, ask-for-date, visit reminder + owner tasks,
   await listsMod.runPipeline();
   const rows = await query(`SELECT to_jid, note, priority, status, payload FROM outbox WHERE list_id = $1 ORDER BY to_jid`, [l.id]);
   assert.deepEqual(rows.map((r) => [r.to_jid.slice(0, 12), r.note]), [['919500000001', 'ask-date'], ['919500000002', 'visit-reminder']]);
-  assert.match(rows[0].payload.text, /Ajay ji, aap kis din aa sakte hain/);
-  assert.match(rows[1].payload.text, /Bala ji, yaad dila rahe hain: aap .+ ko Zenith Suites/);
+  // the owner's own wording is set at setup: check it is filled in for each person, not the exact words
+  assert.match(rows[0].payload.text, /Ajay/);
+  assert.match(rows[1].payload.text, /Bala/);
+  assert.doesNotMatch(rows[0].payload.text + rows[1].payload.text, /\{\w+\}/, 'every {field} filled');
   assert.ok(rows.every((r) => r.priority === 5), 'warm leads before bulk (0) and follow-ups (-1)');
   const t = (await call('GET', '/api/tasks?account=hire3')).data.map((x) => x.title);
   assert.ok(t.some((x) => /^Interview: Bala/.test(x)), 'interview task for the owner');
@@ -835,8 +837,9 @@ test('playbook: stored in the hub, editable, and given to every AI client', asyn
   const r = await fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) });
   const init = await r.json();
-  assert.match(init.result.instructions, /Never give money/);
-  assert.match(await mcp('get_playbook'), /date_given/);
+  const { DEFAULT_PLAYBOOK } = await import('../src/playbook.js');
+  assert.ok(init.result.instructions.includes(DEFAULT_PLAYBOOK.split('\n')[0]), 'the playbook is in the MCP instructions');
+  assert.equal(await mcp('get_playbook'), DEFAULT_PLAYBOOK);
   await call('PUT', '/api/playbook', { text: 'RULE: always be polite.' });
   assert.equal(await mcp('get_playbook'), 'RULE: always be polite.');
   assert.match(await mcp('recent_activity', { who: 'script' }), /Updated the playbook/);
@@ -1507,4 +1510,41 @@ test('debug run 23 Oct: reply drafts don\'t hold follow-ups; a visit date always
   // an AI to-do without a date shows in due_now
   await mcp('create_task', { account: 'dbg1', title: 'Send Ravi the menu', for: 'ai' });
   assert.match(await mcp('list_tasks', { for: 'ai', due_now: true, account: 'dbg1' }), /Send Ravi the menu/);
+});
+
+test('debug run 2: files with Hindi names download; Activity can show only problems', async () => {
+  const store = await import('../src/store.js');
+  await manager.create({ id: 'dbg2', label: 'Dbg2' });
+  fake('dbg2');
+  await store.insertMessages('dbg2', [{ id: 'HN1', fromMe: false, ts: Math.floor(Date.now() / 1000), chatJid: '919733100001@s.whatsapp.net', type: 'document', body: null, forwarded: false,
+    media: { kind: 'documentMessage', mimetype: 'application/pdf', fileName: 'रिज्यूम Ravi.pdf' } }]);
+  manager.get('dbg2').downloadMedia = async () => Buffer.from('%PDF');
+  const res = await fetch(`${base}/api/media/dbg2/919733100001@s.whatsapp.net/HN1?download=1`, { headers: { 'x-api-key': 'k' } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-disposition'), /filename\*=UTF-8''%E0%A4/);
+  await query(`INSERT INTO events (account_id, level, text) VALUES ('dbg2','warn','Follow-ups for "X" failed: test'), ('dbg2','info','all good')`);
+  const probs = (await call('GET', '/api/events?account=dbg2&problems=1')).data;
+  assert.ok(probs.length >= 1 && probs.every((e) => ['warn', 'error'].includes(e.level)));
+  // Meta username senders (no phone) each get their own chat
+  const { jidOf } = await import('../src/wa/cloud.js');
+  assert.equal(jidOf('91 98765 43210'), '919876543210@s.whatsapp.net');
+  assert.equal(jidOf(undefined, 'IN.AbC123'), 'IN.AbC123@bsuid');
+  assert.equal(jidOf('', ''), null);
+});
+
+test('other countries: bare numbers get COUNTRY_CODE, typed times use TZ_NAME (template owners outside India)', async () => {
+  const config = (await import('../src/config.js')).default;
+  const { toJid } = await import('../src/store.js');
+  const { localDate } = await import('../src/util.js');
+  assert.equal(toJid('98765 43210'), '919876543210@s.whatsapp.net');
+  const saved = { cc: config.countryCode, len: config.localLen };
+  Object.assign(config, { countryCode: '971', localLen: 9 });
+  try {
+    assert.equal(toJid('501234567'), '971501234567@s.whatsapp.net');
+    assert.equal(toJid('0501234567'), '971501234567@s.whatsapp.net');
+  } finally {
+    Object.assign(config, { countryCode: saved.cc, localLen: saved.len });
+  }
+  assert.equal(localDate('2026-10-25 10:00', 'Asia/Kolkata').toISOString(), '2026-10-25T04:30:00.000Z');
+  assert.equal(localDate('2026-10-25', 'Asia/Dubai').toISOString(), '2026-10-25T06:00:00.000Z');
 });

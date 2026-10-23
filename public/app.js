@@ -88,7 +88,7 @@
     const draw = () => {
       const t = list.find((x) => `${x.name}|${x.language}` === sel.value);
       fill(boxes, !t ? null : [
-        h('div', { class: 'muted', style: 'white-space:pre-wrap;font-size:13px;margin:6px 0;padding:8px;background:var(--soft, #f5f5f5);border-radius:8px' }, t.body),
+        h('div', { class: 'muted', style: 'white-space:pre-wrap;font-size:13px;margin:6px 0;padding:8px;background:var(--panel-2);border-radius:8px' }, t.body),
         ['IMAGE', 'DOCUMENT', 'VIDEO'].includes(t.headerFormat) || /\{\{/.test(t.headerText || '')
           ? h('label', { class: 'field' }, h('span', {}, t.headerFormat === 'TEXT' ? 'Header text' : `Header ${t.headerFormat.toLowerCase()} (public link)`), h('input', { type: 'text', 'data-header': '1', value: current?.header || '' })) : null,
         t.vars.map((v, i) => h('label', { class: 'field' }, h('span', {}, `{{${v}}}`),
@@ -646,9 +646,11 @@
       );
       // Arrived from a Board card: open that conversation straight away
       if (ib.open) {
-        const c = chats.find((x) => x.jid === ib.open);
+        const want = ib.open;
+        const c = chats.find((x) => x.jid === want);
         ib.open = null;
-        if (c) openChat(c);
+        // not in this filtered list (closed chat, other campaign): open it anyway — the card asked for it
+        openChat(c || { jid: want, name: ib.q && !/^\d+$/.test(ib.q) ? ib.q : want.split('@')[0], is_group: want.endsWith('@g.us') });
       }
     }
 
@@ -680,7 +682,9 @@
           ? h('button', { class: 'btn small', title: 'Hide this chat until a date, then show it as a reminder', onclick: guard(async () => {
               const when = prompt('Remind me on (YYYY-MM-DD, optionally HH:MM) or in how many days (e.g. 3):', '1');
               if (!when) return;
-              const until = /^\d+$/.test(when.trim()) ? new Date(Date.now() + Number(when) * 86400000) : new Date(when.replace(' ', 'T'));
+              const w = when.trim();
+              // a date alone means 10:00 that day (local time), not midnight UTC
+              const until = /^\d+$/.test(w) ? new Date(Date.now() + Number(w) * 86400000) : new Date(/^\d{4}-\d{2}-\d{2}$/.test(w) ? `${w}T10:00` : w.replace(' ', 'T'));
               if (isNaN(until)) return toast('Could not read that date');
               const note = prompt('What to do then? (optional)', '') || undefined;
               await api(`/api/accounts/${ib.account}/chats/${encodeURIComponent(c.jid)}/state`, { method: 'PATCH', body: { state: 'snoozed', until: until.toISOString(), note } });
@@ -698,7 +702,12 @@
           toast(r.note);
         }) }, '⤓ Older messages from phone'),
       );
-      document.addEventListener('click', (e) => { if (!actions.hidden && !actions.contains(e.target)) actions.hidden = true; });
+      // one document listener for the whole page (adding one per opened chat piled them up)
+      state.closeChatMenu = (e) => { if (!actions.hidden && !actions.contains(e.target)) actions.hidden = true; };
+      if (!state.chatMenuListener) {
+        state.chatMenuListener = true;
+        document.addEventListener('click', (e) => state.closeChatMenu?.(e));
+      }
       const fileIn = h('input', { type: 'file', hidden: true });
       const ta = h('textarea', { rows: 1, placeholder: 'Type a message', 'aria-label': 'Message' });
       const fileLabel = h('span', { class: 'muted' });
@@ -869,7 +878,7 @@
             : null;
           const vcards = (m.vcards || []).map((v) => h('div', { class: 'tag', style: 'display:inline-flex;gap:8px;align-items:center' },
             `👤 ${v.name}${v.org ? ' · ' + v.org : ''} ${v.phones.map((p) => '+' + p).join(', ')}`,
-            v.phones.length ? h('button', { class: 'btn small', type: 'button', title: 'Save this contact', onclick: () => contactDialog(ib.account, { phone: v.phones[0], name: v.name, group: 'Chef hiring – Referred', reason: `Referred by ${c.name || c.jid.split('@')[0]}` }) }, '💾 Save') : null));
+            v.phones.length ? h('button', { class: 'btn small', type: 'button', title: 'Save this contact', onclick: () => contactDialog(ib.account, { phone: v.phones[0], name: v.name, group: c.campaign && c.campaign !== 'none' ? `${c.campaign} hiring – Referred` : 'Referrals – Referred', reason: `Referred by ${c.name || c.jid.split('@')[0]}` }) }, '💾 Save') : null));
           nodes.push(h('div', { class: 'msg' + (m.from_me ? ' me' : '') + (m.deleted ? ' deleted' : '') },
             c.is_group && !m.from_me ? h('div', { class: 's' }, m.sender_name || (m.sender_jid || '').split('@')[0]) : null,
             m.quoted_body ? h('div', { class: 'q' }, m.quoted_body) : null,
@@ -1251,7 +1260,9 @@
           return { phone: phone.trim(), name: (name || '').trim() || undefined, message: msg.join(',').trim() || undefined };
         });
         const r = await api('/api/lists/import', { body: { account: f.account.value, name: f.name.value, role: f.role.value || undefined, since: f.since.value || undefined, members } });
-        toast(`Imported ${r.imported}${r.skipped.length ? `, skipped ${r.skipped.length}` : ''}`);
+        // who was skipped and why (already on an earlier list, bad number…) — check it against the source file
+        if (r.skipped.length) alert(`Imported ${r.imported} (${r.added.length} new, ${r.updated.length} updated). Skipped ${r.skipped.length}:\n` + r.skipped.map((x) => `${x.row}${x.phone ? ' +' + x.phone : ''} — ${x.reason}`).join('\n'));
+        else toast(`Imported ${r.imported} (${r.added.length} new, ${r.updated.length} updated)`);
         state.listId = r.list.id;
         viewLists();
       }) },
@@ -1919,11 +1930,13 @@ Why? (optional — the AI reads it)`, '');
 
   // ---------- activity ----------
   async function viewActivity() {
-    const rows = await api(`/api/events?limit=200${state.actRole ? '&role=' + encodeURIComponent(state.actRole) : ''}`);
+    const rows = await api(`/api/events?limit=200${state.actRole ? '&role=' + encodeURIComponent(state.actRole) : ''}${state.actProblems ? '&problems=1' : ''}`);
     const actRoles = await roleChips(state.actRole, (r) => { state.actRole = r; viewActivity(); });
     shell([
       h('h1', {}, 'Activity'),
       actRoles,
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: !!state.actProblems, onchange: (e) => { state.actProblems = e.target.checked; viewActivity(); } }),
+        h('span', {}, '⚠️ Only problems', h('em', {}, 'Failures, holds and warnings only — the first place to look when something seems wrong.'))),
       h('p', { class: 'sub' }, 'What you (dashboard), the AI (MCP), scripts (API key, e.g. Apps Script) and the system did: linking (and the history option chosen), settings changes, approvals, tasks, opt-outs, failures. The AI reads this too.'),
       h('table', { class: 'list' },
         h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Who'), h('th', {}, 'Number'), h('th', {}, 'What'))),
