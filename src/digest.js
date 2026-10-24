@@ -29,6 +29,8 @@ export async function saveDigest(input = {}) {
   return next;
 }
 
+// interview cards: made from a list date (kind visit), or written by hand as "Interview: …"
+const INTERVIEW = "(kind = 'visit' OR title ILIKE 'Interview%')";
 const hm = (d) => new Date(d).toLocaleTimeString('en-IN', { timeZone: config.tz, hour: 'numeric', minute: '2-digit' });
 const short = (s, n) => (String(s || '').length > n ? String(s).slice(0, n - 1) + '…' : String(s || ''));
 
@@ -37,10 +39,10 @@ export async function buildDigest(now = new Date()) {
   const today = localNow(now).date;
   const endOfDay = `(date_trunc('day', now() AT TIME ZONE $1) + interval '1 day') AT TIME ZONE $1`;
   const visits = await query(
-    `SELECT title, due_at FROM tasks WHERE kind = 'visit' AND status NOT IN ('done','cancelled') AND due_at < ${endOfDay}
+    `SELECT title, due_at FROM tasks WHERE ${INTERVIEW} AND status NOT IN ('done','cancelled') AND due_at < ${endOfDay}
        AND due_at >= now() - interval '12 hours' ORDER BY due_at`, [config.tz]);
   const todos = await query(
-    `SELECT title, due_at, priority FROM tasks WHERE COALESCE(assignee, 'you') = 'you' AND kind <> 'visit' AND status NOT IN ('done','cancelled')
+    `SELECT title, due_at, priority FROM tasks WHERE COALESCE(assignee, 'you') = 'you' AND NOT ${INTERVIEW} AND status NOT IN ('done','cancelled')
        AND (due_at IS NULL OR due_at < ${endOfDay}) ORDER BY priority DESC, due_at NULLS LAST LIMIT 30`, [config.tz]);
   const [w] = await query(
     `SELECT (SELECT count(*) FROM tasks WHERE kind = 'reply' AND status NOT IN ('done','cancelled'))::int AS replies,

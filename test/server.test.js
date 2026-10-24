@@ -1728,6 +1728,12 @@ test('morning summary: right content, once a day, only from the number that is c
   assert.match(text, /Interviews today \(\d+\)/);
   assert.match(text, /Morning Test/);
   assert.match(text, /⭐ Call Digest Person/);
+  // an interview card written by hand ("Interview: …", kind todo) is an interview, not a to-do
+  await query(`INSERT INTO tasks (account_id, title, kind, status, due_at, assignee, priority) VALUES ('dig1','Interview: Hand Made Cook — 11:00', 'todo', 'upcoming', now() + interval '3 hours', 'you', true)`);
+  const t2 = (await digest.buildDigest(today)).text;
+  const [interviews, rest] = t2.split('✅');
+  assert.match(interviews, /Hand Made Cook/);
+  assert.doesNotMatch(rest || '', /Hand Made Cook/);
   const sentTo = [];
   const send = async (from, to, t) => sentTo.push({ from, to, t });
   // at 06:30 India time it goes once; a second run the same day does nothing
