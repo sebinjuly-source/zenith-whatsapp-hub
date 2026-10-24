@@ -658,7 +658,16 @@ function buildServer(playbook = '', focus = '') {
     return `#${a.id} rejected.`;
   });
 
-  tool('edit_draft', 'Change the wording of a draft that is still waiting for the owner\'s approval (e.g. after an owner note on the Drafts page). Keeps its picture, number and send time; it stays a draft. For Meta template drafts the wording is fixed — reject and redraft instead.', {
+  tool('reschedule_messages', 'Give unsent messages (drafts or approved, ids from list_outbox) a new send time when the owner asks — e.g. "send these on Monday 10:00". Drafts stay drafts; approved ones wait until then. Sending hours, gaps and daily limits still apply.', {
+    ids: z.array(z.number().int()).min(1), at: z.string().describe('"YYYY-MM-DD HH:MM" (owner time zone) or ISO; "now" = as soon as possible'),
+  }, async (a) => {
+    await scope.assertDrafts(a._c, a.ids);
+    const r = await outbox.reschedule(a.ids, /^now$/i.test(a.at.trim()) ? null : localTime(a.at));
+    for (const [acc, n] of Object.entries(r.perAccount)) await ai(acc, `Rescheduled ${n} message(s) to ${d(r.at)}`);
+    return `${r.rescheduled} message(s) now go out ${d(r.at)}${r.skipped ? ` (${r.skipped} could not be moved — already sent, failed or rejected)` : ''}.`;
+  });
+
+  tool('edit_draft','Change the wording of a draft that is still waiting for the owner\'s approval (e.g. after an owner note on the Drafts page). Keeps its picture, number and send time; it stays a draft. For Meta template drafts the wording is fixed — reject and redraft instead.', {
     id: z.number().int(), text: z.string().min(1).describe('The full new message (or picture caption)'),
   }, async (a) => {
     const r = await outbox.editDraft(a.id, a.text);

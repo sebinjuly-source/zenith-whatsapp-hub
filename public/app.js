@@ -1724,6 +1724,45 @@
         ? h('div', { class: 'tag', style: 'margin:4px 0;background:var(--accent-soft);color:var(--ink)', title: 'Approving does not send it early — it waits until this time' },
             '🕒 Goes out ', h('b', {}, whenLong(r.scheduled_at)), r.status === 'draft' ? ' — approving now keeps this date' : ' (approved, waiting)')
         : h('div', { class: 'tag', style: 'margin:4px 0' }, r.status === 'draft' ? '⚡ Goes out soon after you approve (within sending hours)' : '⚡ Next in line (within sending hours)'));
+    // 🕒 Reschedule: pick a new day and time (or "as soon as possible") for one or many unsent messages
+    const pad = (n) => String(n).padStart(2, '0');
+    const localInput = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const askWhen = (list) => new Promise((resolve) => {
+      const first = list.find((r) => later(r));
+      const tomorrow10 = new Date(Date.now() + 86400000);
+      tomorrow10.setHours(10, 0, 0, 0);
+      const input = h('input', { type: 'datetime-local', name: 'at', required: true, value: localInput(first ? new Date(first.scheduled_at) : tomorrow10), min: localInput(new Date()) });
+      const finish = (v) => { back.remove(); resolve(v); };
+      const quick = (label, d) => h('button', { class: 'btn small', type: 'button', onclick: () => { input.value = localInput(d); } }, label);
+      const at = (days, hh, mm = 0) => { const d = new Date(Date.now() + days * 86400000); d.setHours(hh, mm, 0, 0); return d; };
+      const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && finish(null) },
+        h('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Reschedule', onsubmit: (e) => { e.preventDefault(); finish(new Date(input.value).toISOString()); } },
+          h('h2', {}, `🕒 Reschedule ${list.length} message${list.length > 1 ? 's' : ''}`),
+          h('p', { class: 'muted', style: 'margin-top:0;font-size:13px' }, list.some((r) => r.status === 'draft')
+            ? 'Drafts stay drafts: approve them and they go out at this time (never earlier).'
+            : 'They wait until this time, then go out by themselves.',
+            list.length > 1 ? ' Several messages go out one after another from then, with the usual gap and daily limit.' : '',
+            ' Outside the number's sending days and hours (Settings) they wait for its next sending time.'),
+          h('label', { class: 'field' }, h('span', {}, 'New day and time'), input),
+          h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;margin:4px 0 10px' },
+            quick('Tomorrow 10:00', at(1, 10)), quick('Tomorrow 18:00', at(1, 18)), quick('In 2 days 10:00', at(2, 10)), quick('Next week 10:00', at(7, 10))),
+          h('div', { class: 'row', style: 'justify-content:space-between;flex-wrap:wrap;gap:6px' },
+            h('button', { class: 'btn', type: 'button', title: 'Back in line now (within sending hours)', onclick: () => finish('now') }, '⚡ As soon as possible'),
+            h('span', { class: 'row', style: 'gap:6px' },
+              h('button', { class: 'btn', type: 'button', onclick: () => finish(null) }, 'Cancel'),
+              h('button', { class: 'btn primary', type: 'submit' }, 'Reschedule')))));
+      document.body.append(back);
+      input.focus();
+    });
+    const reschedule = async (list) => {
+      if (!list.length) return toast('Tick the messages first');
+      await Promise.all(list.map((x) => x.saveNow?.()));
+      const v = await askWhen(list);
+      if (!v) return false;
+      const r = await api('/api/outbox/reschedule', { body: { ids: list.map((x) => x.id), at: v === 'now' ? null : v } });
+      toast(`🕒 ${r.rescheduled} message${r.rescheduled > 1 ? 's' : ''} now go${r.rescheduled > 1 ? '' : 'es'} out ${later({ scheduled_at: r.at }) ? whenLong(r.at) : 'as soon as possible'}${r.skipped ? ` — ${r.skipped} could not be moved` : ''}`);
+      return true;
+    };
     const done = (card, r, text) => {
       // replace just this card: the list, the other cards' edits and the scroll position stay as they are
       card.replaceChildren(h('div', { class: 'row', style: 'align-items:center' }, h('b', { class: 'grow' }, r.to_name || '+' + r.to_jid.split('@')[0]), h('span', { class: 'muted' }, text)));
@@ -1807,10 +1846,13 @@
                 await api(`/api/outbox/${r.id}/reject`, { body: { reason } });
                 done(card, r, '✖ Rejected');
               }) }, 'Reject'),
+              h('button', { class: 'btn small', title: 'Choose another day and time for this message', onclick: guard(async () => { if (await reschedule([r])) viewOutbox({ keepScroll: true }); }) }, '🕒 Reschedule'),
               saved))
           : h('div', {}, h('p', { style: 'white-space:pre-wrap;margin:6px 0' }, r.payload.text || r.payload.attachment?.caption || ''),
               errorBox(r.error, help),
-              r.status === 'queued' ? h('button', { class: 'btn small danger', onclick: guard(async () => { await api(`/api/outbox/${r.id}/reject`, { method: 'POST' }); done(card, r, '✖ Cancelled'); }) }, 'Cancel') : null,
+              r.status === 'queued' ? h('div', { class: 'row', style: 'gap:6px' },
+                h('button', { class: 'btn small', onclick: guard(async () => { if (await reschedule([r])) viewOutbox({ keepScroll: true }); }) }, '🕒 Reschedule'),
+                h('button', { class: 'btn small danger', onclick: guard(async () => { await api(`/api/outbox/${r.id}/reject`, { method: 'POST' }); done(card, r, '✖ Cancelled'); }) }, 'Cancel')) : null,
               r.sent_at ? h('p', { class: 'muted', style: 'margin:0' }, 'Sent ', new Date(r.sent_at).toLocaleString()) : null),
       );
       if (entry) {
@@ -1855,6 +1897,9 @@
         toast(`Sent to the AI as task #${r.task.id} — it edits the ${r.drafts} drafts; they stay here for your approval`);
         after();
       }) }, '📝 Note for AI') : null,
+      h('button', { class: 'btn small', title: 'New day and time for the ticked messages', onclick: guard(async () => {
+        if (await reschedule(picked().filter((r) => !r.handled))) after();
+      }) }, '🕒 Reschedule'),
       state.accounts.length > 1 ? moveSel : null,
       state.accounts.length > 1 ? h('button', { class: 'btn small', onclick: guard(async () => {
         if (!sel.size) return toast('Tick the messages first');

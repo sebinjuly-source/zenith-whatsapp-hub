@@ -806,6 +806,13 @@ export function buildApp() {
     }
     res.json(r);
   }));
+  // New send time for unsent messages: { ids, at } (ISO; past or empty = as soon as possible)
+  api.post('/outbox/reschedule', wrap(async (req, res) => {
+    const r = await outbox.reschedule(await draftsQ(req), req.body?.at);
+    const t = new Date(r.at).toLocaleString('en-GB', { timeZone: config.tz, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    for (const [acc, n] of Object.entries(r.perAccount)) await act(req, acc, `Rescheduled ${n} message${n > 1 ? 's' : ''} to ${t}`);
+    res.json(r);
+  }));
   // Owner's note on several drafts → a card for the AI: { ids, text }
   api.post('/outbox/note-for-ai', wrap(async (req, res) => {
     const r = await outbox.draftsNoteForAi(await draftsQ(req), req.body?.text, { actor: 'you' });

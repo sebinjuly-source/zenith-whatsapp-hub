@@ -901,6 +901,18 @@ test('job roles: lists, tasks and log kept separate per role; earlier batches ne
   assert.match(note.task.details, new RegExp(`draft #${foDraft.id} `));
   assert.match(await mcp('edit_draft', { id: foDraft.id, text: 'Dear Mr Test, hello' }), /updated — still waiting/);
   assert.equal((await query('SELECT payload FROM outbox WHERE id = $1', [foDraft.id]))[0].payload.text, 'Dear Mr Test, hello');
+  // reschedule: a new send time for one or several unsent messages; drafts stay drafts; the Board card follows
+  const inTwoDays = new Date(Date.now() + 2 * 86400000);
+  inTwoDays.setUTCHours(5, 0, 0, 0);
+  const rs = (await call('POST', '/api/outbox/reschedule', { ids: [foDraft.id], at: inTwoDays.toISOString() })).data;
+  assert.equal(rs.rescheduled, 1);
+  const [moved] = await query('SELECT status, scheduled_at FROM outbox WHERE id = $1', [foDraft.id]);
+  assert.equal(moved.status, 'draft', 'a rescheduled draft is still a draft');
+  assert.equal(new Date(moved.scheduled_at).toISOString(), inTwoDays.toISOString());
+  assert.equal((await query(`SELECT count(*)::int n FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled')`, [`sched:${foDraft.id}`]))[0].n, 0, 'part of a list send: its task card follows, no extra card');
+  assert.match(await mcp('reschedule_messages', { ids: [foDraft.id], at: 'now' }), /1 message\(s\) now go out/);
+  assert.ok(new Date((await query('SELECT scheduled_at FROM outbox WHERE id = $1', [foDraft.id]))[0].scheduled_at) <= new Date(Date.now() + 5000), '"now" = as soon as possible');
+  assert.ok((await call('POST', '/api/outbox/reschedule', { ids: [], at: inTwoDays.toISOString() })).status >= 400, 'nothing selected → refused');
   // Approving "all" never means every number and campaign: no filter is refused; a campaign filter stays in that campaign
   const draftsNow = async () => (await query(`SELECT count(*)::int n FROM outbox WHERE status = 'draft'`))[0].n;
   const before = await draftsNow();
@@ -1676,6 +1688,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   const d2 = await run('send_message', { account: 'mcpall', to: P, text: 'Kal 11 baje aaiye', schedule_at: '2026-12-09 10:00' });
   await run('list_outbox', { account: 'mcpall', status: 'draft' });
   await run('edit_draft', { id: idOf(d1), text: 'Namaste Mr Ravi, kab aa sakte hain?' });
+  await run('reschedule_messages', { ids: [idOf(d2)], at: '2026-12-10 10:00' });
   await run('approve_draft', { id: idOf(d1) });
   await run('reject_draft', { id: idOf(d2), reason: 'too early' });
   await manager.create({ id: 'mcpall2', label: 'McpAll2' });

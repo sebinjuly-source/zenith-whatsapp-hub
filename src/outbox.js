@@ -241,6 +241,34 @@ export async function approveAll({ account, taskId, ids, role } = {}) {
   return { approved: rows.length, perAccount };
 }
 
+/**
+ * Give unsent messages (drafts or approved) a new send time. Drafts stay drafts (they go out at that time once
+ * approved); approved ones wait until then. A time in the past = as soon as possible. Sending hours, the gap between
+ * messages and the daily limits still apply, so many messages set to one time go out one after another from then.
+ */
+export async function reschedule(ids, at) {
+  const list = [...new Set((ids || []).map(Number).filter(Boolean))];
+  if (!list.length) throw new Error('Select at least one message');
+  const when = at ? new Date(at) : new Date();
+  if (isNaN(when)) throw new Error('Could not read the new date and time');
+  const rows = await query(
+    `UPDATE outbox SET scheduled_at = GREATEST($2::timestamptz, now()) WHERE id = ANY($1::bigint[]) AND status IN ('draft','queued')
+     RETURNING id, account_id, task_id, status, scheduled_at`,
+    [list, when.toISOString()],
+  );
+  if (!rows.length) throw new Error('None of these can be rescheduled any more (already sent, failed or rejected)');
+  for (const t of new Set(rows.map((r) => r.task_id).filter(Boolean))) await refreshTask(t);
+  // Board: "Scheduled: …" cards follow the new time; a message moved to now no longer needs its card
+  const { closeRefTasks } = await import('./tasks.js');
+  const soon = rows.filter((r) => !r.task_id && new Date(r.scheduled_at) <= new Date(Date.now() + 15 * 60000)).map((r) => `sched:${r.id}`);
+  if (soon.length) await closeRefTasks(soon, 'done', 'rescheduled to go out now').catch(() => {});
+  await import('./board.js').then((b) => b.syncScheduled()).catch(() => {});
+  const perAccount = {};
+  for (const r of rows) perAccount[r.account_id] = (perAccount[r.account_id] || 0) + 1;
+  for (const a of Object.keys(perAccount)) wake(a);
+  return { rescheduled: rows.length, skipped: list.length - rows.length, at: rows[0].scheduled_at, perAccount };
+}
+
 /** Reject the chosen drafts / queued messages. */
 /**
  * Note on the person's open Board cards (reply / follow-up) that a draft was rejected and why — the AI reads card
