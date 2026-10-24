@@ -318,6 +318,15 @@ lists first); `roleFilter` turns a picked campaign ("none" = on no list) into SQ
 - Media: an expired WhatsApp link asks the phone to upload the file again, keeps a copy; if the phone no longer has it,
   the link shows a readable "File not available" page.
 
+### 10.9d Campaign playbooks (24 Oct)
+- The main playbook (config `playbook`) is sent to every AI as the MCP instructions, followed by the NAMES of the campaign
+  playbooks (config `playbook:<campaign>`). `get_playbook(campaign)` / `hub_overview(campaign)` return one campaign's rules;
+  a line `INCLUDE: <campaign>` pulls in shared rules (Chef, Front office and Housekeeping include "Hiring – all roles").
+  Settings → Playbook has a picker (main / each campaign / new). Campaigns now: Hiring – all roles, Chef, Front office,
+  Housekeeping, Corporate sales, Win-back.
+- Lists whose role is not a hiring role (Corporate sales, Win-back, …) start with the candidate pipeline OFF, so no
+  Hinglish interview texts reach a corporate contact.
+
 ### 10.10 Debugging recipes
 | Symptom | Look at |
 |---|---|
