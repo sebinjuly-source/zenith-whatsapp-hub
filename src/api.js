@@ -717,6 +717,17 @@ export function buildApp() {
     });
   });
 
+  // Every endpoint, for whoever writes a script against the hub (Apps Script, curl): GET /api/help
+  api.get('/help', (req, res) => {
+    const routes = api.stack.filter((l) => l.route).map((l) => `${Object.keys(l.route.methods).map((m) => m.toUpperCase()).join(',')} /api${l.route.path}`);
+    res.json({
+      auth: 'header "x-api-key: <API_KEY>" or ?key=<API_KEY>',
+      dates: 'times without a zone are read in the hub time zone (TZ_NAME); numbers without a country code get COUNTRY_CODE',
+      guide: `${config.publicUrl || ''}/ (Connect AI & apps page) · docs/HOW-IT-WORKS.md §7 and §10 in the repo`,
+      mcp: `${config.publicUrl || ''}/mcp/<API_KEY>`,
+      routes,
+    });
+  });
   app.use('/api', api);
   app.get('/', (req, res) => res.set('Cache-Control', 'no-cache').type('html').send(indexHtml()));
   return app;

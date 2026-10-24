@@ -868,7 +868,12 @@ test('job roles: lists, tasks and log kept separate per role; earlier batches ne
   const fo = await mcp('import_list', { account: 'hire5', name: 'Front office – Batch 1', members: [{ phone: '9200000001', name: 'Same person, other job' }] });
   assert.match(fo, /\(role Front office\): 1 new/);
   // known candidates for de-duplication before unlocking
-  const known = await mcp('known_candidates', { role: 'Chef', account: 'hire5' });
+  const known = await mcp('known_candidates', { role: 'Chef', account: 'hire5', all: true });
+  // targeted check: only the matches, and who is new
+  const q = await mcp('known_candidates', { role: 'Chef', account: 'hire5', query: 'Old Chef, 9999999999' });
+  assert.match(q, /Old Chef \| 919200000001/);
+  assert.match(q, /9999999999: not on any Chef list \(new\)/);
+  assert.match(await mcp('known_candidates', { role: 'Chef', account: 'hire5' }), /^3 people already on Chef lists:\n- /);
   assert.match(known, /^3 people already on Chef lists/);
   assert.match(known, /Old Chef \| 919200000001 \| Hebbal \| Chef candidates – Batch A/);
   assert.ok(!/Same person, other job/.test(known));
@@ -1246,7 +1251,7 @@ test('AI onboarding: hub_overview first; lists on all numbers; duplicates checke
   assert.match(b, /Asha \+919300000001 — already in "Chef – Batch X" on hire8/);
   // filtering by one number says other numbers have lists too
   assert.match(await mcp('list_lists', { account: 'hire9' }), /more list\(s\) on other numbers/);
-  const known = await mcp('known_candidates', { role: 'Chef' });
+  const known = await mcp('known_candidates', { role: 'Chef', query: 'Asha' });
   assert.match(known, /Asha \| 919300000001 \|  \| Chef – Batch X \| hire8 \| .+ \| never \|/);
   // archive: hidden, never sends, unsent messages cancelled
   const [lx] = await query(`SELECT id FROM lists WHERE name = 'Chef – Batch X'`);
@@ -1563,4 +1568,96 @@ test('pipeline: no generic "which day?" when we already wrote to them after they
   await listsMod.runPipeline();
   const asks = await query(`SELECT to_jid FROM outbox WHERE list_id = $1 AND note = 'ask-date'`, [l.id]);
   assert.deepEqual(asks.map((r) => r.to_jid), ['919733200002@s.whatsapp.net'], 'only Mohan gets the automatic ask');
+});
+
+test('MCP: every tool answers without an error (whole AI toolbox, in the order a session would use it)', async () => {
+  const post = (body) => fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify(body) });
+  const raw = async (name, args = {}) => {
+    const j = await (await post({ jsonrpc: '2.0', id: ++mcpId, method: 'tools/call', params: { name, arguments: args } })).json();
+    const text = j.result?.content?.[0]?.text ?? JSON.stringify(j.error);
+    return { text, bad: !!j.error || !!j.result?.isError || /^Error:/.test(text) };
+  };
+  const list = await (await post({ jsonrpc: '2.0', id: ++mcpId, method: 'tools/list', params: {} })).json();
+  const names = list.result.tools.map((t) => t.name);
+  await manager.create({ id: 'mcpall', label: 'McpAll' });
+  fake('mcpall');
+  await manager.update('mcpall', { settings: { aiMode: 'approve' } });
+  const now = Math.floor(Date.now() / 1000);
+  const P = '919733300001';
+  const J = `${P}@s.whatsapp.net`;
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('mcpall',$1,'M1',false,$2,'text','Haan interested, kab aana hai?')`, [J, now - 600]);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body, media) VALUES ('mcpall',$1,'M2',false,$2,'document','cv.pdf','{"kind":"documentMessage","mimetype":"application/pdf","fileName":"cv.pdf"}')`, [J, now - 500]);
+  await (await import('../src/store.js')).upsertChats('mcpall', [{ jid: J, name: 'Toolbox Ravi' }]);
+  manager.get('mcpall').saveMedia = async () => 'db:test';
+  manager.get('mcpall').fetchOlder = async () => 'requested'; // the fake has no phone behind it
+  const done = {};
+  const run = async (name, args) => {
+    const r = await raw(name, args);
+    done[name] = true;
+    assert.ok(!r.bad, `${name} failed: ${r.text.slice(0, 300)}`);
+    return r.text;
+  };
+  const idOf = (text) => Number(text.match(/#(\d+)/)[1]);
+  await run('hub_overview', {});
+  await run('list_accounts', {});
+  await run('get_playbook', {});
+  await run('import_list', { account: 'mcpall', name: 'Chef – Toolbox', members: [{ phone: P, name: 'Toolbox Ravi' }, { phone: '9733300002', name: 'Second' }] });
+  await run('list_lists', { account: 'mcpall' });
+  await run('list_members', { list: 'Chef – Toolbox' });
+  await run('known_candidates', { role: 'Chef' });
+  await run('pipeline', { role: 'Chef' });
+  await run('set_pipeline', { list: 'Chef – Toolbox', ask_date_after_hours: 6 });
+  await run('set_followup', { list: 'Chef – Toolbox', enabled: true, after_days: 2, max: 1, text: 'follow up {first_name}' });
+  await run('update_list_member', { list: 'Chef – Toolbox', phone: P, stage: 'interested', available_from: '2026-12-10', follow_up_note: 'free after 10 Dec' });
+  await run('list_chats', { account: 'mcpall', campaign: 'Chef' });
+  await run('get_messages', { account: 'mcpall', chat: P });
+  await run('search_messages', { query: 'interested', account: 'mcpall' });
+  await run('list_shared_contacts', { account: 'mcpall' });
+  await run('find_followups', { account: 'mcpall', inactive_days: 1 });
+  await run('get_contact', { account: 'mcpall', chat: P });
+  await run('update_contact', { account: 'mcpall', chat: P, add_tags: ['candidate'], summary: 'Chef, free after 10 Dec' });
+  await run('find_person', { query: P });
+  await run('save_contact', { phone: '9733300009', name: 'Naresh', group: 'Chef hiring – Referrers', reason: 'Referred Ravi', account: 'mcpall' });
+  await run('find_contacts', { query: 'chef' });
+  await run('list_templates', {});
+  await run('save_template', { name: 'Toolbox ask', body: 'Namaste {first_name}, kab aa sakte hain?' });
+  const d1 = await run('send_message', { account: 'mcpall', to: P, template: 'Toolbox ask', note: 'ask the day' });
+  const d2 = await run('send_message', { account: 'mcpall', to: P, text: 'Kal 11 baje aaiye', schedule_at: '2026-12-09 10:00' });
+  await run('list_outbox', { account: 'mcpall', status: 'draft' });
+  await run('approve_draft', { id: idOf(d1) });
+  await run('reject_draft', { id: idOf(d2), reason: 'too early' });
+  await manager.create({ id: 'mcpall2', label: 'McpAll2' });
+  fake('mcpall2');
+  const d3 = await run('send_message', { account: 'mcpall', to: P, text: 'move me' });
+  await run('move_messages', { ids: [idOf(d3)], account: 'mcpall2' });
+  const b = await run('bulk_send', { account: 'mcpall', title: 'Toolbox bulk', text: 'Hi {name}', recipients: [{ to: '9733300003', name: 'Three' }] });
+  await run('approve_task', { id: idOf(b) });
+  await run('send_to_list', { list: 'Chef – Toolbox', statuses: ['new'], text: 'Namaste {first_name}' });
+  const t = await run('create_task', { account: 'mcpall', title: 'Call Ravi 9733300001', for: 'you', priority: true, due: '2026-12-09 11:00' });
+  await run('update_task', { id: idOf(t), due: '2026-12-09 12:00', campaign: 'Chef' });
+  await run('add_task_note', { id: idOf(t), text: 'Drafted the ask' });
+  await run('task_history', { id: idOf(t) });
+  await run('list_tasks', { for: 'you' });
+  await run('list_rules', {});
+  await run('save_rule', { account: 'mcpall', name: 'Toolbox rule', words: ['resume'], add_tags: ['cv'] });
+  await run('set_chat_state', { account: 'mcpall', chat: P, state: 'snoozed', until: '2026-12-09 09:00', note: 'check' });
+  await run('save_media', { account: 'mcpall', chat: P, message_id: 'M2' });
+  await run('fetch_older_messages', { account: 'mcpall', chat: P, count: 10 });
+  await run('backfill_history', { account: 'mcpall', since: '2026-01-01' });
+  await run('recent_activity', { who: 'ai' });
+  await run('remove_list_member', { list: 'Chef – Toolbox', phones: ['9733300002'] });
+  await run('archive_list', { list: 'Chef – Toolbox', reason: 'toolbox test' });
+  await run('save_playbook', { text: (await raw('get_playbook')).text });
+  // Meta-only tools on a linked number answer with a clear explanation, not an error
+  await run('list_meta_templates', { account: 'mcpall' });
+  await run('meta_health_check', { account: 'mcpall' });
+  await run('message_timeline', { account: 'mcpall', q: P });
+  await run('create_meta_template', { account: 'mcpall', name: 'x_test', body: 'Hi {{1}} there', examples: ['A'] });
+  assert.deepEqual(names.filter((n) => !done[n]), [], 'every MCP tool is exercised here');
+});
+
+test('REST: /api/help lists every endpoint for script writers', async () => {
+  const r = (await call('GET', '/api/help')).data;
+  assert.ok(r.routes.includes('POST /api/send') && r.routes.includes('GET /api/tasks') && r.routes.length > 50, JSON.stringify(r.routes.slice(0, 5)));
+  assert.match(r.auth, /x-api-key/);
 });

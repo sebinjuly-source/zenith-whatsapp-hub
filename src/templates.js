@@ -52,9 +52,13 @@ export async function deleteTemplate(id) {
 
 /** Fields known about a contact on a number: {name}, {first_name}, {phone}. */
 export async function contactFields(accountId, jid) {
+  // the saved contact name first, then the name on their list or chat (new candidates often have only those)
   const [c] = await query(
-    `SELECT COALESCE(ct.name, ct.notify, ct.verified_name) AS name, ct.phone
-     FROM contacts ct WHERE ct.account_id = $1 AND ct.jid = $2`,
+    `SELECT COALESCE(NULLIF(ct.name, ''), NULLIF(ct.notify, ''), ct.verified_name,
+              (SELECT NULLIF(m.name, '') FROM list_members m JOIN lists l ON l.id = m.list_id WHERE m.jid = $2 ORDER BY (l.account_id = $1) DESC, l.id DESC LIMIT 1),
+              (SELECT NULLIF(ch.name, '') FROM chats ch WHERE ch.account_id = $1 AND ch.jid = $2)) AS name,
+            COALESCE(ct.phone, split_part($2, '@', 1)) AS phone
+     FROM (SELECT 1) x LEFT JOIN contacts ct ON ct.account_id = $1 AND ct.jid = $2`,
     [accountId, jid],
   );
   const name = (c?.name || '').trim();

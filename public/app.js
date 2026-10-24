@@ -935,6 +935,18 @@
     const mine = (t) => !b.who || whoOf(t) === b.who;
     const fmtWhen = (t) => new Date(t).toLocaleString([], { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
     const fmtTime = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    // Phone numbers in card text become tap-to-call links (the owner calls candidates straight from the Board)
+    const PHONE = /(\+?\d[\d ]{8,15}\d)/g; // spaces only — "2026-10-24 10:00" must stay a date
+    const telOf = (raw) => { const d = String(raw).replace(/\D/g, ''); return d.length >= 10 && d.length <= 13 ? (d.length > 10 ? '+' + d : d) : null; };
+    const withPhones = (text) => String(text || '').split(PHONE).map((part, i) => {
+      const tel = i % 2 ? telOf(part) : null;
+      return tel ? h('a', { href: 'tel:' + tel, class: 'tel', title: 'Call ' + tel, onclick: (e) => e.stopPropagation() }, part) : part;
+    });
+    const firstPhone = (t) => {
+      for (const m of `${t.title} ${t.details || ''} ${t.last_note || ''}`.matchAll(PHONE)) { const tel = telOf(m[1]); if (tel) return tel; }
+      const ref = String(t.ref || '').split(':')[2] || ''; // hub cards: reply/followup/visit/remind:<…>:<number>@s.whatsapp.net
+      return ref.endsWith('@s.whatsapp.net') ? telOf(ref.split('@')[0]) : null;
+    };
     const KIND = { reply: ['💬', 'Reply needed'], visit: ['🎯', 'Interview'], followup: ['🔁', 'Follow-up'], scheduled: ['🕒', 'Scheduled message'], reminder: ['⏰', 'Reminder'], bulk: ['📤', 'Bulk send'], todo: ['📌', 'To-do'] };
     const icon = (pair) => h('span', { class: 'ico', title: pair[1], 'aria-label': pair[1] }, pair[0]);
     const whoIcon = (t) => icon(whoOf(t) === 'ai' ? ['🤖', 'The AI / hub does this'] : ['👤', 'You do this']);
@@ -1010,7 +1022,7 @@
         ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'].filter((s) => s !== t.status).map((s) => h('option', { value: s }, s.replace('_', ' '))));
       const more = h('details', { class: 'more', ontoggle: (e) => { if (e.target.open) loadLog(); } },
         h('summary', {}, t.notes ? `More · 📝 ${t.notes}` : 'More'),
-        t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, t.details) : null,
+        t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, withPhones(t.details)) : null,
         closed ? null : h('div', { class: 'row', style: 'margin:6px 0' },
           h('button', { class: 'btn small', onclick: guard(async () => { await flushNote(); await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { priority: !t.priority } }); viewBoard(); }) }, t.priority ? '☆ Remove priority' : '⭐ Make priority'),
           move),
@@ -1031,15 +1043,15 @@
           pick,
           t.priority ? icon(['⭐', 'Priority — must do']) : null,
           icon(KIND[t.kind] || KIND.todo),
-          h('b', { class: 'grow tc-title' }, t.title),
+          h('b', { class: 'grow tc-title' }, withPhones(t.title)),
           whoIcon(t)),
         h('div', { class: 'tc-meta muted' },
           due(t) ? h('span', { style: overdue ? 'color:var(--bad);font-weight:600' : '' }, t.kind === 'reply' ? 'Wrote ' : overdue ? 'Overdue · ' : '', fmtWhen(due(t))) : null,
           !b.account ? h('span', {}, ' · ', labelOf(t.account_id)) : null,
           t.total ? h('span', {}, ` · ${t.sent}/${t.total} sent${t.drafts ? `, ${t.drafts} to approve` : ''}${t.failed ? `, ${t.failed} failed` : ''}${t.replied ? `, ${t.replied} replied` : ''}`) : null),
-        t.last_note ? h('div', { class: 'tc-note' }, '📝 ', t.last_note) : null,
+        t.last_note ? h('div', { class: 'tc-note' }, '📝 ', withPhones(t.last_note)) : null,
         t.total && t.status === 'in_progress' ? h('div', { class: 'progress', style: 'margin:6px 0' }, h('i', { style: `width:${pct}%` })) : null,
-        h('div', { class: 'row tc-actions' }, primary, doneBtn, more),
+        h('div', { class: 'row tc-actions' }, primary, firstPhone(t) ? h('a', { class: 'btn small', href: 'tel:' + firstPhone(t), title: 'Call ' + firstPhone(t) }, '📞 Call') : null, doneBtn, more),
       );
       if (!closed) {
         // long press (touch or mouse, ~0.5 s) → selection mode with this card ticked
@@ -1049,6 +1061,8 @@
         const cancel = () => { clearTimeout(timer); timer = null; };
         el.addEventListener('pointerdown', (e) => {
           if (e.button > 0) return;
+          // pressing on text (title, note, details, a number) is for selecting/copying it, not for selecting cards
+          if (e.target.closest('.tc-title, .tc-note, .tc-meta, details.more, a, button, input, textarea, select')) return;
           fired = false;
           start = [e.clientX, e.clientY];
           timer = setTimeout(() => {
@@ -1085,6 +1099,9 @@
           drawPickBar();
         } }, '☑ Select all')
       : null);
+    // An explicit way into selection mode (long press works only on a card's empty space, so text stays selectable)
+    const selectBtn = () => (selecting ? null : h('button', { class: 'btn small selall', type: 'button', title: 'Select several cards to write one note for the AI',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); state.boardSelecting = true; viewBoard(); } }, '☑ Select'));
     // Future: one fold per day, the next two open
     const dayKey = (d) => new Date(d).toLocaleDateString('en-CA');
     const tomorrow = dayKey(Date.now() + 86400000);
@@ -1105,7 +1122,7 @@
       : [h('p', { class: 'muted' }, 'Nothing planned yet.')];
     const section = (titleIcon, title, items, body, { open = true, hint, cards } = {}) =>
       h('details', { class: 'section', open },
-        h('summary', {}, h('span', { class: 'sec-title' }, titleIcon, ' ', title), h('span', { class: 'count' }, items), hint ? h('span', { class: 'muted sec-hint' }, hint) : null, cards ? selectAll(cards) : null),
+        h('summary', {}, h('span', { class: 'sec-title' }, titleIcon, ' ', title), h('span', { class: 'count' }, items), hint ? h('span', { class: 'muted sec-hint' }, hint) : null, cards ? selectAll(cards) || (cards.length ? selectBtn() : null) : null),
         body);
     // filters: compact selects
     const sel = (label, value, options, onPick) => h('select', { class: 'small-select', 'aria-label': label, title: label, onchange: (e) => onPick(e.target.value) },
@@ -1217,7 +1234,7 @@
         nowMain.length ? h('div', { class: 'cardlist' }, nowMain.map(card)) : !nowReplies.length ? h('p', { class: 'muted' }, 'All clear — nothing due now.') : null,
         nowReplies.length ? h('details', { class: 'day', open: nowReplies.length <= 3 }, h('summary', {}, h('b', {}, `💬 ${nowReplies.length} candidate${nowReplies.length > 1 ? 's' : ''} waiting for a reply`), h('span', { class: 'muted' }, ' — the AI drafts these; open to see them')),
           h('div', { class: 'cardlist' }, nowReplies.map(card))) : null),
-        { hint: selecting ? 'tap cards to select' : priorityNow ? `${priorityNow} must-do · long-press a card to select several` : 'long-press a card to select several', cards: now }),
+        { hint: selecting ? 'tap cards to select' : priorityNow ? `${priorityNow} must-do` : '', cards: now }),
       section('📅', 'Future', future.length, h('div', {}, futureEl), { hint: 'by day' }),
       running.length ? section('⏳', 'Sending now', running.length, h('div', { class: 'cardlist' }, running.map(card)), { open: false }) : null,
       b.past ? section('✅', 'Done & cancelled', past.length, h('div', { class: 'cardlist' }, past.map(card)), { open: false }) : null,

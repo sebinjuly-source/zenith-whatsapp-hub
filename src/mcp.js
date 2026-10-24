@@ -864,13 +864,25 @@ function buildServer(playbook = '') {
     return `Pipeline for "${l.name}": ${p.enabled ? 'on' : 'off'}, ${p.autoSend ? 'sends automatically' : 'drafts for approval'}, reminder ${p.remindHoursBefore}h before visits, ask for a date after ${p.askDateAfterHours}h.`;
   });
 
-  tool('known_candidates', 'Everyone already on any list for a job role (all earlier batches): name | phone | location | list | status/stage. Use it to de-duplicate a new WorkIndia batch BEFORE unlocking or messaging (match on name + location, or phone).', {
+  tool('known_candidates', 'People already on any list for a job role (all earlier batches). Use it to de-duplicate a new WorkIndia batch BEFORE unlocking or messaging: pass names, phones or places in query (several, comma-separated) and get only the matches — import_list also skips known people by itself and says why. Without query: counts per list, plus everyone only if all=true (long).', {
     role: z.string().describe('Job role, e.g. Chef'), account: z.string().optional(),
+    query: z.string().optional().describe('Names, phone numbers or locations to look for, comma-separated, e.g. "Ravi Kumar, 9876543210, Hebbal"'),
+    all: z.boolean().optional().describe('List every person (can be thousands of lines — prefer query)'),
   }, async (a) => {
-    const rows = await lists.knownPeople(a.role, a.account ? (await manager.resolve(a.account)).id : null);
-    return rows.length
-      ? `${rows.length} people already on ${a.role} lists (name | phone | location | list | number | added | first messaged | stage/status):\n` + rows.map((r) => [trim(r.name, 30), r.phone, trim(r.location, 30), r.list + (r.archived ? ' (archived)' : ''), r.account_id, d(r.added_at), r.first_sent_at ? d(r.first_sent_at) : 'never', r.stage || r.status].join(' | ')).join('\n')
-      : `Nobody on ${a.role} lists yet.`;
+    let rows = await lists.knownPeople(a.role, a.account ? (await manager.resolve(a.account)).id : null);
+    if (!rows.length) return `Nobody on ${a.role} lists yet.`;
+    const line = (r) => [trim(r.name, 30), r.phone, trim(r.location, 30), r.list + (r.archived ? ' (archived)' : ''), r.account_id, d(r.added_at), r.first_sent_at ? d(r.first_sent_at) : 'never', r.stage || r.status].join(' | ');
+    const head = '(name | phone | location | list | number | added | first messaged | stage/status)';
+    if (a.query) {
+      const terms = a.query.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+      const hit = (r, t) => (/^\+?[\d\s]{6,}$/.test(t) ? String(r.phone || '').endsWith(t.replace(/\D/g, '').slice(-10)) : `${r.name || ''} ${r.location || ''}`.toLowerCase().includes(t));
+      const out = terms.map((t) => { const m = rows.filter((r) => hit(r, t)); return m.length ? m.map(line).join('\n') : `${t}: not on any ${a.role} list (new)`; });
+      return `${a.role} lists checked for ${terms.length} name(s)/number(s) ${head}:\n${out.join('\n')}`;
+    }
+    if (a.all) return `${rows.length} people already on ${a.role} lists ${head}:\n${rows.map(line).join('\n')}`;
+    const per = {};
+    for (const r of rows) per[`${r.list}${r.archived ? ' (archived)' : ''} on ${r.account_id}`] = (per[`${r.list}${r.archived ? ' (archived)' : ''} on ${r.account_id}`] || 0) + 1;
+    return `${rows.length} people already on ${a.role} lists:\n${Object.entries(per).map(([k, n]) => `- ${k}: ${n}`).join('\n')}\nPass query="names, numbers or places" to check specific people (or all=true for everyone).`;
   });
 
   tool('get_playbook', "The owner's standing rules (hiring policy, priorities, tone). Read before acting on candidates or guests.", {}, async () => (await getPlaybook()).text);
@@ -923,7 +935,7 @@ function buildServer(playbook = '') {
     due_now: z.boolean().optional().describe('Only cards due by now (plus 1 hour)'),
     owner_notes: z.boolean().optional().describe('Only cards where the owner wrote a note the AI has not acted on yet — act on each (follow-up date, scheduled message, draft, …), then add_task_note saying what you did'),
   }, async (a) => {
-    let rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role, assignee: a.for, limit: 500,
+    let rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role, assignee: a.for, limit: a.past ? 60 : 500, // finished cards: the latest 60 are plenty
       dueBefore: a.due_now ? new Date(Date.now() + 3600000) : undefined });
     if (a.kind) rows = rows.filter((t) => t.kind === a.kind);
     if (a.owner_notes) {
