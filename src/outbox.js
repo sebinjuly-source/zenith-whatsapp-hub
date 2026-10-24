@@ -216,15 +216,21 @@ export async function approveTask(taskId) {
 }
 
 /** Approve every draft at once — optionally only one number's, one task's, or the chosen ids. Saved text is sent as it is. */
-export async function approveAll({ account, taskId, ids } = {}) {
+export async function approveAll({ account, taskId, ids, role } = {}) {
+  // Never "everything": an approval must name the drafts (ids) or be limited to a number, a task or a campaign.
+  // (A missing filter once approved every draft on every number and campaign.)
+  const idList = Array.isArray(ids) ? ids.map(Number).filter(Boolean) : null;
+  if (Array.isArray(ids) && !idList.length) throw new Error('Select at least one draft');
+  if (!idList && !account && !taskId && !role) throw new Error('Say which drafts to approve: tick them, or choose a number, a task or a campaign first');
   const p = [];
-  const where = [`status = 'draft'`];
-  if (ids) { p.push(ids.map(Number)); where.push(`id = ANY($${p.length}::bigint[])`); }
-  if (account) { p.push(account); where.push(`account_id = $${p.length}`); }
-  if (taskId) { p.push(taskId); where.push(`task_id = $${p.length}`); }
+  const where = [`o.status = 'draft'`];
+  if (idList) { p.push(idList); where.push(`o.id = ANY($${p.length}::bigint[])`); }
+  if (account) { p.push(account); where.push(`o.account_id = $${p.length}`); }
+  if (taskId) { p.push(taskId); where.push(`o.task_id = $${p.length}`); }
+  if (role) { p.push(role); where.push(roleFilter(`COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')})`, p.length)); }
   const rows = await query(
-    `UPDATE outbox SET status = 'queued', scheduled_at = GREATEST(scheduled_at, now())
-     WHERE ${where.join(' AND ')} RETURNING account_id, task_id`,
+    `UPDATE outbox o SET status = 'queued', scheduled_at = GREATEST(o.scheduled_at, now())
+     WHERE ${where.join(' AND ')} RETURNING o.account_id, o.task_id`,
     p,
   );
   for (const t of new Set(rows.map((r) => r.task_id).filter(Boolean))) await refreshTask(t);

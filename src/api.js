@@ -656,12 +656,12 @@ export function buildApp() {
     const ids = req.query.account ? [(await manager.resolve(req.query.account)).id] : manager.list().map((a) => a.id);
     res.json(await Promise.all(ids.map((id) => outbox.queueStatus(id))));
   }));
-  // Approve all drafts: { account?, task? } — omitted = every number
+  // Approve drafts by filter: { account?, task?, role? } — at least one is required (never every number and campaign at once)
   api.post('/outbox/approve-all', wrap(async (req, res) => {
     const b = req.body || {};
     const account = b.account ? (await manager.resolve(b.account)).id : null;
-    const r = await outbox.approveAll({ account, taskId: b.task || null });
-    for (const [a, n] of Object.entries(r.perAccount)) await act(req, a, `Approved all ${n} drafts${b.task ? ` of task #${b.task}` : ''}`);
+    const r = await outbox.approveAll({ account, taskId: b.task || null, role: b.role || null });
+    for (const [a, n] of Object.entries(r.perAccount)) await act(req, a, `Approved all ${n} drafts${b.task ? ` of task #${b.task}` : ''}${b.role ? ` (campaign ${b.role})` : ''}`);
     res.json(r);
   }));
   // Selected messages: { ids: [..] } → approve / reject; { ids, account } → move to another number (as drafts)

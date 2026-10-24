@@ -159,7 +159,7 @@ test('AI send in approve mode becomes a draft; approving sends it', async () => 
   assert.equal((await call('POST', `/api/outbox/${id}/approve`, {})).status, 400);
 });
 
-test('approve all drafts at once: one number only, or every number', async () => {
+test('approve all drafts at once: one number only — never every number at once', async () => {
   for (const to of ['919811110001', '919811110002']) await mcp('send_message', { account: 'hiring', to, text: 'Batch draft' });
   await mcp('send_message', { account: 'hotel', to: '919811110003', text: 'Hotel draft' });
   const drafts = async (acc) => (await query(`SELECT count(*)::int n FROM outbox WHERE status = 'draft' AND account_id = $1`, [acc]))[0].n;
@@ -170,7 +170,9 @@ test('approve all drafts at once: one number only, or every number', async () =>
   assert.equal(await drafts('hiring'), 0);
   assert.equal(await drafts('hotel'), 1, 'other numbers keep their drafts');
   assert.match(await mcp('recent_activity', { account: 'hiring', who: 'script' }), /Approved all \d+ drafts/);
-  assert.equal((await call('POST', '/api/outbox/approve-all', {})).data.approved, 1);
+  assert.ok((await call('POST', '/api/outbox/approve-all', {})).status >= 400, 'no filter = refused, not "every number"');
+  assert.equal(await drafts('hotel'), 1, 'the other number still has its draft');
+  assert.equal((await call('POST', '/api/outbox/approve-all', { account: 'hotel' })).data.approved, 1);
   assert.equal(await drafts('hotel'), 0);
   await until(async () => (await query(`SELECT count(*)::int n FROM outbox WHERE to_jid LIKE '91981111000%' AND status = 'sent'`))[0].n === 3, 15000);
 });
@@ -899,6 +901,21 @@ test('job roles: lists, tasks and log kept separate per role; earlier batches ne
   assert.match(note.task.details, new RegExp(`draft #${foDraft.id} `));
   assert.match(await mcp('edit_draft', { id: foDraft.id, text: 'Dear Mr Test, hello' }), /updated — still waiting/);
   assert.equal((await query('SELECT payload FROM outbox WHERE id = $1', [foDraft.id]))[0].payload.text, 'Dear Mr Test, hello');
+  // Approving "all" never means every number and campaign: no filter is refused; a campaign filter stays in that campaign
+  const draftsNow = async () => (await query(`SELECT count(*)::int n FROM outbox WHERE status = 'draft'`))[0].n;
+  const before = await draftsNow();
+  assert.ok(before > 1, 'there are drafts in several campaigns');
+  const refused = await call('POST', '/api/outbox/approve-all', {});
+  assert.ok(refused.status >= 400, 'an approval without a number, task, campaign or ids is refused');
+  assert.match(JSON.stringify(refused.data), /Say which drafts/);
+  assert.equal(await draftsNow(), before, 'nothing was approved');
+  assert.ok((await call('POST', '/api/outbox/approve-selected', { ids: [] })).status >= 400, 'empty selection approves nothing');
+  // exactly the drafts the Drafts page lists for that campaign — no more
+  const shownFo = (await call('GET', `/api/outbox?status=draft&role=${encodeURIComponent('Front office')}&limit=500`)).data.map((r) => r.id);
+  assert.ok(shownFo.length >= 1);
+  const byRole = (await call('POST', '/api/outbox/approve-all', { role: 'Front office' })).data;
+  assert.equal(byRole.approved, shownFo.length, 'approves what the campaign view shows');
+  assert.equal(await draftsNow(), before - shownFo.length, 'drafts of other campaigns stay drafts');
   const foTasks = await mcp('list_tasks', { account: 'hire5', role: 'Front office' });
   assert.match(foTasks, /Front office – Batch 1: message 1/);
   assert.ok(!/Chef/.test(foTasks));

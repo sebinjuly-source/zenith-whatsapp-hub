@@ -1661,6 +1661,7 @@
       // replace just this card: the list, the other cards' edits and the scroll position stay as they are
       card.replaceChildren(h('div', { class: 'row', style: 'align-items:center' }, h('b', { class: 'grow' }, r.to_name || '+' + r.to_jid.split('@')[0]), h('span', { class: 'muted' }, text)));
       card.style.opacity = '.6';
+      r.handled = true;
       const i = boxes.findIndex(([, id]) => id === r.id);
       if (i >= 0) { boxes.splice(i, 1); sel.delete(r.id); refreshSel(); }
       if (r.status === 'draft' && state.draftsCount) {
@@ -1793,17 +1794,28 @@ Why? (optional — the AI reads it)`, '');
       h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, tab === 'queued'
         ? 'Queued messages are already approved and go out by themselves, one at a time. Tick some (or Select all, then untick a few) to move them to another number or cancel them.'
         : 'Tick messages (or Select all, then untick a few). Move selected changes which number sends them, e.g. when a number is blocked.')) : null;
+    // "Approve all" approves exactly the drafts shown here (this number, campaign and task) — by their ids, never by a filter
     const drafts = rows.filter((r) => r.status === 'draft');
+    const scope = [state.campaign ? `campaign ${campaignLabel(state.campaign)}` : 'all campaigns', acc ? labelOf(acc) : 'all numbers', state.outboxTask ? `task #${state.outboxTask}` : ''].filter(Boolean).join(' · ');
     const approveAllBar = drafts.length > 1 ? h('div', { class: 'card row', style: 'max-width:820px;margin-bottom:16px;align-items:center' },
-      h('span', { class: 'grow' }, `${drafts.length}${rows.length >= 200 ? '+' : ''} drafts${acc ? ' from ' + labelOf(acc) : ''}${state.outboxTask ? ` in task #${state.outboxTask}` : ''}`),
+      h('span', { class: 'grow' }, `${drafts.length} drafts shown — ${scope}${rows.length >= 200 ? ' (first 200 only)' : ''}`),
       h('button', { class: 'btn primary', onclick: guard(async () => {
-        await Promise.all(drafts.map((x) => x.saveNow?.()));
-        const nLater = drafts.filter(later).length;
-        if (!confirm(`Approve and send all ${drafts.length} drafts?\n\n${paceText(drafts)}${costText(drafts)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit. Your edits are saved and used.${nLater ? `\n\n${nLater} have a later date (e.g. festival wishes) — they wait until then.` : ''}`)) return;
-        const r = await api('/api/outbox/approve-all', { body: { account: acc || undefined, task: state.outboxTask || undefined } });
+        const shown = drafts.filter((x) => !x.handled);
+        if (!shown.length) return toast('Nothing left to approve here');
+        await Promise.all(shown.map((x) => x.saveNow?.()));
+        const nLater = shown.filter(later).length;
+        if (!confirm(`Approve the ${shown.length} drafts shown on this page?
+(${scope} — nothing outside this view is approved)
+
+${paceText(shown)}${costText(shown)}
+
+They go out one by one with the random gap, the daily limit and the new-number limit. Your edits are saved and used.${nLater ? `
+
+${nLater} have a later date (e.g. festival wishes) — they wait until then.` : ''}`)) return;
+        const r = await api('/api/outbox/approve-selected', { body: { ids: shown.map((x) => x.id) } });
         toast(`Approved ${r.approved} — queued`);
         viewOutbox({ keepScroll: true });
-      }) }, `Approve all ${drafts.length}${rows.length >= 200 ? '+' : ''}`)) : null;
+      }) }, `Approve these ${drafts.length}`)) : null;
     const statuses = await api(`/api/outbox/status${acc ? '?account=' + encodeURIComponent(acc) : ''}`).catch(() => []);
     const when = (t) => (t ? new Date(t).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '');
     const statusCards = statuses.filter((q) => q.queued || q.drafts).map((q) => h('div', { class: 'card', style: `max-width:820px;margin-bottom:10px;border-left:4px solid ${q.state === 'held' ? 'var(--bad)' : 'var(--accent)'}` },
