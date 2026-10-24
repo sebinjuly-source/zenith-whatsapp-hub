@@ -2131,3 +2131,9 @@ test('campaign scope: a campaign is like a separate user — the dashboard and t
   }
   assert.equal((await call('GET', '/api/focus')).data.campaign, '');
 });
+
+test('the dashboard script parses (a syntax error there blanks the whole dashboard)', async () => {
+  const vm = await import('node:vm');
+  const code = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', 'public', 'app.js'), 'utf8');
+  assert.doesNotThrow(() => new vm.Script(code, { filename: 'public/app.js' }));
+});
