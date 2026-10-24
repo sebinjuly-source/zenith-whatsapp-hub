@@ -1742,7 +1742,7 @@
             ? 'Drafts stay drafts: approve them and they go out at this time (never earlier).'
             : 'They wait until this time, then go out by themselves.',
             list.length > 1 ? ' Several messages go out one after another from then, with the usual gap and daily limit.' : '',
-            ' Outside the number's sending days and hours (Settings) they wait for its next sending time.'),
+            ' Outside the number’s sending days and hours (Settings) they wait for its next sending time.'),
           h('label', { class: 'field' }, h('span', {}, 'New day and time'), input),
           h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;margin:4px 0 10px' },
             quick('Tomorrow 10:00', at(1, 10)), quick('Tomorrow 18:00', at(1, 18)), quick('In 2 days 10:00', at(2, 10)), quick('Next week 10:00', at(7, 10))),
