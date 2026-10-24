@@ -304,6 +304,20 @@ lists first); `roleFilter` turns a picked campaign ("none" = on no list) into SQ
 - Every MCP answer is capped (~16,000 characters, cut at a line, says what was left out). Growth plan:
   `docs/DATA-GROWTH.md`.
 
+### 10.9c AI context and data (24 Oct)
+- `find_people` (`store.searchPeople`): one line per person across ALL history whose messages or saved name
+  mention any word — for campaigns (old guests, corporate / company HRs, travel agents). Skips groups, job candidates,
+  the hub's own numbers and the alert phones; 50–60 per page with offset. (Message search lists messages newest
+  first and stops at 100: on the hotel number it showed 51 of 123 lead-like people.)
+- `person_context`: everything about one person (chats on every number, list stage/dates, cards with notes, waiting
+  drafts, contact book); messages newer than an open card are marked NEW. `list_tasks` shows each card's chat now.
+- `get_settings` / `update_settings`: the AI may change hours, follow-up timing, auto-save, opt-out words, notify
+  URL, purpose, morning summary, alert phones; approval mode, limits, gaps and prices stay owner-only.
+- Interview reminders (`runPipeline`): the evening before at 18:00 and 3 h before; none if the date was agreed
+  under 2 h earlier; the ask-for-a-date message never goes when anything to that person is already waiting.
+- Media: an expired WhatsApp link asks the phone to upload the file again, keeps a copy; if the phone no longer has it,
+  the link shows a readable "File not available" page.
+
 ### 10.10 Debugging recipes
 | Symptom | Look at |
 |---|---|
@@ -311,6 +325,7 @@ lists first); `roleFilter` turns a picked campaign ("none" = on no list) into SQ
 | Message not going out | hub_overview "sending: held — reason"; `list_outbox status=queued` (scheduled time shown) |
 | Meta message failed | the draft card's "what to do"; `meta_health_check`; `message_timeline <phone>` |
 | Card missing / closed | `task_history <id>` (who closed it and why); `/health → board` (last re-check) |
+| A file won't download | "File not available" page says why: link expired + phone no longer has it → ask them to resend |
 | Interview not on the Board | the member needs `visit_at` and a stage of interested/date_given (not closed) |
 | Follow-ups never go | number setting "Follow-ups not before", daily max, new outreach today, list follow-up on? |
 | "deadlock detected" | two servers overlapping in a deploy — statements are retried automatically now |

@@ -1570,6 +1570,14 @@ test('pipeline: no generic "which day?" when we already wrote to them after they
   await listsMod.runPipeline();
   const asks = await query(`SELECT to_jid FROM outbox WHERE list_id = $1 AND note = 'ask-date'`, [l.id]);
   assert.deepEqual(asks.map((r) => r.to_jid), ['919733200002@s.whatsapp.net'], 'only Mohan gets the automatic ask');
+  // a draft already waiting for someone (Priyanka, 24 Oct) also means no automatic ask
+  await mcp('import_list', { account: 'dbg3', name: 'Chef – Dbg3b', members: [{ phone: '9733200003', name: 'Priya' }] });
+  await mcp('update_list_member', { list: 'Chef – Dbg3b', phone: '9733200003', stage: 'interested' });
+  const l2 = await listsMod.getList('Chef – Dbg3b');
+  await query(`UPDATE list_members SET stage_at = now() - interval '6 hours', updated_at = now() - interval '6 hours' WHERE list_id = $1`, [l2.id]);
+  await mcp('send_message', { account: 'dbg3', to: '9733200003', text: 'Kab aa sakti hain interview ke liye?', other_number_ok: true });
+  await listsMod.runPipeline();
+  assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE list_id = $1 AND note = 'ask-date'`, [l2.id]))[0].n, 0);
 });
 
 test('MCP: every tool answers without an error (whole AI toolbox, in the order a session would use it)', async () => {

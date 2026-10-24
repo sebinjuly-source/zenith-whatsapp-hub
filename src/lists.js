@@ -474,7 +474,9 @@ export async function runPipeline() {
            /* we already wrote to them since their last reply / the stage change (e.g. the AI or owner asked for a time):
               the ball is in their court — a second, generic "which day?" only confuses them */
            AND NOT EXISTS (SELECT 1 FROM messages x WHERE x.chat_jid = m.jid AND x.from_me
-                           AND x.ts > extract(epoch FROM COALESCE(m.last_reply_at, m.stage_at, m.updated_at))::bigint)`,
+                           AND x.ts > extract(epoch FROM COALESCE(m.last_reply_at, m.stage_at, m.updated_at))::bigint)
+           /* …or a message to them is already waiting (a draft the AI or owner wrote, on any number) */
+           AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.to_jid = m.jid AND o.status IN ('draft','queued','sending'))`,
         [list.id, String(p.askDateAfterHours)],
       );
       let asked = 0;
