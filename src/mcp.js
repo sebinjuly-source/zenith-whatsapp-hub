@@ -171,7 +171,9 @@ const CHAT_TOOLS = { get_messages: 'chat', get_contact: 'chat', update_contact: 
 const isPhone = (q) => /^[+\d\s()-]{8,}$/.test(q) || q.includes('@');
 /** The campaign a call works in: its own campaign argument ("all" = every campaign), else the hub's current one. */
 function callCampaign(name, a, focus) {
-  const explicit = name === 'update_task' ? a.in_campaign : a.campaign ?? (CAMPAIGN_ARG[name] === 'role' ? a.role : undefined);
+  // a tool's own job-role argument (import_list, known_candidates, list_tasks …) is more specific than campaign
+  const ownRole = CAMPAIGN_ARG[name] === 'role' && a.role && !/^all$/i.test(a.role) ? a.role : undefined;
+  const explicit = name === 'update_task' ? a.in_campaign : ownRole ?? a.campaign;
   if (explicit !== undefined && String(explicit).trim() !== '') return /^all$/i.test(String(explicit).trim()) ? '' : String(explicit).trim();
   return focus;
 }
@@ -270,7 +272,7 @@ function buildServer(playbook = '', focus = '') {
     const now = new Date();
     const open = await tasks.listTasks({ limit: 500, role: a.campaign });
     if (a.campaign) {
-      out.push(`FOCUS: campaign "${a.campaign}" only — other campaigns are hidden. Pass campaign="${a.campaign}" to list_tasks (role), list_chats, list_outbox and list_lists (role) too.`);
+      out.push(`FOCUS: campaign "${a.campaign}" only — other campaigns are left out of this overview. Every tool filters to ${focus ? `the campaign open in the dashboard (${scope.label(focus)})` : "all campaigns"} unless you pass campaign="<name>" or "all".`);
       const cp = await getCampaignPlaybook(a.campaign);
       out.push(cp ? `CAMPAIGN PLAYBOOK — ${cp.campaign} (follow it together with the main playbook):\n${cp.text}\n---` : `(No campaign playbook for "${a.campaign}" — follow the main playbook.)`);
     }
@@ -1079,6 +1081,7 @@ function buildServer(playbook = '', focus = '') {
     all: z.boolean().optional().describe('List every person (can be thousands of lines — prefer query)'),
   }, async (a) => {
     let rows = await lists.knownPeople(a.role, a.account ? (await manager.resolve(a.account)).id : null);
+    if (!a.role) return "Give the job role (role=\"Chef\", \"Front office\" …).";
     if (!rows.length) return `Nobody on ${a.role} lists yet.`;
     const line = (r) => [trim(r.name, 30), r.phone, trim(r.location, 30), r.list + (r.archived ? ' (archived)' : ''), r.account_id, d(r.added_at), r.first_sent_at ? d(r.first_sent_at) : 'never', r.stage || r.status].join(' | ');
     const head = '(name | phone | location | list | number | added | first messaged | stage/status)';

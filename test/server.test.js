@@ -2106,6 +2106,9 @@ test('campaign scope: a campaign is like a separate user — the dashboard and t
     assert.match(await mcp('get_messages', { account: 'scopeacc', chat: '919744000002', campaign: 'Scope Beta' }), /919744000002/);
     assert.match(await mcp('edit_draft', { id: dB, text: 'Hi beta, edited', campaign: 'Scope Beta' }), /updated/);
     assert.match(await mcp('list_tasks', { campaign: 'all' }), /./);
+    // a tool's own job role wins over campaign="all" (it is the thing it works on, not a filter)
+    assert.match(await mcp('known_candidates', { role: 'Scope Beta', campaign: 'all' }), /already on Scope Beta lists/);
+    assert.match(await mcp('import_list', { account: 'scopeacc', name: 'Beta people', role: 'Scope Beta', campaign: 'all', members: [{ phone: '9744000003', name: 'Beta Three' }] }), /\(role Scope Beta\)/);
     // playbooks: the campaign's own, plus the main rules for every campaign
     const pb = await mcp('get_playbook');
     assert.match(pb, /MAIN PLAYBOOK/);
