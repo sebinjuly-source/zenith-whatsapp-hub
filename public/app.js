@@ -1925,13 +1925,32 @@ Why? (optional — the AI reads it)`, '');
           h('label', { class: 'field', style: 'min-width:150px' }, h('span', {}, l), h('input', { type: 'number', name: k, step: '0.0001', min: 0, value: pr[k] }))),
         h('label', { class: 'field', style: 'min-width:150px' }, h('span', {}, 'Free replies per number / month'), h('input', { type: 'number', name: 'free', min: 0, value: pr.serviceFreePerMonth }))),
       h('button', { class: 'btn primary', type: 'submit' }, 'Save prices'));
+    // Main playbook + one per campaign (the AI reads the main one always, a campaign's when it works on it)
+    const pbList = await api('/api/playbooks').catch(() => []);
+    const pbText = h('textarea', { name: 'text', rows: 16, value: pb.text || '' });
+    const pbPick = h('select', { 'aria-label': 'Which playbook', style: 'max-width:320px', onchange: guard(async (e) => {
+      let c = e.target.value;
+      if (c === '+') {
+        c = (prompt('Name of the campaign (e.g. Corporate sales, Win-back, Chef):', '') || '').trim();
+        if (!c) { e.target.value = state.pbCampaign || ''; return; }
+        e.target.append(h('option', { value: c }, `🎯 ${c}`));
+        e.target.value = c;
+      }
+      state.pbCampaign = c;
+      pbText.value = (await api(`/api/playbook${c ? `?campaign=${encodeURIComponent(c)}` : ''}`)).text || '';
+    }) },
+      h('option', { value: '' }, '📘 Main playbook (always read)'),
+      pbList.map((p) => h('option', { value: p.campaign }, `🎯 ${p.campaign}`)),
+      h('option', { value: '+' }, '＋ New campaign playbook…'));
+    state.pbCampaign = '';
     const playbookForm = h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
-      await api('/api/playbook', { method: 'PUT', body: { text: e.target.text.value } });
-      toast('Playbook saved — every AI using the hub now follows it');
+      await api('/api/playbook', { method: 'PUT', body: { text: pbText.value, campaign: state.pbCampaign || undefined } });
+      toast(state.pbCampaign ? `"${state.pbCampaign}" playbook saved — the AI reads it when working on that campaign` : 'Playbook saved — every AI using the hub now follows it');
     }) },
-      h('p', { class: 'muted', style: 'margin-top:0' }, 'Sent to every AI that connects to the hub (Claude Code, regular Claude, others). Write your rules in plain words.'),
-      h('textarea', { name: 'text', rows: 16, value: pb.text || '' }),
+      h('p', { class: 'muted', style: 'margin-top:0' }, 'Sent to every AI that connects to the hub (Claude Code, regular Claude, others). The main playbook holds rules for everything; each campaign (Chef, Reception, Corporate sales…) can have its own, which the AI reads when it works on that campaign. Write in plain words.'),
+      h('div', { style: 'margin-bottom:8px' }, pbPick),
+      pbText,
       h('div', { style: 'margin-top:8px' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save playbook')));
     shell([
       h('div', { class: 'row', style: 'margin-bottom:6px' }, h('h1', { class: 'grow', style: 'margin:0' }, '⚙️ Settings'),

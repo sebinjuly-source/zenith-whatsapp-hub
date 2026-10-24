@@ -1915,3 +1915,28 @@ test('person_context and cards show the chat as it is now; settings: allowed one
   assert.match(await mcp('update_settings', { morning_summary: { time: '06:30' } }), /morning summary on at 06:30/);
   await mcp('update_settings', { morning_summary: { time: '06:00' } });
 });
+
+test('campaign playbooks: main + one per campaign; the AI sees the names, reads the one it works on', async () => {
+  const main = await mcp('get_playbook');
+  assert.match(await mcp('save_playbook', { campaign: 'Corporate sales', text: 'CORPORATE: never mention prices; ask for a meeting.' }), /Campaign playbook "Corporate sales" saved/);
+  await call('PUT', '/api/playbook', { campaign: 'Win-back', text: 'WIN-BACK: warm, short, no prices.' });
+  assert.deepEqual((await call('GET', '/api/playbooks')).data.map((p) => p.campaign).sort(), ['Corporate sales', 'Win-back']);
+  // main is untouched; it lists the campaign playbooks
+  const m2 = await mcp('get_playbook');
+  assert.ok(m2.startsWith(main.split('\n\nCAMPAIGN PLAYBOOKS')[0]));
+  assert.match(m2, /CAMPAIGN PLAYBOOKS: Corporate sales, Win-back/);
+  // one campaign's rules, case-insensitive; a missing one says so
+  assert.match(await mcp('get_playbook', { campaign: 'corporate SALES' }), /CAMPAIGN PLAYBOOK — Corporate sales[\s\S]*never mention prices/);
+  assert.match(await mcp('get_playbook', { campaign: 'Guests' }), /No playbook for campaign "Guests" yet/);
+  // focusing on a campaign brings its playbook in
+  assert.match(await mcp('hub_overview', { campaign: 'Corporate sales' }), /CAMPAIGN PLAYBOOK — Corporate sales[\s\S]*ask for a meeting/);
+  // the MCP instructions name the campaign playbooks (not their full text)
+  const r = await fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) });
+  const ins = (await r.json()).result.instructions;
+  assert.match(ins, /CAMPAIGN PLAYBOOKS \(own rules per campaign.*\): Corporate sales, Win-back$/);
+  assert.doesNotMatch(ins, /never mention prices/);
+  await call('DELETE', '/api/playbooks/Win-back');
+  await call('DELETE', '/api/playbooks/Corporate%20sales');
+  assert.deepEqual((await call('GET', '/api/playbooks')).data, []);
+});

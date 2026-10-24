@@ -426,11 +426,27 @@ export function buildApp() {
     await act(req, null, `Alert phone(s) set: ${phones.map((p) => '+' + p).join(', ') || 'none'}`);
     res.json({ phones });
   }));
-  api.get('/playbook', wrap(async (req, res) => res.json(await getPlaybook())));
+  // Main playbook (no campaign) or a campaign's (?campaign= / body.campaign); GET /playbooks lists the campaign ones
+  api.get('/playbook', wrap(async (req, res) => {
+    if (!req.query.campaign) return res.json(await getPlaybook());
+    const { getCampaignPlaybook } = await import('./playbook.js');
+    res.json((await getCampaignPlaybook(req.query.campaign)) || { campaign: req.query.campaign, text: '', updatedAt: null });
+  }));
   api.put('/playbook', wrap(async (req, res) => {
-    const p = await savePlaybook(req.body?.text);
-    await act(req, null, 'Updated the playbook');
+    const campaign = req.body?.campaign || null;
+    const p = await savePlaybook(req.body?.text, campaign);
+    await act(req, null, campaign ? `Updated the "${campaign}" campaign playbook` : 'Updated the playbook');
     res.json(p);
+  }));
+  api.get('/playbooks', wrap(async (req, res) => {
+    const { listCampaignPlaybooks } = await import('./playbook.js');
+    res.json(await listCampaignPlaybooks());
+  }));
+  api.delete('/playbooks/:campaign', wrap(async (req, res) => {
+    const { deleteCampaignPlaybook } = await import('./playbook.js');
+    await deleteCampaignPlaybook(req.params.campaign);
+    await act(req, null, `Deleted the "${req.params.campaign}" campaign playbook`);
+    res.json({ ok: true });
   }));
   // Rows with status columns, e.g. for the Google Sheets script to write back
   api.get('/lists/:id/export', wrap(async (req, res) => res.json(await lists.exportRows((await lists.getList(req.params.id)).id))));

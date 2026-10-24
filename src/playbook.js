@@ -29,11 +29,35 @@ export async function getPlaybook() {
   return r ? { text: r.value.text, updatedAt: r.updated_at } : { text: DEFAULT_PLAYBOOK, updatedAt: null };
 }
 
-export async function savePlaybook(text) {
+/**
+ * Campaign playbooks: the main playbook holds what applies everywhere (how to use the hub, general rules); each
+ * campaign (job role or sales campaign: "Chef", "Front office", "Corporate sales", "Win-back"…) can have its own,
+ * stored as config key "playbook:<campaign>". The AI reads the main one always and a campaign's when it works on it.
+ */
+const keyOf = (campaign) => (campaign ? `playbook:${String(campaign).trim()}` : 'playbook');
+
+export async function savePlaybook(text, campaign = null) {
   if (!String(text || '').trim()) throw new Error('The playbook is empty');
+  if (campaign !== null && campaign !== undefined && !String(campaign).trim()) throw new Error('Name the campaign');
   await query(
-    `INSERT INTO config (key, value) VALUES ('playbook', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-    [JSON.stringify({ text: String(text) })],
+    `INSERT INTO config (key, value) VALUES ($2, $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [JSON.stringify({ text: String(text) }), keyOf(campaign)],
   );
-  return getPlaybook();
+  return campaign ? getCampaignPlaybook(campaign) : getPlaybook();
+}
+
+/** One campaign's playbook ({ campaign, text, updatedAt }) or null. Name match ignores case. */
+export async function getCampaignPlaybook(campaign) {
+  const [r] = await query(`SELECT key, value, updated_at FROM config WHERE lower(key) = lower($1)`, [keyOf(campaign)]);
+  return r ? { campaign: r.key.slice('playbook:'.length), text: r.value.text, updatedAt: r.updated_at } : null;
+}
+
+/** Campaign playbooks that exist: [{ campaign, chars, updatedAt }]. */
+export async function listCampaignPlaybooks() {
+  const rows = await query(`SELECT key, value, updated_at FROM config WHERE key LIKE 'playbook:%' ORDER BY key`);
+  return rows.map((r) => ({ campaign: r.key.slice('playbook:'.length), chars: String(r.value?.text || '').length, updatedAt: r.updated_at }));
+}
+
+export async function deleteCampaignPlaybook(campaign) {
+  await query(`DELETE FROM config WHERE lower(key) = lower($1)`, [keyOf(campaign)]);
 }

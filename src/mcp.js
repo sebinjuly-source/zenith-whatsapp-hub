@@ -19,7 +19,7 @@ import * as templates from './templates.js';
 import * as rules from './rules.js';
 import { findPerson } from './people.js';
 import * as lists from './lists.js';
-import { getPlaybook, savePlaybook } from './playbook.js';
+import { getPlaybook, savePlaybook, getCampaignPlaybook, listCampaignPlaybooks } from './playbook.js';
 import { logEvent } from './db.js';
 import { HISTORY_MODES } from './describe.js';
 import { normalizeSettings } from './settings.js';
@@ -192,7 +192,11 @@ function buildServer(playbook = '') {
     const out = [];
     const now = new Date();
     const open = await tasks.listTasks({ limit: 500, role: a.campaign });
-    if (a.campaign) out.push(`FOCUS: campaign "${a.campaign}" only — other campaigns are hidden. Pass campaign="${a.campaign}" to list_tasks (role), list_chats, list_outbox and list_lists (role) too.`);
+    if (a.campaign) {
+      out.push(`FOCUS: campaign "${a.campaign}" only — other campaigns are hidden. Pass campaign="${a.campaign}" to list_tasks (role), list_chats, list_outbox and list_lists (role) too.`);
+      const cp = await getCampaignPlaybook(a.campaign);
+      out.push(cp ? `CAMPAIGN PLAYBOOK — ${cp.campaign} (follow it together with the main playbook):\n${cp.text}\n---` : `(No campaign playbook for "${a.campaign}" — follow the main playbook.)`);
+    }
     const campaigns = await query(`SELECT DISTINCT role FROM lists WHERE role IS NOT NULL AND archived IS NULL ORDER BY role`);
     if (!a.campaign && campaigns.length > 1) out.push(`Campaigns running: ${campaigns.map((c) => c.role).join(', ')} — pass campaign=<role> to focus on one.`);
     const dueNow = open.filter((t) => !t.due_at || new Date(t.due_at) <= new Date(now.getTime() + 3600e3));
@@ -981,7 +985,18 @@ function buildServer(playbook = '') {
     return `${rows.length} people already on ${a.role} lists:\n${Object.entries(per).map(([k, n]) => `- ${k}: ${n}`).join('\n')}\nPass query="names, numbers or places" to check specific people (or all=true for everyone).`;
   });
 
-  tool('get_playbook', "The owner's standing rules (hiring policy, priorities, tone). Read before acting on candidates or guests.", {}, async () => (await getPlaybook()).text);
+  tool('get_playbook', "The owner's standing rules. Without campaign: the main playbook (how to use the hub, rules for everything) plus the list of campaign playbooks. With campaign (e.g. \"Chef\", \"Corporate sales\", \"Win-back\"): that campaign's own rules — offer, wording, who to target. Read the campaign's before working on it; the main rules still apply.", {
+    campaign: z.string().optional().describe('Campaign name; omit for the main playbook'),
+  }, async (a) => {
+    const list = await listCampaignPlaybooks();
+    if (a.campaign) {
+      const p = await getCampaignPlaybook(a.campaign);
+      if (!p) return `No playbook for campaign "${a.campaign}" yet. Campaign playbooks: ${list.map((c) => c.campaign).join(', ') || 'none'}. Follow the main playbook; the owner can add one (save_playbook with campaign).`;
+      return `CAMPAIGN PLAYBOOK — ${p.campaign} (the main playbook applies too):\n${p.text}`;
+    }
+    const main = (await getPlaybook()).text;
+    return list.length ? `${main}\n\nCAMPAIGN PLAYBOOKS: ${list.map((c) => c.campaign).join(', ')} — get_playbook(campaign=…) for one.` : main;
+  });
 
   // Settings the AI may change (asked by the owner). Owner-only: approval mode, daily / new-number limits and the gap
   // between messages (they protect the numbers from WhatsApp bans and keep AI messages behind approval), Meta prices.
@@ -1052,10 +1067,12 @@ function buildServer(playbook = '') {
     return done.length ? `Saved: ${done.join(' · ')}.` : 'Nothing to change — give settings, purpose, morning_summary or alert_phones.';
   });
 
-  tool('save_playbook', "Replace the owner's playbook text. Only when the owner asks to change their rules.", { text: z.string() }, async (a) => {
-    await savePlaybook(a.text);
-    await ai(null, 'Updated the playbook');
-    return 'Playbook saved.';
+  tool('save_playbook', "Replace the main playbook, or one campaign's playbook (campaign=…, created if new — e.g. \"Corporate sales\", \"Win-back\", \"Chef\"). Only when the owner asks to change their rules, or to write down the rules of a campaign the owner set up. Keep campaign-specific rules (offer, wording, who to target) in the campaign's playbook and general rules in the main one.", {
+    text: z.string(), campaign: z.string().optional().describe('Campaign name; omit for the main playbook'),
+  }, async (a) => {
+    await savePlaybook(a.text, a.campaign || null);
+    await ai(null, a.campaign ? `Updated the "${a.campaign}" campaign playbook` : 'Updated the playbook');
+    return a.campaign ? `Campaign playbook "${a.campaign}" saved.` : 'Playbook saved.';
   });
 
   tool('save_media', 'Download and keep a file from a message (e.g. a candidate\'s resume). Use the media id shown by get_messages.', {
@@ -1227,7 +1244,10 @@ export function mountMcp(app) {
     const key = req.params.key || req.get('x-api-key') || req.query.key;
     if (key !== config.apiKey) return res.status(401).json({ error: 'Unauthorized' });
     if (req.method !== 'POST') return res.status(405).set('Allow', 'POST').json({ error: 'Method not allowed' });
-    const server = buildServer((await getPlaybook().catch(() => ({ text: '' }))).text);
+    const main = (await getPlaybook().catch(() => ({ text: '' }))).text;
+    const camps = await listCampaignPlaybooks().catch(() => []);
+    // the main playbook in full; campaign playbooks by name only (the AI reads the one it works on)
+    const server = buildServer(camps.length ? `${main}\n\nCAMPAIGN PLAYBOOKS (own rules per campaign — read the one you work on with get_playbook(campaign=…) or hub_overview(campaign=…)): ${camps.map((c) => c.campaign).join(', ')}` : main);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => {
       transport.close();
