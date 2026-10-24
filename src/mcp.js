@@ -40,9 +40,22 @@ const trim = (s, n) => {
 };
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 const fail = (err) => ({ content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true });
-const safe = (fn) => async (args) => {
+/**
+ * Response budget: no answer may flood the AI's context as the data grows. Above the budget the answer is cut at a
+ * line break and says how much was left out and how to narrow it — never a silent truncation. (~16k characters ≈
+ * 4k tokens; the playbook and a full chat still fit.)
+ */
+export const RESPONSE_BUDGET = 16000;
+export function budget(out, max = RESPONSE_BUDGET) {
+  const s = String(out ?? '');
+  if (s.length <= max) return s;
+  const cut = s.lastIndexOf('\n', max) > max * 0.5 ? s.lastIndexOf('\n', max) : max;
+  const restLines = s.slice(cut).split('\n').filter(Boolean).length;
+  return `${s.slice(0, cut)}\n… ${restLines} more line(s) not shown (${s.length - cut} characters). Narrow it down: use this tool's filters (account, campaign/role, status/stage, query, kind, limit) or ask about one person.`;
+}
+const safe = (fn, max = RESPONSE_BUDGET) => async (args) => {
   try {
-    return text(await fn(args));
+    return text(budget(await fn(args), max));
   } catch (err) {
     return fail(err);
   }
@@ -148,7 +161,7 @@ function buildServer(playbook = '') {
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
     { instructions: `Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
-  const tool = (name, description, inputSchema, fn) => server.registerTool(name, { description, inputSchema }, safe(fn));
+  const tool = (name, description, inputSchema, fn) => server.registerTool(name, { description, inputSchema }, safe(fn, name === 'get_playbook' ? Infinity : RESPONSE_BUDGET)); // the owner's rules are never cut
 
   tool('list_accounts', 'List the WhatsApp numbers in the hub: id, purpose, phone, connection status, AI mode (approve/auto), and how much history is stored. Start here.', {}, async () => {
     const lines = [];
@@ -980,6 +993,16 @@ function buildServer(playbook = '') {
   }, async (a) => {
     const t = await tasks.addNote(a.id, a.text, 'ai');
     return `Note added to task #${t.id} (${t.title}).`;
+  });
+
+  tool('log_call_result', 'Record what happened on a phone call the OWNER made about a Board card (only when the owner tells you; they usually tap it on the card): interested → stage interested + an AI card to send the details; date → interview date (at); no_answer → an AI card to message them; call_back → an owner card to call again (at); not_interested → stage closed, nothing more is sent. Closes the card.', {
+    id: z.number().int().describe('Board card id'), result: z.enum(['interested', 'date', 'no_answer', 'call_back', 'not_interested']),
+    at: z.string().optional().describe('For date / call_back: "YYYY-MM-DD HH:MM" (owner time zone)'), note: z.string().optional().describe('What the owner said about the call'),
+  }, async (a) => {
+    const { recordCallResult } = await import('./calls.js');
+    const r = await recordCallResult(a.id, { result: a.result, at: a.at, note: a.note });
+    await ai(null, `Call result on card #${a.id} (owner told the AI): ${r.note.replace(/^📞 Call: /, '')}`);
+    return `${r.note}${r.card ? ` — next step: card #${r.card.id} "${r.card.title}"` : ''}.`;
   });
 
   tool('task_history', 'A Board card\'s full history and notes: when it was created, moved, re-dated or closed by the hub and why (e.g. "Done by the hub — a reply went out"), plus every note from the owner or the AI. Use it to read call notes, and to debug "where did this card go?".', {

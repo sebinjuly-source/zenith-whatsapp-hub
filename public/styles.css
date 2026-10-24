@@ -409,3 +409,5 @@ details.day > summary .selall { margin-left: 8px; }
   .topbar .tab .tab-label { display: none; }
   .topbar .tab { padding: 7px 10px; font-size: 18px; }
 }
+.callrow[hidden] { display: none; }
+.callrow { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 2px; }

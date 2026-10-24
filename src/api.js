@@ -77,6 +77,8 @@ export function buildApp() {
       dbOk,
       version: VERSION,
       memoryMb: Math.round(process.memoryUsage().rss / 1048576), // Render free plan: 512 MB
+      // database size (Supabase free plan: 500 MB) — see docs/DATA-GROWTH.md for what to do as it grows
+      dbMb: dbOk ? await query('SELECT pg_database_size(current_database())::bigint AS b').then(([r]) => Math.round(Number(r.b) / 1048576)).catch(() => null) : null,
       accounts: manager.list().map((a) => ({ id: a.id, status: a.status })),
       // the 10-minute Board re-check: when it last ran and how it went
       board: { ...lastSync, late: stale },
@@ -394,6 +396,30 @@ export function buildApp() {
   }));
   // Everyone already contacted for a role (all batches) — to de-duplicate a new batch before unlocking
   api.get('/known', wrap(async (req, res) => res.json(await lists.knownPeople(req.query.role, req.query.account))));
+  // Morning summary: { enabled, time 'HH:MM', account } — sent to the alert phone(s); POST …/test sends one now
+  api.get('/digest', wrap(async (req, res) => {
+    const d = await import('./digest.js');
+    res.json({ ...(await d.getDigest()), phones: await notify.alertPhones() });
+  }));
+  api.put('/digest', wrap(async (req, res) => {
+    const d = await import('./digest.js');
+    const r = await d.saveDigest(req.body || {});
+    await act(req, null, `Morning summary: ${r.enabled ? `on at ${r.time} from "${r.account}"` : 'off'}`);
+    res.json(r);
+  }));
+  api.post('/digest/test', wrap(async (req, res) => {
+    const d = await import('./digest.js');
+    const r = await d.runDigest(manager, (from, to, text) => outbox.enqueue({ account: from, to, payload: { text }, source: 'api', note: 'morning summary (test)' }), { force: true });
+    if (!r) throw new Error('Not sent: the sending number is not connected here, or no alert phone is set');
+    res.json(r);
+  }));
+  // One-tap call result on a Board card: { result: interested|date|no_answer|call_back|not_interested, at?, note? }
+  api.post('/tasks/:id/call-result', wrap(async (req, res) => {
+    const { recordCallResult } = await import('./calls.js');
+    const r = await recordCallResult(req.params.id, req.body || {});
+    await act(req, null, `Call result for card #${req.params.id}: ${r.note.replace(/^📞 Call: /, '')}`);
+    res.json(r);
+  }));
   api.get('/alerts', wrap(async (req, res) => res.json({ phones: await notify.alertPhones() })));
   api.put('/alerts', wrap(async (req, res) => {
     const phones = await notify.setAlertPhones(req.body?.phones);

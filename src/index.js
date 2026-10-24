@@ -41,6 +41,12 @@ async function main() {
   setTimeout(tick, 60 * 1000).unref();
   // WhatsApp alerts to ALERT_PHONE when a number is logged out / disconnected for 15+ min
   startAlerts(manager, (from, to, text) => enqueueAlert({ account: from, to, payload: { text }, source: 'api', note: 'connection alert' }));
+  // Morning summary to the owner (once a day, after the set time, from the server holding the sending number)
+  const { runDigest } = await import('./digest.js');
+  setInterval(() => {
+    runDigest(manager, (from, to, text) => enqueueAlert({ account: from, to, payload: { text }, source: 'api', note: 'morning summary' }))
+      .catch((err) => logger.warn({ err: err.message }, 'morning summary failed'));
+  }, 60 * 1000).unref();
 
   // Render's free plan sleeps after 15 min without incoming requests, which would drop WhatsApp.
   // Ping our own public URL every 10 min (counts as incoming traffic). Off when not on Render.

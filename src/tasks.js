@@ -7,6 +7,7 @@ import { query } from './db.js';
 import { roleOf, roleFilter } from './campaign.js';
 import { toJid } from './store.js';
 import config from './config.js';
+import { PHONE_RE } from './util.js';
 
 export const COLUMNS = ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'];
 
@@ -97,9 +98,8 @@ const who = (a) => {
  * (so "Call Jagdish 9217687968" lands in the Chef campaign without anyone choosing it).
  */
 export async function guessRole(accountId, text) {
-  // any 8–15 digit number in the text (spaces/dashes allowed), local numbers get the country code
-  const phones = [...new Set(String(text || '').match(/\+?\d[\d\s-]{6,17}\d/g) || [])]
-    .map((p) => p.replace(/\D/g, '')).filter((d) => d.length >= 8 && d.length <= 15).map((d) => toJid(d).split('@')[0]);
+  // phone numbers standing on their own in the text; local numbers get the country code
+  const phones = [...new Set(String(text || '').match(PHONE_RE) || [])].map((p) => toJid(p.replace(/\D/g, '')).split('@')[0]);
   for (const d of phones) {
     const [r] = await query(`SELECT ${roleOf('$1', '$2')} AS role`, [accountId, `${d}@s.whatsapp.net`]);
     if (r?.role) return r.role;

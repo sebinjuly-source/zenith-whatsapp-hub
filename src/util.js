@@ -8,6 +8,12 @@ export function toTs(v) {
   return Number.isNaN(t) ? undefined : Math.floor(t / 1000);
 }
 
+/**
+ * A phone number standing on its own in free text: 10–13 digits in one block, or 5+5 with a space, optionally
+ * "+<code> " first. ("Cand1 9733400001" must not become 19733400001, nor "Batch 6 9876543210" 69876543210.)
+ */
+export const PHONE_RE = /(?<![\w+])(?:\+\d{1,3} ?)?(?:\d{5} ?\d{5}|\d{10,13})(?!\w)/g;
+
 /** Milliseconds the time zone is ahead of UTC at that moment (India: +5.5 h). */
 function tzOffsetMs(date, tz) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {

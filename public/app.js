@@ -936,7 +936,8 @@
     const fmtWhen = (t) => new Date(t).toLocaleString([], { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
     const fmtTime = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     // Phone numbers in card text become tap-to-call links (the owner calls candidates straight from the Board)
-    const PHONE = /(\+?\d[\d ]{8,15}\d)/g; // spaces only — "2026-10-24 10:00" must stay a date
+    // a number standing on its own (same rule as src/calls.js PHONE_RE): "Cand1 9733400001" → 9733400001, dates stay text
+    const PHONE = /((?<![\w+])(?:\+\d{1,3} ?)?(?:\d{5} ?\d{5}|\d{10,13})(?!\w))/g;
     const telOf = (raw) => { const d = String(raw).replace(/\D/g, ''); return d.length >= 10 && d.length <= 13 ? (d.length > 10 ? '+' + d : d) : null; };
     const withPhones = (text) => String(text || '').split(PHONE).map((part, i) => {
       const tel = i % 2 ? telOf(part) : null;
@@ -995,6 +996,33 @@
         noteIn.value = '';
         toast('Note saved');
       };
+      // One-tap call result: shown after tapping 📞 Call (or "Log a call result" under More). The hub writes the note,
+      // sets the stage / interview date, and hands the next step to the AI or to a "call again" card.
+      const tel = closed ? null : firstPhone(t);
+      const openCalls = (state.callOpen ||= new Set());
+      const whenIn = h('input', { type: 'datetime-local', 'aria-label': 'Date and time', style: 'max-width:220px' });
+      const whenBox = h('div', { class: 'row', style: 'gap:6px;margin-top:6px', hidden: true }, whenIn);
+      const sendResult = async (result) => {
+        if ((result === 'date' || result === 'call_back') && !whenIn.value) {
+          whenBox.hidden = false;
+          whenBox.dataset.result = result;
+          whenIn.focus();
+          return toast(result === 'date' ? 'Pick the interview date and time, then tap Save' : 'Pick when to call back, then tap Save');
+        }
+        await flushNote();
+        const r = await api(`/api/tasks/${t.id}/call-result`, { body: { result, at: whenIn.value || undefined } });
+        openCalls.delete(t.id);
+        toast(r.card ? `Saved — next step is card #${r.card.id}` : 'Saved');
+        viewBoard();
+      };
+      whenBox.append(h('button', { class: 'btn small primary', type: 'button', onclick: guard(() => sendResult(whenBox.dataset.result)) }, 'Save'));
+      const callRow = !tel ? null : h('div', { class: 'callrow', hidden: !openCalls.has(t.id) },
+        h('div', { class: 'muted', style: 'font-size:12px;margin:6px 0 4px' }, 'After the call:'),
+        h('div', { class: 'row', style: 'gap:6px' },
+          [['interested', '✅ Interested'], ['date', '🗓 Interview date…'], ['no_answer', '📵 No answer'], ['call_back', '⏰ Call back…'], ['not_interested', '❌ Not interested']]
+            .map(([k, l]) => h('button', { class: 'btn small', type: 'button', onclick: guard(() => sendResult(k)) }, l))),
+        whenBox);
+      const showCalls = () => { openCalls.add(t.id); if (callRow) callRow.hidden = false; };
       const doneBtn = closed ? null : h('button', { class: 'btn small', title: 'Mark done (a note you typed is saved first)', onclick: guard(async () => {
         await flushNote();
         await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: 'done' } });
@@ -1025,6 +1053,7 @@
         t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, withPhones(t.details)) : null,
         closed ? null : h('div', { class: 'row', style: 'margin:6px 0' },
           h('button', { class: 'btn small', onclick: guard(async () => { await flushNote(); await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { priority: !t.priority } }); viewBoard(); }) }, t.priority ? '☆ Remove priority' : '⭐ Make priority'),
+          tel ? h('button', { class: 'btn small', type: 'button', title: 'You called them from another phone? Log what happened', onclick: showCalls }, '📞 Log a call result') : null,
           move),
         h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, 'History & notes'),
         logBox,
@@ -1051,7 +1080,8 @@
           t.total ? h('span', {}, ` · ${t.sent}/${t.total} sent${t.drafts ? `, ${t.drafts} to approve` : ''}${t.failed ? `, ${t.failed} failed` : ''}${t.replied ? `, ${t.replied} replied` : ''}`) : null),
         t.last_note ? h('div', { class: 'tc-note' }, '📝 ', withPhones(t.last_note)) : null,
         t.total && t.status === 'in_progress' ? h('div', { class: 'progress', style: 'margin:6px 0' }, h('i', { style: `width:${pct}%` })) : null,
-        h('div', { class: 'row tc-actions' }, primary, firstPhone(t) ? h('a', { class: 'btn small', href: 'tel:' + firstPhone(t), title: 'Call ' + firstPhone(t) }, '📞 Call') : null, doneBtn, more),
+        h('div', { class: 'row tc-actions' }, primary, tel ? h('a', { class: 'btn small', href: 'tel:' + tel, title: 'Call ' + tel, onclick: showCalls }, '📞 Call') : null, doneBtn, more),
+        callRow,
       );
       if (!closed) {
         // long press (touch or mouse, ~0.5 s) → selection mode with this card ticked
@@ -1749,11 +1779,12 @@ Why? (optional — the AI reads it)`, '');
     optOutWords: 'Opt-out words', webhookUrl: 'Notify URL' };
   async function viewSettings() {
     await loadAccounts();
-    const [pb, al, pr, dflt] = await Promise.all([
+    const [pb, al, pr, dflt, dg] = await Promise.all([
       api('/api/playbook').catch(() => ({ text: '' })),
       api('/api/alerts').catch(() => ({ phones: [] })),
       api('/api/pricing').catch(() => null),
       api('/api/settings/defaults').catch(() => null),
+      api('/api/digest').catch(() => null),
     ]);
     if (!state.accounts.length) return shell([h('h1', {}, 'Settings'), h('p', { class: 'sub' }, 'Add a number first.')]);
     const allMode = state.settingsFor === '*' && dflt;
@@ -1867,6 +1898,19 @@ Why? (optional — the AI reads it)`, '');
     }) },
       h('p', { class: 'muted', style: 'margin-top:0' }, 'A WhatsApp (from another connected number) when a number is logged out or offline for 15+ minutes. Use a personal number that is not one of the hub numbers.'),
       h('div', { class: 'row' }, h('input', { type: 'text', name: 'phones', class: 'grow', style: 'width:auto', value: al.phones.join(', '), placeholder: '9198…, comma separated' }), h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
+    const digestForm = !dg ? null : h('form', { onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const x = e.target;
+      await api('/api/digest', { method: 'PUT', body: { enabled: x.enabled.checked, time: x.time.value, account: x.account.value } });
+      toast('Morning summary saved');
+    }) },
+      h('p', { class: 'muted', style: 'margin-top:0' }, `Every morning: today's interviews, your to-dos, replies and drafts waiting, and any problems — sent to the alert phone(s) ${dg.phones.length ? dg.phones.map((p) => '+' + p).join(', ') : '(none set above)'}.`),
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: dg.enabled }), h('span', {}, 'On')),
+      h('div', { class: 'row' },
+        h('label', { class: 'field grow' }, h('span', {}, 'Time'), h('input', { type: 'time', name: 'time', value: dg.time })),
+        h('label', { class: 'field grow' }, h('span', {}, 'Send from'), h('select', { name: 'account' }, state.accounts.map((x) => h('option', { value: x.id, selected: x.id === dg.account }, x.label))))),
+      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'),
+        h('button', { class: 'btn', type: 'button', onclick: guard(async () => { await api('/api/digest/test', { method: 'POST' }); toast('Sent — check WhatsApp'); }) }, 'Send a test now')));
     const priceForm = !pr || !state.accounts.some((x) => x.provider === 'cloud') ? null : h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
       const x = e.target;
@@ -1898,6 +1942,7 @@ Why? (optional — the AI reads it)`, '');
       form,
       h('div', { style: 'margin-top:20px' },
         fold('🔔 Connection alerts', alertForm),
+        digestForm ? fold('☀️ Morning summary on WhatsApp', digestForm) : null,
         priceForm ? fold('💰 Meta message prices', priceForm) : null,
         fold('📘 Playbook (your rules for the AI)', playbookForm),
         allMode ? null : fold('🗑 Delete this number', h('div', {},

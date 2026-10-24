@@ -1637,6 +1637,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('update_task', { id: idOf(t), due: '2026-12-09 12:00', campaign: 'Chef' });
   await run('add_task_note', { id: idOf(t), text: 'Drafted the ask' });
   await run('task_history', { id: idOf(t) });
+  await run('log_call_result', { id: idOf(t), result: 'call_back', at: '2026-12-10 18:00', note: 'busy at work' });
   await run('list_tasks', { for: 'you' });
   await run('list_rules', {});
   await run('save_rule', { account: 'mcpall', name: 'Toolbox rule', words: ['resume'], add_tags: ['cv'] });
@@ -1660,4 +1661,100 @@ test('REST: /api/help lists every endpoint for script writers', async () => {
   const r = (await call('GET', '/api/help')).data;
   assert.ok(r.routes.includes('POST /api/send') && r.routes.includes('GET /api/tasks') && r.routes.length > 50, JSON.stringify(r.routes.slice(0, 5)));
   assert.match(r.auth, /x-api-key/);
+});
+
+test('one-tap call results: each result does the bookkeeping and hands on the next step', async () => {
+  const tasksMod = await import('../src/tasks.js');
+  await manager.create({ id: 'calls1', label: 'Calls1' });
+  fake('calls1');
+  await mcp('import_list', { account: 'calls1', name: 'Chef – Calls', members: [1, 2, 3, 4, 5].map((i) => ({ phone: `973340000${i}`, name: `Cand${i} Kumar` })) });
+  const card = async (i) => (await call('POST', '/api/tasks', { account: 'calls1', title: `Call Cand${i} 973340000${i}`, assignee: 'you' })).data.id;
+  const res = async (id, body) => call('POST', `/api/tasks/${id}/call-result`, body);
+  // interested → stage + AI card, original card closed with the note
+  const c1 = await card(1);
+  const r1 = (await res(c1, { result: 'interested' })).data;
+  assert.equal((await query('SELECT stage FROM list_members WHERE jid = $1', ['919733400001@s.whatsapp.net']))[0].stage, 'interested');
+  assert.equal(r1.card.assignee, 'ai');
+  assert.match(r1.card.details, /\+919733400001/);
+  const [t1] = await query('SELECT status FROM tasks WHERE id = $1', [c1]);
+  assert.equal(t1.status, 'done');
+  assert.ok((await tasksMod.taskLog(c1)).some((l) => /📞 Call: answered — interested/.test(l.text)));
+  // the owner's call note is not left as an "owner note to act on" (the new card carries it)
+  const [p1] = (await tasksMod.listTasks({ past: true, limit: 500 })).filter((t) => t.id === c1);
+  assert.equal(p1.owner_note_pending, false);
+  // date → interview card for the owner at that time
+  const c2 = await card(2);
+  assert.equal((await res(c2, { result: 'date' })).status, 400, 'a date is needed');
+  await res(c2, { result: 'date', at: '2026-12-05T11:00' });
+  const [v] = await query(`SELECT due_at, assignee, priority FROM tasks WHERE ref LIKE 'visit:%:919733400002@s.whatsapp.net' AND status NOT IN ('done','cancelled')`);
+  assert.equal(new Date(v.due_at).toISOString(), '2026-12-05T05:30:00.000Z');
+  assert.ok(v.assignee === 'you' && v.priority);
+  // no answer → AI card to message them
+  const c3 = await card(3);
+  const r3 = (await res(c3, { result: 'no_answer' })).data;
+  assert.match(r3.card.title, /no answer/);
+  // call back → owner card at that time
+  const c4 = await card(4);
+  const r4 = (await res(c4, { result: 'call_back', at: '2026-12-06 18:30' })).data;
+  assert.equal(new Date(r4.card.due_at).toISOString(), '2026-12-06T13:00:00.000Z');
+  assert.ok(r4.card.priority && r4.card.assignee === 'you');
+  // not interested → closed stage, no new card; automatic messages to them cancelled
+  const c5 = await card(5);
+  const [l] = await query(`SELECT id FROM lists WHERE name = 'Chef – Calls'`);
+  await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, note, list_id) VALUES ('calls1','919733400005@s.whatsapp.net','{"text":"fu"}','campaign','draft','follow-up',$1)`, [l.id]);
+  const r5 = (await res(c5, { result: 'not_interested', note: 'has a job' })).data;
+  assert.equal(r5.card, null);
+  assert.equal((await query('SELECT stage, outcome FROM list_members WHERE jid = $1', ['919733400005@s.whatsapp.net']))[0].stage, 'not_interested');
+  assert.equal((await query(`SELECT status FROM outbox WHERE to_jid = '919733400005@s.whatsapp.net'`))[0].status, 'rejected');
+  // the AI can log one too (when the owner tells it), and a card with no number says so
+  const c6 = await card(1);
+  assert.match(await mcp('log_call_result', { id: c6, result: 'no_answer' }), /no answer/);
+  const plain = (await call('POST', '/api/tasks', { account: 'calls1', title: 'Buy flowers' })).data.id;
+  assert.match((await res(plain, { result: 'interested' })).data.error, /No phone number/);
+});
+
+test('morning summary: right content, once a day, only from the number that is connected here, within 6 h of the time', async () => {
+  const digest = await import('../src/digest.js');
+  await manager.create({ id: 'dig1', label: 'Dig1' });
+  fake('dig1');
+  await call('PUT', '/api/alerts', { phones: '6361321377' });
+  await digest.saveDigest({ enabled: true, time: '06:00', account: 'dig1' });
+  const today = new Date();
+  await query(`INSERT INTO tasks (account_id, title, kind, status, due_at, assignee, priority, ref) VALUES
+    ('dig1','Interview: Morning Test — Sat', 'visit', 'upcoming', now() + interval '2 hours', 'you', true, 'visit:999:919733500001@s.whatsapp.net'),
+    ('dig1','Call Digest Person 9733500002', 'todo', 'upcoming', now() - interval '1 hour', 'you', true, NULL)`);
+  const { text } = await digest.buildDigest(today);
+  assert.match(text, /Good morning/);
+  assert.match(text, /Interviews today \(\d+\)/);
+  assert.match(text, /Morning Test/);
+  assert.match(text, /⭐ Call Digest Person/);
+  const sentTo = [];
+  const send = async (from, to, t) => sentTo.push({ from, to, t });
+  // at 06:30 India time it goes once; a second run the same day does nothing
+  const at = (h, m) => new Date(`${new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00+05:30`);
+  await query(`UPDATE config SET value = value - 'lastDate' WHERE key = 'digest'`);
+  assert.equal(await digest.runDigest(manager, send, { now: at(5, 59) }), null, 'not before 06:00');
+  assert.ok(await digest.runDigest(manager, send, { now: at(6, 30) }));
+  assert.equal(await digest.runDigest(manager, send, { now: at(7, 0) }), null, 'only once a day');
+  assert.deepEqual(sentTo.map((x) => [x.from, x.to]), [['dig1', '916361321377']]);
+  // after a long outage: no "good morning" in the afternoon
+  await query(`UPDATE config SET value = value - 'lastDate' WHERE key = 'digest'`);
+  assert.equal(await digest.runDigest(manager, send, { now: at(13, 0) }), null);
+  // a number not connected on this server never sends (the server that holds it will)
+  manager.get('dig1').status = 'elsewhere';
+  assert.equal(await digest.runDigest(manager, send, { now: at(6, 30) }), null);
+  manager.get('dig1').status = 'open';
+  // settings + a test send through the API
+  assert.equal((await call('GET', '/api/digest')).data.time, '06:00');
+  assert.equal((await call('POST', '/api/digest/test')).status, 200);
+  await digest.saveDigest({ account: 'guests' });
+});
+
+test('MCP response budget: long answers are cut at a line and say what was left out', async () => {
+  const { budget } = await import('../src/mcp.js');
+  const long = Array.from({ length: 3000 }, (_, i) => `line ${i} ${'x'.repeat(20)}`).join('\n');
+  const out = budget(long);
+  assert.ok(out.length < 16400);
+  assert.match(out, /more line\(s\) not shown/);
+  assert.equal(budget('short'), 'short');
 });
