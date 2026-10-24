@@ -19,7 +19,7 @@ import * as templates from './templates.js';
 import * as rules from './rules.js';
 import { findPerson } from './people.js';
 import * as lists from './lists.js';
-import { getPlaybook, savePlaybook, getCampaignPlaybook, listCampaignPlaybooks } from './playbook.js';
+import { getPlaybook, savePlaybook, campaignRules as getCampaignPlaybook, listCampaignPlaybooks } from './playbook.js';
 import { logEvent } from './db.js';
 import { HISTORY_MODES } from './describe.js';
 import { normalizeSettings } from './settings.js';

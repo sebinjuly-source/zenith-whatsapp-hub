@@ -1940,3 +1940,17 @@ test('campaign playbooks: main + one per campaign; the AI sees the names, reads 
   await call('DELETE', '/api/playbooks/Corporate%20sales');
   assert.deepEqual((await call('GET', '/api/playbooks')).data, []);
 });
+
+test('campaign playbooks can include shared rules (INCLUDE: …), one level, no loops', async () => {
+  await mcp('save_playbook', { campaign: 'Hiring – all roles', text: 'Never pay candidates before joining.' });
+  await mcp('save_playbook', { campaign: 'Chef', text: 'INCLUDE: Hiring – all roles\nChef offer: Indian cooking.\nINCLUDE: Chef\nINCLUDE: Missing one' });
+  const chef = await mcp('get_playbook', { campaign: 'Chef' });
+  assert.match(chef, /--- included: Hiring – all roles ---\nNever pay candidates before joining\.\n--- end of Hiring – all roles ---\nChef offer: Indian cooking\./);
+  assert.match(chef, /\(INCLUDE: no playbook "Chef"\)/, 'a playbook cannot include itself');
+  assert.match(chef, /\(INCLUDE: no playbook "Missing one"\)/);
+  assert.match(await mcp('hub_overview', { campaign: 'Chef' }), /included: Hiring – all roles/);
+  // the dashboard edits the raw text (with the INCLUDE line)
+  assert.match((await call('GET', '/api/playbook?campaign=Chef')).data.text, /^INCLUDE: Hiring – all roles/);
+  await call('DELETE', '/api/playbooks/Chef');
+  await call('DELETE', `/api/playbooks/${encodeURIComponent('Hiring – all roles')}`);
+});

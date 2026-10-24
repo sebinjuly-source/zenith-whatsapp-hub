@@ -52,6 +52,23 @@ export async function getCampaignPlaybook(campaign) {
   return r ? { campaign: r.key.slice('playbook:'.length), text: r.value.text, updatedAt: r.updated_at } : null;
 }
 
+/**
+ * A campaign's rules as the AI should read them: lines "INCLUDE: <campaign>" pull in another campaign playbook
+ * (e.g. "Chef" includes "Hiring – all roles"), one level deep, so shared rules are written once.
+ */
+export async function campaignRules(campaign) {
+  const p = await getCampaignPlaybook(campaign);
+  if (!p) return null;
+  const lines = [];
+  for (const line of p.text.split('\n')) {
+    const m = line.match(/^\s*INCLUDE:\s*(.+?)\s*$/i);
+    if (!m) { lines.push(line); continue; }
+    const inc = m[1].toLowerCase() === p.campaign.toLowerCase() ? null : await getCampaignPlaybook(m[1]);
+    lines.push(inc ? `--- included: ${inc.campaign} ---\n${inc.text.split('\n').filter((l) => !/^\s*INCLUDE:/i.test(l)).join('\n')}\n--- end of ${inc.campaign} ---` : `(INCLUDE: no playbook "${m[1]}")`);
+  }
+  return { ...p, text: lines.join('\n') };
+}
+
 /** Campaign playbooks that exist: [{ campaign, chars, updatedAt }]. */
 export async function listCampaignPlaybooks() {
   const rows = await query(`SELECT key, value, updated_at FROM config WHERE key LIKE 'playbook:%' ORDER BY key`);
