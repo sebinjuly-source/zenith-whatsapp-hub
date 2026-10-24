@@ -304,15 +304,15 @@ function buildServer(playbook = '') {
     who: z.enum(['them', 'me', 'any']).optional().describe('"them" (default) = they wrote it — what they asked for; "me" = we wrote it; "any"'),
     since: z.string().optional(), until: z.string().optional().describe('Only matches before this date (YYYY-MM-DD) — e.g. old leads'),
     include_groups: z.boolean().optional(), include_candidates: z.boolean().optional().describe('Also people on job candidate lists (default false)'),
-    limit: z.number().int().min(1).max(200).optional(), offset: z.number().int().min(0).optional(),
+    limit: z.number().int().min(1).max(60).optional().describe('People per page (default 50)'), offset: z.number().int().min(0).optional(),
   }, async (a) => {
     const s = await manager.resolve(a.account);
     const r = await store.searchPeople(s.id, a.words, { who: a.who || 'them', sinceTs: toTs(a.since), untilTs: toTs(a.until),
-      peopleOnly: !a.include_groups, excludeCandidates: !a.include_candidates, limit: a.limit || 60, offset: a.offset || 0 });
+      peopleOnly: !a.include_groups, excludeCandidates: !a.include_candidates, excludePhones: await (await import('./notify.js')).alertPhones(), limit: Math.min(a.limit || 50, 60), offset: a.offset || 0 });
     if (!r.total) return `Nobody on ${s.id} matches ${r.words.join(', ')}${a.who === 'me' ? '' : ' (in their own messages — try who="any")'}.`;
     const from = (a.offset || 0) + 1;
-    const lines = r.rows.map((x) => [x.chat_jid.split('@')[0], trim(x.name, 34), x.n ? `${x.n} match${x.n > 1 ? 'es' : ''}, last ${fmtTime(x.last_hit)}: "${trim(x.sample, 110)}"` : 'name matches',
-      `chat last ${fmtTime(x.last_ts)} (${x.last_from_me ? 'me' : 'them'}): ${trim(x.last_preview, 70)}`, x.tags?.length ? `tags:${x.tags.join(',')}` : null, x.summary ? `summary:${trim(x.summary, 100)}` : null].filter(Boolean).join(' | '));
+    const lines = r.rows.map((x) => [x.chat_jid.split('@')[0], trim(x.name, 34), x.n ? `${x.n}× last ${fmtTime(x.last_hit).slice(0, 10)}: "${trim(x.sample, 80)}"` : 'name matches',
+      `last chat ${fmtTime(x.last_ts).slice(0, 10)} ${x.last_from_me ? 'me' : 'them'}: ${trim(x.last_preview, 45)}`, x.tags?.length ? `tags:${x.tags.join(',')}` : null, x.summary ? `summary:${trim(x.summary, 80)}` : null].filter(Boolean).join(' | '));
     const next = r.total > from - 1 + r.rows.length ? `\nMore: offset=${from - 1 + r.rows.length} (${r.total - (from - 1 + r.rows.length)} left).` : '';
     return `${r.total} people on ${s.id} match ${r.words.join(', ')} — showing ${from}–${from - 1 + r.rows.length}, most recent match first (number | name | matches | their chat):\n${lines.join('\n')}${next}`;
   });

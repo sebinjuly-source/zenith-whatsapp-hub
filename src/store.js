@@ -459,7 +459,7 @@ export async function searchMessages(accountId, text, { chatJid, fromMe, sinceTs
  * inside longer words (travel → travels, Youngtravels); shorter ones ("HR") must be whole words.
  * who: 'them' (they wrote it — what they want), 'me', or any. Returns { total, rows }.
  */
-export async function searchPeople(accountId, text, { who, sinceTs, untilTs, peopleOnly = true, excludeCandidates = true, limit = 50, offset = 0 } = {}) {
+export async function searchPeople(accountId, text, { who, sinceTs, untilTs, peopleOnly = true, excludeCandidates = true, excludePhones = [], limit = 50, offset = 0 } = {}) {
   const words = [...new Set(String(text || '').replace(/["()]/g, ' ').split(/[\s,]+/).filter((w) => w && !/^(or|and)$/i.test(w) && !w.startsWith('-')).map((w) => w.toLowerCase()))].slice(0, 20);
   if (!words.length) throw new Error('Give the words to look for, e.g. "company GST travels agency booking"');
   const p = [accountId];
@@ -478,6 +478,10 @@ export async function searchPeople(accountId, text, { who, sinceTs, untilTs, peo
   const chatScope = [
     peopleOnly ? `ch.jid NOT LIKE '%@g.us' AND ch.jid NOT LIKE '%broadcast%' AND ch.jid NOT LIKE '%@newsletter'` : 'TRUE',
     excludeCandidates ? 'NOT EXISTS (SELECT 1 FROM list_members lm WHERE lm.jid = ch.jid)' : 'TRUE',
+    // never the owner's own hub numbers or alert phones (their chats mention everything)
+    "split_part(ch.jid, '@', 1) NOT IN (SELECT phone FROM accounts WHERE phone IS NOT NULL)",
+    "NOT ('own-number' = ANY(COALESCE(ct.tags, '{}')))",
+    excludePhones.length ? `split_part(ch.jid, '@', 1) <> ALL(${add(excludePhones)}::text[])` : 'TRUE',
   ].join(' AND ');
   const namePattern = long.length ? add(long.map((w) => `%${w}%`)) : null;
   const sql = `

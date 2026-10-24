@@ -1793,9 +1793,9 @@ test('find_people: one line per person across all history, names count, candidat
   await mcp('import_list', { account: 'leads1', name: 'Chef – Leads test', members: [{ phone: '9733600004', name: 'Cook' }] });
   const out = await mcp('find_people', { account: 'leads1', words: 'company GST travels rooms rate corporate' });
   assert.match(out, /^4 people on leads1 match/);
-  assert.match(out, /919733600001 .*1 match/);
+  assert.match(out, /919733600001 .*1× last/);
   assert.match(out, /919733600002 \| Bala Young Travels \| name matches/);
-  assert.match(out, /919733600009 .*120 matches/, 'many matching messages are one line');
+  assert.match(out, /919733600009 .*120× last/, 'many matching messages are one line');
   assert.doesNotMatch(out, /919733600004|120363000000000001|919733600006/);
   // old leads only, and what we said ourselves when asked
   assert.match(await mcp('find_people', { account: 'leads1', words: 'company', until: '2025-12-31' }), /^1 people/);
@@ -1824,11 +1824,11 @@ test('media: an expired WhatsApp link asks the phone again, keeps a copy; a gone
     const html = await res.text();
     assert.equal(res.status, 404);
     assert.match(html, /File not available/);
-    assert.match(html, /no longer on WhatsApp's servers and the phone could not send it again/);
+    assert.match(html, /has expired on WhatsApp's servers and the phone could not send it again/);
     assert.equal(s.reuploadAsked, 1, 'the phone was asked for the file');
     // scripts get JSON
     const j = await fetch(`${base}/api/media/leads1/919733600001@s.whatsapp.net/DOC1`, { headers: { 'x-api-key': 'k', accept: 'application/json' } });
-    assert.match((await j.json()).error, /no longer on WhatsApp/);
+    assert.match((await j.json()).error, /has expired on WhatsApp/);
   } finally {
     s.sock = savedSock;
     delete s.downloadImpl;

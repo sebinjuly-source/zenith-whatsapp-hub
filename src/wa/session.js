@@ -814,7 +814,9 @@ export class Session extends EventEmitter {
       try {
         fresh = await withTimeout(this.sock.updateMediaMessage(waMsg), 45000, 'Asking the phone for the file');
       } catch (e) {
-        throw new Error(`This file (sent ${sent}) is no longer on WhatsApp's servers and the phone could not send it again (${e.message}). Open the chat on the phone, or ask them to send it once more.`);
+        // Baileys reports the phone's answer as "Failed to re-upload media (<code>)": 2 = the phone doesn't have it
+        const why = /\(2\)/.test(e.message) ? 'the phone no longer has it either (deleted, or never downloaded on the phone)' : `the phone could not send it again: ${e.message}`;
+        throw new Error(`This file (sent ${sent}) has expired on WhatsApp's servers and ${why}. Ask them to send it once more.`);
       }
       const buffer = await download(fresh, 'buffer', {});
       const m = fresh.message?.[row.media.kind];
