@@ -304,7 +304,7 @@ function buildServer(playbook = '') {
     who: z.enum(['them', 'me', 'any']).optional().describe('"them" (default) = they wrote it — what they asked for; "me" = we wrote it; "any"'),
     since: z.string().optional(), until: z.string().optional().describe('Only matches before this date (YYYY-MM-DD) — e.g. old leads'),
     include_groups: z.boolean().optional(), include_candidates: z.boolean().optional().describe('Also people on job candidate lists (default false)'),
-    limit: z.number().int().min(1).max(60).optional().describe('People per page (default 50)'), offset: z.number().int().min(0).optional(),
+    limit: z.number().int().min(1).max(500).optional().describe('People per page (default 50, at most 60 — page on with offset)'), offset: z.number().int().min(0).optional(),
   }, async (a) => {
     const s = await manager.resolve(a.account);
     const r = await store.searchPeople(s.id, a.words, { who: a.who || 'them', sinceTs: toTs(a.since), untilTs: toTs(a.until),
