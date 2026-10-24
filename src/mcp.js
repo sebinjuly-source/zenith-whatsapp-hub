@@ -927,7 +927,7 @@ function buildServer(playbook = '') {
       followupAt: f === undefined ? undefined : f || null, availableFrom: localTime(a.available_from) || undefined, followupNote: a.follow_up_note,
     });
     await ai(l.account_id, `${m.name || m.phone} → ${m.stage || '-'}${m.visit_at ? ' (visit ' + d(m.visit_at) + ')' : ''}${m.followup_at ? ' (follow up ' + d(m.followup_at) + ')' : ''}${a.outcome ? ' – ' + a.outcome : ''} — ${l.name}`, l.role);
-    const parts = [m.stage && `stage ${m.stage}`, m.visit_at && `visit ${d(m.visit_at)} (interview on the Board for the owner)`, m.followup_at && `follow-up ${d(m.followup_at)} (on the Board)`, m.outcome && `outcome ${m.outcome}`, m.notes && 'notes saved'].filter(Boolean);
+    const parts = [m.stage && `stage ${m.stage}`, m.visit_at && `visit ${d(m.visit_at)}${['interested', 'date_given'].includes(m.stage) ? ' (interview on the Board for the owner; reminders the evening before and 3 h before)' : ' (no interview card: stage ' + m.stage + ')'}`, m.followup_at && `follow-up ${d(m.followup_at)} (on the Board)`, m.outcome && `outcome ${m.outcome}`, m.notes && 'notes saved'].filter(Boolean);
     return `${m.name || m.phone}: ${parts.join(', ') || 'updated'}.`;
   });
 
