@@ -124,7 +124,7 @@ Useful asks: "who replied today?", "draft replies to the chefs who wrote", "move
 AI tools: `list_accounts, list_chats, get_messages, search_messages, get_contact, update_contact, find_person,
 send_message (text, files, buttons, wa_template, schedule_at), bulk_send, list_outbox, approve_draft, reject_draft, move_messages,
 approve_task, list_tasks (kind=reply|followup|visit|scheduled|reminder, for=you|ai, due_now), create_task / update_task (for, priority), add_task_note, task_history, list_lists, list_members, import_list,
-send_to_list (wa_template, schedule_at), set_followup, update_list_member (visit_at, available_from, follow_up_at), pipeline, set_pipeline, known_candidates,
+send_to_list (wa_template, schedule_at, attachment_url — one image for everyone, each person's message as its caption), set_followup, update_list_member (visit_at, available_from, follow_up_at), pipeline, set_pipeline, known_candidates,
 list_templates, save_template, list_meta_templates, create_meta_template, meta_health_check, message_timeline,
 hub_overview, find_contacts, save_contact, archive_list, remove_list_member, list_rules, save_rule, set_chat_state, get_playbook, save_playbook, recent_activity, save_media,
 fetch_older_messages, backfill_history, list_shared_contacts, find_followups`.
@@ -288,6 +288,7 @@ lists first); `roleFilter` turns a picked campaign ("none" = on no list) into SQ
   `playbook`) as its instructions. Every tool returns short text; errors come back as `Error: …` text.
   Dates the AI gives without a timezone are India time (`localTime`).
 - REST: `/api/*` with `x-api-key` or the dashboard cookie; the dashboard (`public/app.js`) uses only these.
+- Public sales images: `public/sales/*.jpg` are served without a key at `<server>/sales/<file>` (Premium Room poster, festival greetings) so messages can attach them by URL. They are built from the Deluxe poster layout (dark + gold, crown logo, photo, round inset, icon row, address bar).
   `/webhook` is the old dental-bot format for Apps Script.
 
 ### 10.9 Data model (main tables)
