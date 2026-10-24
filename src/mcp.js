@@ -340,7 +340,10 @@ function buildServer(playbook = '') {
       }
       p.push(a.limit || 50);
       const rows = await query(
-        `SELECT m.chat_jid, ch.name AS chat_name, m.ts, m.sender_name, m.from_me, m.vcards FROM messages m
+        `SELECT m.chat_jid, ch.name AS chat_name, m.ts, m.from_me, m.vcards,
+           -- older group messages have no stored sender name: use the sender's contact name, else their number
+           COALESCE(m.sender_name, (SELECT COALESCE(c.saved_name, c.name, c.notify) FROM contacts c WHERE c.account_id = m.account_id AND c.jid = m.sender_jid), split_part(m.sender_jid, '@', 1)) AS sender_name
+         FROM messages m
          LEFT JOIN chats ch ON ch.account_id = m.account_id AND ch.jid = m.chat_jid
          WHERE ${where} ORDER BY m.ts DESC LIMIT $${p.length}`,
         p,
@@ -961,7 +964,8 @@ function buildServer(playbook = '') {
     const u = await lists.setPipeline(l.id, { enabled: a.enabled, autoSend: a.auto_send, remindHoursBefore: a.remind_hours_before, eveningReminderAt: a.evening_reminder_at, sameDayHoursBefore: a.same_day_hours_before, askDateAfterHours: a.ask_date_after_hours, reminderText: a.reminder_text, askDateText: a.ask_date_text, reminderWaTemplate: a.reminder_wa_template, askDateWaTemplate: a.ask_date_wa_template });
     await ai(l.account_id, `Pipeline settings for "${l.name}" updated`, l.role);
     const p = u.pipeline;
-    return `Pipeline for "${l.name}": ${p.enabled ? 'on' : 'off'}, ${p.autoSend ? 'sends automatically' : 'drafts for approval'}, reminders the evening before at ${p.eveningReminderAt} and ${p.sameDayHoursBefore} h before each interview, ask for a date after ${p.askDateAfterHours}h.`;
+    if (!p.enabled) return `Pipeline for "${l.name}": off — no automatic ask-for-a-date, interview reminders or "did they come?" cards for this list.`;
+    return `Pipeline for "${l.name}": on, ${p.autoSend ? 'sends automatically' : 'drafts for approval'}, reminders the evening before at ${p.eveningReminderAt} and ${p.sameDayHoursBefore} h before each interview, ask for a date after ${p.askDateAfterHours}h.`;
   });
 
   tool('known_candidates', 'People already on any list for a job role (all earlier batches). Use it to de-duplicate a new WorkIndia batch BEFORE unlocking or messaging: pass names, phones or places in query (several, comma-separated) and get only the matches — import_list also skips known people by itself and says why. Without query: counts per list, plus everyone only if all=true (long).', {

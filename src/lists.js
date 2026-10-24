@@ -57,6 +57,8 @@ async function payloadFor(session, jid, text, waTemplate, vars, extra = {}) {
 /** Funnel stages (set by you or the AI). Closed ones are never messaged again from the list. */
 export const STAGES = ['interested', 'date_given', 'visited', 'trial', 'selected', 'joined', 'no_show', 'not_interested', 'rejected'];
 export const CLOSED_STAGES = ['joined', 'not_interested', 'rejected'];
+/** Roles whose lists get the candidate pipeline by default (anything else — sales, guests — starts with it off). */
+const HIRING_ROLES = ['chef', 'front office', 'housekeeping', 'service', 'driver', 'security', 'general', 'test'];
 const DEFAULT_PIPELINE = {
   enabled: true,
   autoSend: false, // false = reminders/questions wait for approval like other AI messages
@@ -119,11 +121,14 @@ export async function importList({ account, name, role, since, source, members, 
   if (!name?.trim()) throw new Error('A list needs a name');
   role = (role || roleFromName(name) || 'General').trim();
   const [list] = await query(
-    `INSERT INTO lists (account_id, name, source, since, followup, role) VALUES ($1,$2,$3,COALESCE($4::timestamptz, now()),$5,$6)
+    `INSERT INTO lists (account_id, name, source, since, followup, role, pipeline) VALUES ($1,$2,$3,COALESCE($4::timestamptz, now()),$5,$6,$7)
      ON CONFLICT (account_id, name) DO UPDATE SET source = COALESCE(EXCLUDED.source, lists.source),
        since = COALESCE($4::timestamptz, lists.since), role = COALESCE(lists.role, EXCLUDED.role), updated_at = now()
      RETURNING *`,
-    [s.id, name.trim(), source || null, since || null, JSON.stringify({ ...DEFAULT_FOLLOWUP, ...(followup || {}) }), role],
+    // the candidate pipeline (ask for a date, interview reminders in Hinglish) is for hiring lists only; a sales or
+    // guest list starts with it off (a new list only — an existing list keeps its settings)
+    [s.id, name.trim(), source || null, since || null, JSON.stringify({ ...DEFAULT_FOLLOWUP, ...(followup || {}) }), role,
+      JSON.stringify(HIRING_ROLES.includes(String(role).toLowerCase()) ? {} : { enabled: false })],
   );
   // People already on ANOTHER list of the same role are not added again (never re-message a past batch).
   const known = new Map();

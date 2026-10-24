@@ -1954,3 +1954,20 @@ test('campaign playbooks can include shared rules (INCLUDE: …), one level, no 
   await call('DELETE', '/api/playbooks/Chef');
   await call('DELETE', `/api/playbooks/${encodeURIComponent('Hiring – all roles')}`);
 });
+
+test('sales and guest lists start without the candidate pipeline (no Hinglish interview texts to a corporate contact)', async () => {
+  const listsMod = await import('../src/lists.js');
+  await manager.create({ id: 'sales1', label: 'Sales1' });
+  fake('sales1');
+  await mcp('import_list', { account: 'sales1', name: 'Corporate – test', role: 'Corporate sales', members: [{ phone: '9733900001', name: 'Asha', message: 'Hello Asha' }] });
+  const l = await listsMod.getList('Corporate – test');
+  assert.equal(l.pipeline.enabled, false);
+  await mcp('update_list_member', { list: 'Corporate – test', phone: '9733900001', stage: 'interested' });
+  await query(`UPDATE list_members SET stage_at = now() - interval '9 hours', updated_at = now() - interval '9 hours' WHERE list_id = $1`, [l.id]);
+  await listsMod.runPipeline();
+  assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE list_id = $1`, [l.id]))[0].n, 0, 'nothing automatic');
+  assert.match(await mcp('set_pipeline', { list: 'Corporate – test', enabled: false }), /off — no automatic ask-for-a-date/);
+  // a hiring list still gets it
+  await mcp('import_list', { account: 'sales1', name: 'Chef – pipeline default', members: [{ phone: '9733900002', name: 'Cook' }] });
+  assert.notEqual((await listsMod.getList('Chef – pipeline default')).pipeline.enabled, false);
+});
