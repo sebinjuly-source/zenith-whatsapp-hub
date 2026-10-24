@@ -3,6 +3,8 @@
  *   header "x-api-key: <key>", or "?key=<key>" (handy for Apps Script), or the dashboard login cookie.
  */
 import express from 'express';
+import * as scope from './scope.js';
+import { roleOf, roleFilter } from './campaign.js';
 import cookieParser from 'cookie-parser';
 import path from 'path';
 import fs from 'fs';
@@ -121,6 +123,22 @@ export function buildApp() {
 
   const api = express.Router();
   api.use((req, res, next) => (authed(req) ? next() : res.status(401).json({ error: 'Unauthorized' })));
+  // Campaign scope (scope.js): the campaign picked in the dashboard decides what the dashboard sees and may change.
+  api.use(async (req, res, next) => {
+    try {
+      req.focus = actorOf(req) === 'you' ? await scope.getFocus() : '';
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+  // inside a campaign, every read is that campaign's — asking for another one is refused, not quietly answered
+  const roleQ = (req) => {
+    if (req.focus && req.query.role && !scope.same(req.query.role, req.focus)) scope.assertSame(req.focus, req.query.role, `Campaign "${req.query.role}"`);
+    return req.focus || req.query.role || undefined;
+  };
+  const sameCampaign = (req, role, what) => { if (req.focus) scope.assertSame(req.focus, role, what); };
+  const personQ = (req, acc, jid) => scope.assertPerson(req.focus, acc, jid);
 
   // ---- Accounts
   // Every page loads this: the per-number checks run in parallel, and message/chat counts (they scan the big
@@ -143,7 +161,9 @@ export function buildApp() {
   }));
   // Cheap counter for the navigation badge (instead of downloading every draft)
   api.get('/outbox/count', wrap(async (req, res) => {
-    const [r] = await query(`SELECT count(*)::int AS n FROM outbox WHERE status = ANY($1)`, [String(req.query.status || 'draft').split(',')]);
+    const role = roleQ(req);
+    const [r] = await query(`SELECT count(*)::int AS n FROM outbox o WHERE o.status = ANY($1)
+      AND ($2::text IS NULL OR ${roleFilter(`COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')})`, 2)})`, [String(req.query.status || 'draft').split(','), role || null]);
     res.json(r);
   }));
   api.post('/accounts', wrap(async (req, res) => {
@@ -236,17 +256,19 @@ export function buildApp() {
 
   // ---- Chats, messages, contacts
   api.get('/accounts/:id/chats', wrap(async (req, res) => {
-    const { q, kind, tag, limit, offset, waiting, state, role } = req.query;
+    const { q, kind, tag, limit, offset, waiting, state } = req.query;
     res.json(await store.listChats(req.params.id, {
-      q, kind, tag, state, role, limit: parseInt(limit, 10) || 50, offset: parseInt(offset, 10) || 0, waitingOnMe: waiting === '1',
+      q, kind, tag, state, role: roleQ(req), limit: parseInt(limit, 10) || 50, offset: parseInt(offset, 10) || 0, waitingOnMe: waiting === '1',
     }));
   }));
   api.get('/accounts/:id/chats/:jid/messages', wrap(async (req, res) => {
+    await personQ(req, req.params.id, req.params.jid);
     res.json(await store.getMessages(req.params.id, req.params.jid, {
       limit: parseInt(req.query.limit, 10) || 50, beforeTs: toTs(req.query.before), afterTs: toTs(req.query.after),
     }));
   }));
   api.post('/accounts/:id/chats/:jid/older', wrap(async (req, res) => {
+    await personQ(req, req.params.id, req.params.jid);
     const r = await outbox.requestJob(manager.get(req.params.id), 'fetch_older', { chat: req.params.jid, count: req.body?.count || 50 });
     res.json({ ok: true, note: r.ran ? 'Asked the phone — older messages arrive within a minute if it is online.' : 'Queued for the server connected to this number — older messages arrive in a minute or two.' });
   }));
@@ -262,7 +284,10 @@ export function buildApp() {
     if (j) await act(req, j.account_id, `Stopped ${j.kind === 'backfill' ? 'deep history import' : j.kind} (job #${req.params.id})`);
     res.json({ ok: true });
   }));
-  api.get('/accounts/:id/contacts/:jid', wrap(async (req, res) => res.json(await store.getContact(req.params.id, req.params.jid))));
+  api.get('/accounts/:id/contacts/:jid', wrap(async (req, res) => {
+    await personQ(req, req.params.id, req.params.jid);
+    res.json(await store.getContact(req.params.id, req.params.jid));
+  }));
   // Phone address book (linked numbers only): never fails the save — the result says what happened
   const savePhone = async (accountId, jid, name) => {
     const s = manager.get(accountId);
@@ -275,6 +300,7 @@ export function buildApp() {
     }
   };
   api.patch('/accounts/:id/contacts/:jid', wrap(async (req, res) => {
+    await personQ(req, req.params.id, req.params.jid);
     const b = req.body || {};
     const c = await store.updateContact(req.params.id, req.params.jid, b);
     let phone = null;
@@ -297,42 +323,56 @@ export function buildApp() {
   api.get('/search', wrap(async (req, res) => {
     const { account, q, chat, fromMe, since, until, type, limit } = req.query;
     res.json(await store.searchMessages(account || null, q, {
-      chatJid: chat, fromMe: fromMe === undefined ? undefined : fromMe === 'true',
+      campaign: req.focus || undefined, chatJid: chat, fromMe: fromMe === undefined ? undefined : fromMe === 'true',
       sinceTs: toTs(since), untilTs: toTs(until), type, limit: parseInt(limit, 10) || 50,
     }));
   }));
 
   // ---- Templates (saved messages with {fields})
-  api.get('/templates', wrap(async (req, res) => res.json(await templates.listTemplates(req.query.account))));
+  const templateQ = async (req, id) => {
+    const [t] = await query('SELECT role, name FROM templates WHERE id = $1', [id]);
+    if (t) sameCampaign(req, t.role || '(all campaigns)', `Template "${t.name}"`);
+  };
+  api.get('/templates', wrap(async (req, res) => res.json(await templates.listTemplates(req.query.account, { role: roleQ(req) }))));
   api.post('/templates', wrap(async (req, res) => {
-    const t = await templates.saveTemplate(req.body || {});
+    const t = await templates.saveTemplate({ ...(req.body || {}), role: req.focus || req.body?.role || null });
     await act(req, t.account_id, `Saved template "${t.name}"`);
     res.json(t);
   }));
   api.patch('/templates/:id', wrap(async (req, res) => {
+    await templateQ(req, req.params.id);
     const t = await templates.saveTemplate({ ...(req.body || {}), id: req.params.id });
     await act(req, t.account_id, `Edited template "${t.name}"`);
     res.json(t);
   }));
   api.delete('/templates/:id', wrap(async (req, res) => {
+    await templateQ(req, req.params.id);
     const t = await templates.deleteTemplate(req.params.id);
     await act(req, t.account_id, `Deleted template "${t.name}"`);
     res.json({ ok: true });
   }));
 
   // ---- Rules
-  api.get('/rules', wrap(async (req, res) => res.json(await rules.listRules(req.query.account))));
+  const ruleQ = async (req, id) => {
+    const [r] = await query('SELECT conditions, name FROM rules WHERE id = $1', [id]);
+    if (r) sameCampaign(req, r.conditions?.role || '(all campaigns)', `Rule "${r.name}"`);
+  };
+  // inside a campaign a rule only ever works on that campaign's people
+  const ruleBody = (req) => (req.focus ? { ...(req.body || {}), conditions: { ...(req.body?.conditions || {}), role: req.focus } } : req.body || {});
+  api.get('/rules', wrap(async (req, res) => res.json(await rules.listRules(req.query.account, { role: roleQ(req) }))));
   api.post('/rules', wrap(async (req, res) => {
-    const r = await rules.saveRule(req.body || {});
+    const r = await rules.saveRule(ruleBody(req));
     await act(req, r.account_id, `Saved rule "${r.name}"`);
     res.json(r);
   }));
   api.patch('/rules/:id', wrap(async (req, res) => {
-    const r = await rules.saveRule({ ...(req.body || {}), id: req.params.id });
+    await ruleQ(req, req.params.id);
+    const r = await rules.saveRule({ ...ruleBody(req), id: req.params.id });
     await act(req, r.account_id, `Edited rule "${r.name}"${r.enabled ? '' : ' (off)'}`);
     res.json(r);
   }));
   api.delete('/rules/:id', wrap(async (req, res) => {
+    await ruleQ(req, req.params.id);
     const r = await rules.deleteRule(req.params.id);
     await act(req, r.account_id, `Deleted rule "${r.name}"`);
     res.json({ ok: true });
@@ -342,26 +382,31 @@ export function buildApp() {
   api.get('/lists', wrap(async (req, res) => {
     // ?archived=1 includes archived lists
     for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND ($2 OR archived IS NULL)', [req.query.account || null, req.query.archived === '1'])) await lists.refreshList(l.id);
-    res.json(await lists.listLists(req.query.account, req.query.role, { includeArchived: req.query.archived === '1' }));
+    const role = roleQ(req);
+    res.json(await lists.listLists(req.query.account, role && !scope.same(role, 'none') ? role : role ? '(no list belongs to Hotel / no campaign)' : undefined, { includeArchived: req.query.archived === '1' }));
   }));
   // Create/extend a list: { account, name, since?, source?, members: [{ phone, name, message?, ...fields }], followup? }
   api.post('/lists/import', wrap(async (req, res) => {
-    const r = await lists.importList(req.body || {});
+    if (req.focus && scope.same(req.focus, 'none')) throw new Error('A list belongs to a campaign — pick the campaign (or create one) at the top first');
+    const r = await lists.importList({ ...(req.body || {}), ...(req.focus ? { role: req.focus } : {}) });
     await act(req, r.list.account_id, `Imported ${r.imported} people into list "${r.list.name}"${r.skipped.length ? ` (${r.skipped.length} skipped)` : ''}`, r.list.role);
     res.json(r);
   }));
   api.get('/lists/:id/members', wrap(async (req, res) => {
+    await scope.assertList(req.focus, req.params.id);
     const l = await lists.getList(req.params.id);
     await lists.refreshList(l.id);
     res.json(await lists.listMembers(l.id, { status: req.query.status, outcome: req.query.outcome }));
   }));
   api.patch('/lists/:id/members/:phone', wrap(async (req, res) => {
+    await scope.assertList(req.focus, req.params.id);
     const l = await lists.getList(req.params.id);
     const m = await lists.updateMember(l.id, req.params.phone, req.body || {});
     await act(req, l.account_id, `${m.name || m.phone}${req.body?.stage !== undefined ? ' → ' + (m.stage || 'no stage') : ''}${m.visit_at && req.body?.visitAt ? ' (visit ' + new Date(m.visit_at).toLocaleString('en-GB', { timeZone: config.tz }) + ')' : ''}${req.body?.outcome !== undefined ? ' – ' + (req.body.outcome || 'no outcome') : ''}${req.body?.notes ? ' (note)' : ''} — ${l.name}`, l.role);
     res.json(m);
   }));
   api.patch('/lists/:id/followup', wrap(async (req, res) => {
+    await scope.assertList(req.focus, req.params.id);
     const l = await lists.getList(req.params.id);
     const u = await lists.setFollowup(l.id, req.body || {});
     const f = u.followup;
@@ -369,6 +414,7 @@ export function buildApp() {
     res.json(u);
   }));
   api.post('/lists/:id/send', wrap(async (req, res) => {
+    await scope.assertList(req.focus, req.params.id);
     const l = await lists.getList(req.params.id);
     const r = await lists.sendToList(l.id, { ...(req.body || {}), createdBy: 'you' });
     r.cost = await taskCost(r.task?.id);
@@ -376,26 +422,44 @@ export function buildApp() {
     res.json(r);
   }));
   api.patch('/lists/:id/pipeline', wrap(async (req, res) => {
+    await scope.assertList(req.focus, req.params.id);
     const l = await lists.getList(req.params.id);
     const u = await lists.setPipeline(l.id, req.body || {});
     await act(req, l.account_id, `Pipeline settings for "${l.name}" updated`, l.role);
     res.json(u);
   }));
-  api.get('/pipeline', wrap(async (req, res) => res.json(await lists.pipelineSummary(req.query.account, req.query.role))));
+  api.get('/pipeline', wrap(async (req, res) => res.json(await lists.pipelineSummary(req.query.account, roleQ(req)))));
   api.get('/roles', wrap(async (req, res) => res.json((await query(`SELECT DISTINCT role FROM lists WHERE role IS NOT NULL AND archived IS NULL ORDER BY role`)).map((r) => r.role))));
   // Campaigns (job roles) with what is open in each: drafts, open cards, lists — for the campaign picker
   api.get('/campaigns', wrap(async (req, res) => {
-    const { roleOf } = await import('./campaign.js');
+    const names = await scope.campaignNames();
     res.json(await query(
       `SELECT r.role,
          (SELECT count(*)::int FROM lists l WHERE l.role = r.role AND l.archived IS NULL) AS lists,
          (SELECT count(*)::int FROM outbox o WHERE o.status = 'draft' AND COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')}) = r.role) AS drafts,
          (SELECT count(*)::int FROM tasks t WHERE t.status NOT IN ('done','cancelled') AND t.role = r.role) AS cards
-       FROM (SELECT DISTINCT role FROM lists WHERE role IS NOT NULL AND archived IS NULL) r ORDER BY r.role`,
+       FROM unnest($1::text[]) AS r(role) ORDER BY lower(r.role)`, [names],
     ));
   }));
+  // A new campaign: { name, playbook? } — then pick it at the top; the AI reads its playbook
+  api.post('/campaigns', wrap(async (req, res) => {
+    const r = await scope.createCampaign(req.body?.name, { description: req.body?.description || null });
+    if (req.body?.playbook?.trim()) await savePlaybook(req.body.playbook, r.name);
+    if (r.created) await act(req, null, `Created campaign "${r.name}"`, r.name);
+    res.json(r);
+  }));
+  // The campaign the dashboard (and the AI connected to it) works in: { campaign: '' = all, 'none' = hotel / no campaign }
+  api.get('/focus', wrap(async (req, res) => res.json({ campaign: await scope.getFocus() })));
+  api.put('/focus', wrap(async (req, res) => {
+    const c = await scope.setFocus(req.body?.campaign || '');
+    await act(req, null, `Switched to ${scope.label(c)}`);
+    res.json({ campaign: c });
+  }));
   // Everyone already contacted for a role (all batches) — to de-duplicate a new batch before unlocking
-  api.get('/known', wrap(async (req, res) => res.json(await lists.knownPeople(req.query.role, req.query.account))));
+  api.get('/known', wrap(async (req, res) => {
+    sameCampaign(req, req.query.role, `Campaign "${req.query.role}"`);
+    res.json(await lists.knownPeople(req.query.role, req.query.account));
+  }));
   // Morning summary: { enabled, time 'HH:MM', account } — sent to the alert phone(s); POST …/test sends one now
   api.get('/digest', wrap(async (req, res) => {
     const d = await import('./digest.js');
@@ -415,6 +479,7 @@ export function buildApp() {
   }));
   // One-tap call result on a Board card: { result: interested|date|no_answer|call_back|not_interested, at?, note? }
   api.post('/tasks/:id/call-result', wrap(async (req, res) => {
+    await scope.assertTask(req.focus, req.params.id);
     const { recordCallResult } = await import('./calls.js');
     const r = await recordCallResult(req.params.id, req.body || {});
     await act(req, null, `Call result for card #${req.params.id}: ${r.note.replace(/^📞 Call: /, '')}`);
@@ -428,34 +493,44 @@ export function buildApp() {
   }));
   // Main playbook (no campaign) or a campaign's (?campaign= / body.campaign); GET /playbooks lists the campaign ones
   api.get('/playbook', wrap(async (req, res) => {
-    if (!req.query.campaign) return res.json(await getPlaybook());
+    if (req.query.campaign) sameCampaign(req, req.query.campaign, 'That playbook');
+    if (!req.query.campaign && !req.focus) return res.json(await getPlaybook());
+    const campaign = req.query.campaign || req.focus; // (Express 5: req.query is read-only)
     const { getCampaignPlaybook } = await import('./playbook.js');
-    res.json((await getCampaignPlaybook(req.query.campaign)) || { campaign: req.query.campaign, text: '', updatedAt: null });
+    res.json((await getCampaignPlaybook(campaign)) || { campaign, text: '', updatedAt: null });
   }));
   api.put('/playbook', wrap(async (req, res) => {
-    const campaign = req.body?.campaign || null;
+    const campaign = req.body?.campaign || req.focus || null;
+    sameCampaign(req, campaign || '(main playbook)', 'That playbook');
     const p = await savePlaybook(req.body?.text, campaign);
     await act(req, null, campaign ? `Updated the "${campaign}" campaign playbook` : 'Updated the playbook');
     res.json(p);
   }));
   api.get('/playbooks', wrap(async (req, res) => {
     const { listCampaignPlaybooks } = await import('./playbook.js');
-    res.json(await listCampaignPlaybooks());
+    res.json((await listCampaignPlaybooks()).filter((p) => !req.focus || scope.same(p.campaign, req.focus)));
   }));
   api.delete('/playbooks/:campaign', wrap(async (req, res) => {
+    sameCampaign(req, req.params.campaign, 'That playbook');
     const { deleteCampaignPlaybook } = await import('./playbook.js');
     await deleteCampaignPlaybook(req.params.campaign);
     await act(req, null, `Deleted the "${req.params.campaign}" campaign playbook`);
     res.json({ ok: true });
   }));
   // Rows with status columns, e.g. for the Google Sheets script to write back
-  api.get('/lists/:id/export', wrap(async (req, res) => res.json(await lists.exportRows((await lists.getList(req.params.id)).id))));
+  api.get('/lists/:id/export', wrap(async (req, res) => (await scope.assertList(req.focus, req.params.id)) || res.json(await lists.exportRows((await lists.getList(req.params.id)).id))));
 
   // ---- One person across all numbers
-  api.get('/people', wrap(async (req, res) => res.json(await findPerson(req.query.q))));
+  api.get('/people', wrap(async (req, res) => {
+    const rows = await findPerson(req.query.q);
+    const ok = [];
+    for (const r of rows) if (await scope.personIn(req.focus, r.account_id, r.jid)) ok.push(r);
+    res.json(ok);
+  }));
 
   // ---- Chat state: open / snoozed (remind me on a date) / done
   api.patch('/accounts/:id/chats/:jid/state', wrap(async (req, res) => {
+    await personQ(req, req.params.id, req.params.jid);
     const { state, until, note } = req.body || {};
     const r = await store.setChatState(req.params.id, req.params.jid, state, { until, note });
     await act(req, req.params.id, `Chat ${req.params.jid.split('@')[0]} → ${state === 'snoozed' ? `remind on ${new Date(until).toLocaleString('en-GB', { timeZone: config.tz })}${note ? ' (' + note + ')' : ''}` : state}`);
@@ -471,9 +546,19 @@ export function buildApp() {
     const wait = scheduledAt ? false : waitArg;
     let { text, attachment } = req.body || {};
     if (!to) throw new Error('Missing "to" (phone number or chat id)');
+    let sendRole = null;
+    if (req.focus) {
+      const acc = (await manager.resolve(account)).id;
+      const jid = store.toJid(to);
+      if (!(await scope.personIn(req.focus, acc, jid))) {
+        const [p] = await query(`SELECT ${roleOf('$1', '$2')} AS c`, [acc, jid]);
+        if (p?.c) scope.assertSame(req.focus, p.c, `This person (${jid.split('@')[0]})`);
+      }
+      sendRole = scope.same(req.focus, 'none') ? null : req.focus;
+    }
     if (waTemplate) {
       // Meta template (Cloud API numbers): { name, language?, params: [...] }
-      const row = await outbox.enqueue({ account, to, payload: { waTemplate }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt });
+      const row = await outbox.enqueue({ account, to, payload: { waTemplate }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt, role: sendRole });
       if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent Meta template "${waTemplate.name}" to ${row.to_jid.split('@')[0]}`);
       if (!wait) return res.json(row);
       const result = await outbox.waitFor(row.id);
@@ -487,7 +572,7 @@ export function buildApp() {
       attachment = attachment || r.payload.attachment;
     }
     const buttons = Array.isArray(req.body?.buttons) ? req.body.buttons.filter(Boolean).slice(0, 3) : undefined;
-    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}), ...(buttons?.length ? { buttons } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt });
+    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}), ...(buttons?.length ? { buttons } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt, role: sendRole });
     if (row.duplicate && ['sent', 'failed', 'rejected'].includes(row.status)) return res.status(row.status === 'sent' ? 200 : 502).json(row);
     if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent a message from the dashboard to ${row.to_jid.split('@')[0]}`);
     if (!wait) return res.json(row);
@@ -498,7 +583,7 @@ export function buildApp() {
 
   api.get('/outbox', wrap(async (req, res) => {
     const rows = await outbox.listOutbox({
-      account: req.query.account, status: req.query.status, taskId: req.query.task, limit: parseInt(req.query.limit, 10) || 50, role: req.query.role,
+      account: req.query.account, status: req.query.status, taskId: req.query.task, limit: parseInt(req.query.limit, 10) || 50, role: roleQ(req),
     });
     // Each message's price (Meta numbers; linked phones are free), shown on the draft cards and summed in approvals
     const p = await priceRows(rows, manager);
@@ -534,7 +619,7 @@ export function buildApp() {
   // ?kind=reply → only "Reply to …" cards (candidates waiting for an answer); also followup, visit, scheduled, reminder, bulk, todo
   // ?for=you|ai → the owner's or the AI's cards; ?due_now=1 → due within the next hour or overdue
   api.get('/tasks', wrap(async (req, res) => {
-    const rows = await tasks.listTasks({ account: req.query.account, past: req.query.past === '1', role: req.query.role, assignee: req.query.for,
+    const rows = await tasks.listTasks({ account: req.query.account, past: req.query.past === '1', role: roleQ(req), assignee: req.query.for,
       dueBefore: req.query.due_now === '1' ? new Date(Date.now() + 3600000) : undefined });
     res.json(req.query.kind ? rows.filter((t) => t.kind === req.query.kind) : rows);
   }));
@@ -546,32 +631,38 @@ export function buildApp() {
   api.post('/tasks', wrap(async (req, res) => {
     const { account, title, details, dueAt, assignee, priority } = req.body || {};
     const s = await manager.resolve(account);
-    const t = await tasks.createTask({ account: s.id, title, details, dueAt, createdBy: actorOf(req) === 'you' ? 'you' : 'ai', assignee, priority });
+    const t = await tasks.createTask({ account: s.id, title, details, dueAt, createdBy: actorOf(req) === 'you' ? 'you' : 'ai', assignee, priority, role: req.focus && !scope.same(req.focus, 'none') ? req.focus : req.body?.role || null });
     await act(req, s.id, `Created task #${t.id} "${t.title}"`);
     res.json(t);
   }));
   // ---- Contact book (hub-wide, by group): GET ?q=&category=, groups, POST, PATCH, DELETE
   api.get('/directory', wrap(async (req, res) => {
     const d = await import('./directory.js');
-    res.json(await d.search({ q: req.query.q || '', category: req.query.category || '', limit: Number(req.query.limit) || 300 }));
+    res.json(await d.search({ q: req.query.q || '', category: req.query.category || '', limit: Number(req.query.limit) || 300, role: roleQ(req) || null }));
   }));
   api.get('/directory/groups', wrap(async (req, res) => {
     const d = await import('./directory.js');
-    res.json({ groups: await d.groups(), suggested: d.SUGGESTED_GROUPS });
+    res.json({ groups: await d.groups({ role: roleQ(req) || null }), suggested: d.SUGGESTED_GROUPS });
   }));
   api.post('/directory', wrap(async (req, res) => {
     const d = await import('./directory.js');
     const b = req.body || {};
-    const row = await d.saveEntry({ ...b, createdBy: 'you' });
+    const row = await d.saveEntry({ ...b, createdBy: 'you', role: req.focus || b.role || null });
     if (b.account && b.name) await store.updateContact(b.account, row.jid, { name: b.name }).catch(() => {});
     await act(req, b.account || null, `Saved ${row.name || row.phone} in Contacts → ${row.category}`);
     res.json(row);
   }));
+  const directoryQ = async (req, id) => {
+    const [r] = await query('SELECT role, name FROM directory WHERE id = $1', [id]);
+    if (r) sameCampaign(req, r.role || '(all campaigns)', `Contact "${r.name || id}"`);
+  };
   api.patch('/directory/:id', wrap(async (req, res) => {
+    await directoryQ(req, req.params.id);
     const d = await import('./directory.js');
     res.json(await d.update(req.params.id, req.body || {}));
   }));
   api.delete('/directory/:id', wrap(async (req, res) => {
+    await directoryQ(req, req.params.id);
     const d = await import('./directory.js');
     res.json(await d.remove(req.params.id));
   }));
@@ -596,11 +687,13 @@ export function buildApp() {
   }));
   // One-screen overview (same as the AI's hub_overview)
   api.post('/lists/:id/archive', wrap(async (req, res) => {
+    await scope.assertList(req.focus, req.params.id);
     const r = await lists.archiveList(req.params.id, req.body?.archived !== false, req.body?.reason);
     await act(req, r.list.account_id, `${r.list.archived ? 'Archived' : 'Unarchived'} list "${r.list.name}"`, r.list.role);
     res.json(r);
   }));
   api.delete('/lists/:id/members/:phone', wrap(async (req, res) => {
+    await scope.assertList(req.focus, req.params.id);
     const r = await lists.removeMembers(req.params.id, [req.params.phone]);
     if (!r.removed.length) return res.status(400).json({ error: r.kept[0]?.reason || 'Not removed' });
     await act(req, r.list.account_id, `Removed ${r.removed[0]} from list "${r.list.name}"`, r.list.role);
@@ -615,29 +708,35 @@ export function buildApp() {
   // the AI (due now) listing them; close: the selected cards are done (the AI card takes over).
   api.post('/tasks/bulk-note', wrap(async (req, res) => {
     const { ids = [], text = '', aiTask = true, close = false } = req.body || {};
+    for (const id of ids) await scope.assertTask(req.focus, id);
     const r = await tasks.bulkNote(ids, text, { aiTask, close, actor: 'you' });
     await act(req, r.task?.account_id || null, `Note on ${r.noted} card(s)${r.task ? ` → task #${r.task.id} for the AI` : ''}: ${String(text).slice(0, 80)}`);
     res.json(r);
   }));
   // A card's history (what happened and why) and its notes
-  api.get('/tasks/:id/log', wrap(async (req, res) => res.json(await tasks.taskLog(req.params.id))));
+  api.get('/tasks/:id/log', wrap(async (req, res) => (await scope.assertTask(req.focus, req.params.id)) || res.json(await tasks.taskLog(req.params.id))));
   api.post('/tasks/:id/notes', wrap(async (req, res) => {
+    await scope.assertTask(req.focus, req.params.id);
     // dashboard and the owner's scripts write as the owner; the AI writes through MCP (add_task_note)
     const t = await tasks.addNote(req.params.id, req.body?.text, 'you');
     res.json({ ok: true, id: t.id });
   }));
   api.patch('/tasks/:id', wrap(async (req, res) => {
+    await scope.assertTask(req.focus, req.params.id);
+    if (req.body?.role !== undefined) sameCampaign(req, req.body.role || 'none', 'Moving the card to that campaign');
     const t = await tasks.updateTask(req.params.id, { ...(req.body || {}), actor: 'you' }); // the AI changes cards through MCP
     await act(req, t.account_id, `Updated task #${t.id} "${t.title}"${req.body?.status ? ` → ${t.status}` : ''}`);
     res.json(t);
   }));
   api.post('/tasks/:id/approve', wrap(async (req, res) => {
+    await scope.assertTask(req.focus, req.params.id);
     const r = await outbox.approveTask(req.params.id);
     const [t] = await query('SELECT account_id, title FROM tasks WHERE id = $1', [req.params.id]);
     await act(req, t?.account_id, `Approved ${r.approved} messages of task #${req.params.id} "${t?.title}"`);
     res.json(r);
   }));
   api.post('/tasks/:id/cancel', wrap(async (req, res) => {
+    await scope.assertTask(req.focus, req.params.id);
     const t = await tasks.cancelTask(req.params.id);
     await act(req, t.account_id, `Cancelled task #${t.id} "${t.title}"`);
     res.json(t);
@@ -645,6 +744,7 @@ export function buildApp() {
   // Bulk send: { account, title, text (use {name}), recipients: [{ to, name, ... }], attachment?, scheduledAt?, skipIfContactedDays? }
   api.post('/bulk', wrap(async (req, res) => {
     const b = req.body || {};
+    if (req.focus) for (const r of b.recipients || []) await scope.assertPerson(req.focus, (await manager.resolve(b.account)).id, store.toJid(r.to), 'Recipient');
     const r = await outbox.bulkSend({ ...b, source: b.automated === false ? 'api' : 'campaign', createdBy: 'you', idemKey: b.idempotencyKey || req.get('idempotency-key') });
     r.cost = await taskCost(r.task?.id);
     if (r.task) await act(req, r.task.account_id || b.account, `Created bulk send "${b.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);
@@ -654,13 +754,24 @@ export function buildApp() {
   api.get('/outbox/status', wrap(async (req, res) => {
     await manager.refresh();
     const ids = req.query.account ? [(await manager.resolve(req.query.account)).id] : manager.list().map((a) => a.id);
-    res.json(await Promise.all(ids.map((id) => outbox.queueStatus(id))));
+    const out = await Promise.all(ids.map((id) => outbox.queueStatus(id)));
+    // numbers are shared: the sending state is the number's, but the counts are this campaign's own
+    const role = roleQ(req);
+    if (role) {
+      for (const q of out) {
+        const [c] = await query(`SELECT count(*) FILTER (WHERE o.status = 'draft')::int AS drafts, count(*) FILTER (WHERE o.status = 'queued')::int AS queued
+          FROM outbox o WHERE o.account_id = $1 AND o.status IN ('draft','queued') AND ${roleFilter(`COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')})`, 2)}`, [q.account, role]);
+        Object.assign(q, { queuedAll: q.queued, drafts: c.drafts, queued: c.queued });
+      }
+    }
+    res.json(out);
   }));
   // Approve drafts by filter: { account?, task?, role? } — at least one is required (never every number and campaign at once)
   api.post('/outbox/approve-all', wrap(async (req, res) => {
     const b = req.body || {};
     const account = b.account ? (await manager.resolve(b.account)).id : null;
-    const r = await outbox.approveAll({ account, taskId: b.task || null, role: b.role || null });
+    if (b.role) sameCampaign(req, b.role, `Campaign "${b.role}"`);
+    const r = await outbox.approveAll({ account, taskId: b.task || null, role: b.role || req.focus || null });
     for (const [a, n] of Object.entries(r.perAccount)) await act(req, a, `Approved all ${n} drafts${b.task ? ` of task #${b.task}` : ''}${b.role ? ` (campaign ${b.role})` : ''}`);
     res.json(r);
   }));
@@ -670,18 +781,23 @@ export function buildApp() {
     if (!ids.length) throw new Error('Select at least one message');
     return ids;
   };
+  const draftsQ = async (req) => {
+    const ids = idsOf(req);
+    await scope.assertDrafts(req.focus, ids);
+    return ids;
+  };
   api.post('/outbox/approve-selected', wrap(async (req, res) => {
-    const r = await outbox.approveAll({ ids: idsOf(req) });
+    const r = await outbox.approveAll({ ids: await draftsQ(req) });
     for (const [acc, n] of Object.entries(r.perAccount)) await act(req, acc, `Approved ${n} selected drafts`);
     res.json(r);
   }));
   api.post('/outbox/reject-selected', wrap(async (req, res) => {
-    const r = await outbox.rejectMany(idsOf(req), { reason: req.body?.reason || '', actor: 'you' });
+    const r = await outbox.rejectMany(await draftsQ(req), { reason: req.body?.reason || '', actor: 'you' });
     for (const [acc, n] of Object.entries(r.perAccount)) await act(req, acc, `Rejected ${n} selected messages`);
     res.json(r);
   }));
   api.post('/outbox/move', wrap(async (req, res) => {
-    const ids = idsOf(req);
+    const ids = await draftsQ(req);
     if (!req.body?.account) throw new Error('Choose the number that should send them');
     const r = await outbox.moveToAccount(ids, req.body.account);
     for (const [acc, n] of Object.entries(r.from)) {
@@ -692,21 +808,24 @@ export function buildApp() {
   }));
   // Owner's note on several drafts → a card for the AI: { ids, text }
   api.post('/outbox/note-for-ai', wrap(async (req, res) => {
-    const r = await outbox.draftsNoteForAi(idsOf(req), req.body?.text, { actor: 'you' });
+    const r = await outbox.draftsNoteForAi(await draftsQ(req), req.body?.text, { actor: 'you' });
     await act(req, r.task.account_id, `Note for the AI on ${r.drafts} drafts (task #${r.task.id})`);
     res.json(r);
   }));
   // Save a draft's edited wording (Drafts page, as you type): { text }
   api.patch('/outbox/:id', wrap(async (req, res) => {
+    await scope.assertDrafts(req.focus, [req.params.id]);
     const r = await outbox.editDraft(req.params.id, req.body?.text);
     res.json({ id: r.id, saved: true });
   }));
   api.post('/outbox/:id/approve', wrap(async (req, res) => {
+    await scope.assertDrafts(req.focus, [req.params.id]);
     const r = await outbox.approve(req.params.id, req.body || {});
     await act(req, r.account_id, `Approved draft #${r.id} to ${r.to_jid.split('@')[0]}${req.body?.text ? ' (edited)' : ''}`);
     res.json(r);
   }));
   api.post('/outbox/:id/reject', wrap(async (req, res) => {
+    await scope.assertDrafts(req.focus, [req.params.id]);
     const r = await outbox.reject(req.params.id, { reason: req.body?.reason || '', actor: 'you' });
     await act(req, r.account_id, `Rejected ${r.status === 'rejected' ? 'draft' : 'message'} #${r.id} to ${r.to_jid.split('@')[0]}`);
     res.json(r);
@@ -757,9 +876,11 @@ export function buildApp() {
       p.push(req.query.actor.split(','));
       conds.push(`actor = ANY($${p.length})`);
     }
-    if (req.query.role) {
-      p.push(req.query.role);
-      conds.push(`lower(role) = lower($${p.length})`);
+    const evRole = roleQ(req);
+    if (evRole) {
+      p.push(evRole);
+      conds.push(scope.same(evRole, 'none') ? 'role IS NULL' : `lower(role) = lower($${p.length})`);
+      if (scope.same(evRole, 'none')) p.pop();
     }
     const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
     res.json(await query(`SELECT * FROM events ${where} ORDER BY id DESC LIMIT $1`, p));

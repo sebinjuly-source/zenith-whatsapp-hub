@@ -163,16 +163,57 @@
     ['connect', '🔌', 'Connect AI & apps'],
     ['activity', '🕘', 'Activity'],
   ];
-  // Campaign focus (job role): one picker for Board, Inbox, Drafts and Lists, so concurrent campaigns don't mix
+  // Campaign = like a separate user. The choice is saved on the server, so the AI connected to the hub works in the
+  // same campaign: Board, Inbox, Drafts, Lists, Contacts, Templates, Rules, Activity and the AI see only it. Numbers are shared.
   const campaignLabel = (r) => (r === 'none' ? 'Hotel / no campaign' : r === 'Front office' ? 'Reception (Front office)' : r);
+  // which campaign an item belongs to; shared items are used by every campaign and are changed with All campaigns picked
+  const campTag = (role) => (role
+    ? (state.campaign ? null : h('span', { class: 'tag campaign-tag' }, '🎯 ', campaignLabel(role)))
+    : h('span', { class: 'tag', title: state.campaign ? 'Shared by all campaigns — change it with All campaigns picked at the top' : 'Shared by all campaigns' }, '🔗 shared'));
+  const sharedLocked = (role) => !!state.campaign && !role;
+  async function switchCampaign(c) {
+    const r = await api('/api/focus', { method: 'PUT', body: { campaign: c || '' } });
+    state.campaign = r.campaign || '';
+    state.listRole = state.campaign && state.campaign !== 'none' ? state.campaign : '';
+    state.listId = null;
+    state.outboxTask = null;
+    state.campaignsAt = 0;
+    await loadAccounts(true); // the Drafts badge counts this campaign's drafts
+    route();
+  }
+  function newCampaign() {
+    const done = () => back.remove();
+    const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && done() },
+      h('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'New campaign', onsubmit: guard(async (e) => {
+        e.preventDefault();
+        const f = e.target;
+        const r = await api('/api/campaigns', { body: { name: f.cname.value, playbook: f.playbook.value } });
+        done();
+        toast(r.created ? `Campaign "${r.name}" created — you are now working in it` : `"${r.name}" already exists — switched to it`);
+        await switchCampaign(r.name);
+      }) },
+        h('h2', {}, 'New campaign'),
+        h('p', { class: 'muted', style: 'margin-top:0' }, 'A campaign works like a separate user: its chats, drafts, cards, lists, contacts, templates and rules stay apart from the others — for you and for the AI. Numbers are shared.'),
+        h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'cname', required: true, maxlength: 60, placeholder: 'e.g. Corporate sales, Diwali offer, Driver hiring' })),
+        h('label', { class: 'field' }, h('span', {}, 'Rules for the AI (optional)'),
+          h('textarea', { name: 'playbook', rows: 6, placeholder: 'Who to contact, what to say (and never say), how to follow up… This becomes the campaign\'s playbook.' })),
+        h('div', { class: 'row', style: 'justify-content:flex-end;margin-top:10px' },
+          h('button', { class: 'btn', type: 'button', onclick: done }, 'Cancel'),
+          h('button', { class: 'btn primary', type: 'submit' }, 'Create'))));
+    document.body.append(back);
+    back.querySelector('input').focus();
+  }
   function campaignPicker() {
-    const sel = h('select', { class: 'campaign-pick', 'aria-label': 'Campaign', title: 'Focus on one campaign — Board, Inbox, Drafts and Lists show only it',
-      onchange: (e) => { state.campaign = e.target.value || ''; state.listRole = state.campaign && state.campaign !== 'none' ? state.campaign : ''; state.listId = null; route(); } },
-      h('option', { value: '' }, '🎯 All campaigns'));
+    const sel = h('select', { class: 'campaign-pick', 'aria-label': 'Campaign', title: 'Work in one campaign — everything you and the AI see and do stays inside it',
+      onchange: guard(async (e) => {
+        if (e.target.value === '__new') { e.target.value = state.campaign || ''; return newCampaign(); }
+        await switchCampaign(e.target.value || '');
+      }) },
+      h('option', { value: '' }, '🌐 All campaigns'));
     const fillOpts = (list) => {
       sel.append(...list.map((c) => h('option', { value: c.role, selected: state.campaign === c.role }, `🎯 ${campaignLabel(c.role)}${c.drafts || c.cards ? ` (${c.cards} cards, ${c.drafts} drafts)` : ''}`)),
-        h('option', { value: 'none', selected: state.campaign === 'none' }, '🏨 Hotel / no campaign'));
-      if (state.campaign && ![...sel.options].some((o) => o.value === state.campaign)) state.campaign = '';
+        h('option', { value: 'none', selected: state.campaign === 'none' }, '🏨 Hotel / no campaign'),
+        h('option', { value: '__new' }, '➕ New campaign…'));
       sel.value = state.campaign || '';
     };
     if (state.campaigns && Date.now() - state.campaignsAt < 60000) fillOpts(state.campaigns);
@@ -547,7 +588,7 @@
       location.hash = 'inbox';
     };
     const entry = (r) => h('div', { class: 'person' },
-      h('div', { class: 'p-head' }, h('b', { class: 'grow' }, r.name || '–'), h('a', { class: 'mono muted', href: `tel:+${r.phone}`, style: 'font-size:12px' }, '+' + r.phone)),
+      h('div', { class: 'p-head' }, h('b', { class: 'grow' }, r.name || '–'), campTag(r.role), h('a', { class: 'mono muted', href: `tel:+${r.phone}`, style: 'font-size:12px' }, '+' + r.phone)),
       r.reason ? h('div', { style: 'font-size:13px' }, r.reason) : null,
       r.referred_by_name ? h('div', { class: 'muted', style: 'font-size:12px' }, 'Referred by ', r.referred_by_name) : null,
       r.notes ? h('div', { class: 'muted', style: 'font-size:12px' }, r.notes) : null,
@@ -1277,6 +1318,7 @@
 
   // ---------- role chips (Chef / Front office / Housekeeping …) ----------
   async function roleChips(current, onPick) {
+    if (state.campaign) return null; // inside a campaign there is nothing else to pick
     const roles = await api('/api/roles').catch(() => []);
     if (!roles.length) return null;
     return h('div', { class: 'funnel', style: 'margin-bottom:10px' }, [['', 'All roles'], ...roles.map((r) => [r, r])].map(([k, l]) =>
@@ -1314,7 +1356,7 @@
         viewLists();
       }) },
         h('label', { class: 'field' }, h('span', {}, 'List name'), h('input', { type: 'text', name: 'name', required: true, placeholder: 'Chef candidates – Batch 6' })),
-        h('label', { class: 'field' }, h('span', {}, 'Job role'), h('input', { type: 'text', name: 'role', placeholder: 'Chef, Front office, Housekeeping… (guessed from the name if empty)' }), h('em', {}, 'Each role keeps its own lists, tasks and log. People already on an earlier list of the same role are skipped.')),
+        h('label', { class: 'field' }, h('span', {}, 'Job role'), h('input', { type: 'text', name: 'role', value: state.campaign && state.campaign !== 'none' ? state.campaign : '', readonly: !!state.campaign, placeholder: 'Chef, Front office, Housekeeping… (guessed from the name if empty)' }), h('em', {}, 'Each role keeps its own lists, tasks and log. People already on an earlier list of the same role are skipped.')),
         h('label', { class: 'field' }, h('span', {}, 'Number'), h('select', { name: 'account' }, state.accounts.map((a) => h('option', { value: a.id }, a.label)))),
         h('label', { class: 'field' }, h('span', {}, 'Count messages from (optional)'), h('input', { type: 'date', name: 'since' }), h('em', {}, 'Messages to these people before this date are ignored when deciding who was already messaged. Empty = from today.')),
         h('label', { class: 'field' }, h('span', {}, 'People — one per line: phone, name, personal message (optional). Tab-separated also works (paste from a sheet).'), h('textarea', { name: 'rows', rows: 6, required: true })),
@@ -1514,8 +1556,8 @@
       h('div', { class: 'settings-grid' },
         h('div', { class: 'card' }, h('h2', {}, `Saved (${rows.length})`),
           rows.length ? rows.map((t) => h('div', { style: 'border-top:1px solid var(--line);padding:8px 0' },
-            h('div', { class: 'row' }, h('b', { class: 'grow' }, t.name), h('span', { class: 'tag' }, label(t.account_id)), t.attachment?.url ? h('span', { class: 'tag' }, '📎 file') : null,
-              h('button', { class: 'btn small', onclick: () => fill(editor, form(t)) }, 'Edit')),
+            h('div', { class: 'row' }, h('b', { class: 'grow' }, t.name), h('span', { class: 'tag' }, label(t.account_id)), campTag(t.role), t.attachment?.url ? h('span', { class: 'tag' }, '📎 file') : null,
+              sharedLocked(t.role) ? null : h('button', { class: 'btn small', onclick: () => fill(editor, form(t)) }, 'Edit')),
             h('div', { class: 'muted', style: 'white-space:pre-wrap;font-size:13px' }, t.body.slice(0, 220)))) : h('p', { class: 'muted' }, 'None yet.')),
         editor),
     ]);
@@ -1559,7 +1601,7 @@
         h('div', { class: 'field' }, h('span', { style: 'display:block;font-weight:550;margin-bottom:4px' }, 'Sends (none ticked = anything)'),
           h('div', { class: 'daypick' }, ['text', 'document', 'image', 'video', 'voice', 'contact', 'location'].map((t) => h('label', {}, h('input', { type: 'checkbox', name: 'type', value: t, checked: (c.types || []).includes(t) }), t)))),
         h('label', { class: 'field' }, h('span', {}, 'Containing any of these words (optional, comma separated)'), h('input', { type: 'text', name: 'words', value: (c.words || []).join(', '), placeholder: 'booking, room, rate' })),
-        h('label', { class: 'field' }, h('span', {}, 'Only for candidates of this job role (optional)'), h('input', { type: 'text', name: 'role', value: c.role || '', placeholder: 'Chef, Front office, Housekeeping' }), h('em', {}, 'The person must be on a list of that role. Empty = anyone.')),
+        h('label', { class: 'field' }, h('span', {}, 'Only for candidates of this job role (optional)'), h('input', { type: 'text', name: 'role', value: state.campaign || c.role || '', readonly: !!state.campaign, placeholder: 'Chef, Front office, Housekeeping' }), h('em', {}, state.campaign ? 'Inside a campaign a rule only works on that campaign’s people.' : 'The person must be on a list of that role. Empty = anyone.')),
         h('h2', { style: 'margin-top:8px' }, 'Then'),
         h('label', { class: 'field' }, h('span', {}, 'Add tags'), h('input', { type: 'text', name: 'addTags', value: (a.addTags || []).join(', '), placeholder: 'candidate' })),
         h('label', { class: 'field' }, h('span', {}, 'Set status'), h('input', { type: 'text', name: 'leadStatus', value: a.leadStatus || '', placeholder: 'new' })),
@@ -1579,8 +1621,8 @@
       h('div', { class: 'settings-grid' },
         h('div', { class: 'card' }, h('h2', {}, `Rules (${rows.length})`),
           rows.length ? rows.map((r) => h('div', { style: 'border-top:1px solid var(--line);padding:8px 0' },
-            h('div', { class: 'row' }, h('b', { class: 'grow' }, r.name), h('span', { class: 'tag' }, label(r.account_id)), h('span', { class: 'tag' }, r.enabled ? 'on' : 'off'),
-              h('button', { class: 'btn small', onclick: () => fill(editor, form(r)) }, 'Edit')),
+            h('div', { class: 'row' }, h('b', { class: 'grow' }, r.name), h('span', { class: 'tag' }, label(r.account_id)), campTag(r.conditions?.role), h('span', { class: 'tag' }, r.enabled ? 'on' : 'off'),
+              sharedLocked(r.conditions?.role) ? null : h('button', { class: 'btn small', onclick: () => fill(editor, form(r)) }, 'Edit')),
             h('div', { class: 'muted', style: 'font-size:13px' }, describe(r), ` · ran ${r.runs}×`))) : h('p', { class: 'muted' }, 'No rules yet.')),
         editor),
     ]);
@@ -1615,20 +1657,45 @@
     const tabs = h('div', { class: 'seg', style: 'max-width:520px;margin-bottom:16px' },
       [['draft', 'Drafts'], ['queued', 'Queued'], ['sent', 'Sent'], ['failed,rejected', 'Failed / rejected'], ['all', 'All']].map(([k, l]) =>
         h('button', { class: tab === k ? 'on' : '', onclick: () => { state.outboxTab = k; viewOutbox(); } }, l)));
-    // Selection: tick messages (or "Select all"), then move them to another number, approve or reject them.
+    // Selection works like the Board: long-press a card (or tap ☑ Select) to start; then tap cards to tick them.
+    // The bar with the actions stays at the bottom of the screen, so cards far down can be ticked and acted on.
     const movable = (r) => r.status === 'draft' || r.status === 'queued';
-    const sel = new Set();
-    const boxes = [];
-    const selInfo = h('b', {}, '0 selected');
-    const allBox = h('input', { type: 'checkbox', 'aria-label': 'Select all' });
+    const sel = (state.outboxPicked ||= new Set());
+    for (const id of [...sel]) if (!rows.some((r) => r.id === id && movable(r))) sel.delete(id);
+    const selecting = !!state.outboxSelecting;
+    const boxes = []; // [checkbox, id, card]
+    const selInfo = h('b', {});
     const refreshSel = () => {
       selInfo.textContent = `${sel.size} selected`;
-      allBox.checked = sel.size > 0 && sel.size === boxes.length;
-      allBox.indeterminate = sel.size > 0 && sel.size < boxes.length;
+      for (const [cb, id, card] of boxes) {
+        if (cb) cb.checked = sel.has(id);
+        card?.classList.toggle('picked', sel.has(id));
+      }
     };
-    allBox.onchange = () => {
-      for (const [cb, id] of boxes) { cb.checked = allBox.checked; if (allBox.checked) sel.add(id); else sel.delete(id); }
-      refreshSel();
+    const startSelecting = (id) => { state.outboxSelecting = true; if (id) sel.add(id); viewOutbox({ keepScroll: true }); };
+    const stopSelecting = () => { sel.clear(); state.outboxSelecting = false; viewOutbox({ keepScroll: true }); };
+    const onPress = (card, id) => {
+      let timer = null;
+      let start = null;
+      let fired = false;
+      const cancel = () => { clearTimeout(timer); timer = null; };
+      card.addEventListener('pointerdown', (e) => {
+        if (e.button > 0 || selecting) return;
+        // pressing on the text box, buttons or links is for those, not for selecting
+        if (e.target.closest('textarea, a, button, input, select, img')) return;
+        fired = false;
+        start = [e.clientX, e.clientY];
+        timer = setTimeout(() => { fired = true; navigator.vibrate?.(30); startSelecting(id); }, 550);
+      });
+      card.addEventListener('pointermove', (e) => { if (timer && start && Math.hypot(e.clientX - start[0], e.clientY - start[1]) > 10) cancel(); });
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => card.addEventListener(ev, cancel));
+      card.addEventListener('contextmenu', (e) => { if (fired || selecting) e.preventDefault(); });
+      card.addEventListener('click', (e) => {
+        if (fired) { e.preventDefault(); e.stopPropagation(); fired = false; return; }
+        if (!selecting || e.target.closest('textarea, a, button, input, select')) return;
+        if (sel.has(id)) sel.delete(id); else sel.add(id);
+        refreshSel();
+      }, true);
     };
     const accountOptions = (current) => state.accounts.map((a) => h('option', { value: a.id, selected: a.id === current },
       `${a.label}${a.phone ? ' · +' + a.phone : ''}${a.status === 'open' ? '' : a.status === 'qr' ? ' (not linked yet)' : ' (not connected)'}`));
@@ -1693,9 +1760,14 @@
         r.saveNow = save;
       }
       let cb = null;
-      if (movable(r)) {
-        cb = h('input', { type: 'checkbox', 'aria-label': `Select ${r.to_name || r.to_jid.split('@')[0]}`, onchange: (e) => { if (e.target.checked) sel.add(r.id); else sel.delete(r.id); refreshSel(); } });
-        boxes.push([cb, r.id]);
+      const entry = movable(r) ? [null, r.id, null] : null;
+      if (entry) {
+        if (selecting) {
+          cb = h('input', { type: 'checkbox', class: 'pick', checked: sel.has(r.id), 'aria-label': `Select ${r.to_name || r.to_jid.split('@')[0]}`,
+            onchange: (e) => { if (e.target.checked) sel.add(r.id); else sel.delete(r.id); refreshSel(); } });
+        }
+        entry[0] = cb;
+        boxes.push(entry);
       }
       const from = movable(r) && state.accounts.length > 1
         ? h('select', { class: 'tag', title: 'Number that sends this message', style: 'width:auto;padding:2px 6px', onchange: guard(async (e) => {
@@ -1741,59 +1813,71 @@
               r.status === 'queued' ? h('button', { class: 'btn small danger', onclick: guard(async () => { await api(`/api/outbox/${r.id}/reject`, { method: 'POST' }); done(card, r, '✖ Cancelled'); }) }, 'Cancel') : null,
               r.sent_at ? h('p', { class: 'muted', style: 'margin:0' }, 'Sent ', new Date(r.sent_at).toLocaleString()) : null),
       );
+      if (entry) {
+        entry[2] = card;
+        card.classList.add('draftcard');
+        card.classList.toggle('picked', sel.has(r.id));
+        onPress(card, r.id);
+      }
       return card;
     });
     const picked = () => rows.filter((r) => sel.has(r.id));
     const moveSel = h('select', { style: 'width:auto' }, h('option', { value: '' }, 'Send from…'), accountOptions(''));
-    const bar = boxes.length ? h('div', { class: 'card', style: 'max-width:820px;margin-bottom:16px' },
-      h('div', { class: 'row', style: 'align-items:center;flex-wrap:wrap;gap:8px' },
-        h('label', { class: 'row', style: 'align-items:center;gap:6px;margin:0' }, allBox, h('span', {}, `Select all ${boxes.length}${rows.length >= 200 ? ' shown' : ''}`)),
-        selInfo,
-        h('span', { class: 'grow' }),
-        state.accounts.length > 1 ? moveSel : null,
-        state.accounts.length > 1 ? h('button', { class: 'btn small', onclick: guard(async () => {
-          if (!sel.size) return toast('Tick the messages first');
-          if (!moveSel.value) return toast('Choose the number that should send them');
-          const toMove = picked().filter((r) => r.account_id !== moveSel.value);
-          if (!toMove.length) return toast(`They are already on ${labelOf(moveSel.value)}`);
-          const nApproved = toMove.filter((r) => r.status === 'queued').length;
-          if (!confirm(`Move ${toMove.length} messages to "${labelOf(moveSel.value)}"?${sel.size > toMove.length ? ` (${sel.size - toMove.length} ticked are already there.)` : ''}
-
-${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel.value)} by themselves, within its limits.
-` : ''}${toMove.length - nApproved ? `${toMove.length - nApproved} drafts: they still need your approval.` : ''}`)) return;
-          await moveTo(toMove.map((r) => r.id), moveSel.value);
-        }) }, 'Move selected') : null,
-        rows.some((r) => r.status === 'draft') ? h('button', { class: 'btn small primary', onclick: guard(async () => {
-          const list = picked().filter((r) => r.status === 'draft');
-          if (!list.length) {
-            return toast(sel.size ? 'Those are already approved: queued messages go out by themselves, one by one. Only drafts need approving.' : 'Tick the drafts you want to approve first');
-          }
-          await Promise.all(list.map((x) => x.saveNow?.()));
-          const nLater = list.filter(later).length;
-          if (!confirm(`Approve ${list.length} selected drafts?${nLater ? `\n\n${nLater} of them have a later date and wait until then.` : ''}\n\n${paceText(list)}${costText(list)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit.`)) return;
-          const r = await api('/api/outbox/approve-selected', { body: { ids: list.map((x) => x.id) } });
-          toast(`Approved ${r.approved} — queued`);
-          viewOutbox({ keepScroll: true });
-        }) }, 'Approve selected') : null,
-        tab === 'draft' ? h('button', { class: 'btn small', title: 'Tell the AI what to change in the ticked drafts — it edits them and they come back here for your approval', onclick: guard(async () => {
-          if (!sel.size) return toast('Tick the drafts first');
-          const text = prompt(`Note for the AI about the ${sel.size} ticked drafts — what should it change?\n(e.g. "address them as Mr / Ms", "make it shorter", "mention the airport")`, '');
-          if (!text?.trim()) return;
-          const r = await api('/api/outbox/note-for-ai', { body: { ids: [...sel], text } });
-          toast(`Sent to the AI as task #${r.task.id} — it edits the ${r.drafts} drafts; they stay here for your approval`);
-        }) }, '📝 Note for AI') : null,
-        h('button', { class: 'btn small danger', onclick: guard(async () => {
-          if (!sel.size) return toast('Tick the messages first');
-          const reason = prompt(`${tab === 'queued' ? 'Cancel' : 'Reject'} ${sel.size} selected messages? They will not be sent.
-Why? (optional — the AI reads it)`, '');
-          if (reason === null) return;
-          const r = await api('/api/outbox/reject-selected', { body: { ids: [...sel], reason } });
-          toast(`${tab === 'queued' ? 'Cancelled' : 'Rejected'} ${r.rejected}`);
-          viewOutbox({ keepScroll: true });
-        }) }, tab === 'queued' ? 'Cancel selected' : 'Reject selected')),
-      h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, tab === 'queued'
-        ? 'Queued messages are already approved and go out by themselves, one at a time. Tick some (or Select all, then untick a few) to move them to another number or cancel them.'
-        : 'Tick messages (or Select all, then untick a few). Move selected changes which number sends them, e.g. when a number is blocked.')) : null;
+    const after = () => { sel.clear(); state.outboxSelecting = false; viewOutbox({ keepScroll: true }); };
+    const selectBtn = !selecting && boxes.length
+      ? h('div', { class: 'row', style: 'max-width:820px;margin-bottom:12px;align-items:center;gap:8px' },
+          h('button', { class: 'btn small', onclick: () => startSelecting() }, '☑ Select'),
+          h('span', { class: 'muted', style: 'font-size:12px' }, 'or long-press a card — then tick as many as you like and act on them from the bar at the bottom.'))
+      : null;
+    const pickBar = selecting ? h('div', { class: 'pickbar', role: 'region', 'aria-label': 'Selected messages' },
+      selInfo,
+      h('button', { class: 'btn small', onclick: () => {
+        const ids = boxes.map(([, id]) => id);
+        const all = ids.length && ids.every((id) => sel.has(id));
+        ids.forEach((id) => (all ? sel.delete(id) : sel.add(id)));
+        refreshSel();
+      } }, `☑ All ${boxes.length}`),
+      rows.some((r) => r.status === 'draft') ? h('button', { class: 'btn small primary', onclick: guard(async () => {
+        const list = picked().filter((r) => r.status === 'draft' && !r.handled);
+        if (!list.length) return toast(sel.size ? 'Those are already approved — only drafts need approving' : 'Tick the drafts you want to approve');
+        await Promise.all(list.map((x) => x.saveNow?.()));
+        const nLater = list.filter(later).length;
+        if (!confirm(`Approve ${list.length} selected drafts?${nLater ? `\n\n${nLater} of them have a later date and wait until then.` : ''}\n\n${paceText(list)}${costText(list)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit.`)) return;
+        const r = await api('/api/outbox/approve-selected', { body: { ids: list.map((x) => x.id) } });
+        toast(`Approved ${r.approved} — queued`);
+        after();
+      }) }, '✅ Approve') : null,
+      tab === 'draft' ? h('button', { class: 'btn small', title: 'Tell the AI what to change in the ticked drafts — it edits them and they come back here for your approval', onclick: guard(async () => {
+        if (!sel.size) return toast('Tick the drafts first');
+        const text = prompt(`Note for the AI about the ${sel.size} ticked drafts — what should it change?\n(e.g. "address them as Mr / Ms", "make it shorter", "mention the airport")`, '');
+        if (!text?.trim()) return;
+        const r = await api('/api/outbox/note-for-ai', { body: { ids: [...sel], text } });
+        toast(`Sent to the AI as task #${r.task.id} — it edits the ${r.drafts} drafts; they stay here for your approval`);
+        after();
+      }) }, '📝 Note for AI') : null,
+      state.accounts.length > 1 ? moveSel : null,
+      state.accounts.length > 1 ? h('button', { class: 'btn small', onclick: guard(async () => {
+        if (!sel.size) return toast('Tick the messages first');
+        if (!moveSel.value) return toast('Choose the number that should send them');
+        const toMove = picked().filter((r) => r.account_id !== moveSel.value);
+        if (!toMove.length) return toast(`They are already on ${labelOf(moveSel.value)}`);
+        const nApproved = toMove.filter((r) => r.status === 'queued').length;
+        if (!confirm(`Move ${toMove.length} messages to "${labelOf(moveSel.value)}"?${sel.size > toMove.length ? ` (${sel.size - toMove.length} ticked are already there.)` : ''}\n\n${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel.value)} by themselves, within its limits.\n` : ''}${toMove.length - nApproved ? `${toMove.length - nApproved} drafts: they still need your approval.` : ''}`)) return;
+        await moveTo(toMove.map((r) => r.id), moveSel.value);
+        sel.clear();
+        state.outboxSelecting = false;
+      }) }, 'Move') : null,
+      h('button', { class: 'btn small danger', onclick: guard(async () => {
+        if (!sel.size) return toast('Tick the messages first');
+        const reason = prompt(`${tab === 'queued' ? 'Cancel' : 'Reject'} ${sel.size} selected messages? They will not be sent.\nWhy? (optional — the AI reads it)`, '');
+        if (reason === null) return;
+        const r = await api('/api/outbox/reject-selected', { body: { ids: [...sel], reason } });
+        toast(`${tab === 'queued' ? 'Cancelled' : 'Rejected'} ${r.rejected}`);
+        after();
+      }) }, tab === 'queued' ? '✖ Cancel' : '✖ Reject'),
+      h('span', { class: 'grow' }),
+      h('button', { class: 'btn small', onclick: stopSelecting }, 'Done')) : null;
+    refreshSel();
     // "Approve all" approves exactly the drafts shown here (this number, campaign and task) — by their ids, never by a filter
     const drafts = rows.filter((r) => r.status === 'draft');
     const scope = [state.campaign ? `campaign ${campaignLabel(state.campaign)}` : 'all campaigns', acc ? labelOf(acc) : 'all numbers', state.outboxTask ? `task #${state.outboxTask}` : ''].filter(Boolean).join(' · ');
@@ -1837,8 +1921,9 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
       statusCards,
       tabs,
       approveAllBar,
-      bar,
+      selectBtn,
       h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr))' }, items.length ? items : [h('p', { class: 'muted' }, 'Nothing here.')]),
+      pickBar,
     ]);
     if (scrollY) requestAnimationFrame(() => { const m = document.querySelector('main'); if (m) m.scrollTop = scrollY; });
   }
@@ -2083,7 +2168,7 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
 
   // ---------- activity ----------
   async function viewActivity() {
-    const rows = await api(`/api/events?limit=200${state.actRole ? '&role=' + encodeURIComponent(state.actRole) : ''}${state.actProblems ? '&problems=1' : ''}`);
+    const rows = await api(`/api/events?limit=200${state.actRole && !state.campaign ? '&role=' + encodeURIComponent(state.actRole) : ''}${state.actProblems ? '&problems=1' : ''}`);
     const actRoles = await roleChips(state.actRole, (r) => { state.actRole = r; viewActivity(); });
     shell([
       h('h1', {}, 'Activity'),
@@ -2144,6 +2229,8 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
   async function boot() {
     try {
       await api('/api/accounts');
+      state.campaign = (await api('/api/focus')).campaign || '';
+      state.listRole = state.campaign && state.campaign !== 'none' ? state.campaign : '';
     } catch {
       return;
     }

@@ -346,6 +346,16 @@ CREATE TABLE IF NOT EXISTS wa_templates (
 );
 -- Public link of the header image a template was created with: used on every send unless another is given
 ALTER TABLE wa_templates ADD COLUMN IF NOT EXISTS header_link TEXT;
+-- Campaigns (like separate users): created in the dashboard; lists, templates, contacts and rules belong to one.
+CREATE TABLE IF NOT EXISTS campaigns (
+  name TEXT PRIMARY KEY,
+  description TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  archived TIMESTAMPTZ
+);
+-- NULL = shared by all campaigns
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS role TEXT;
+ALTER TABLE directory ADD COLUMN IF NOT EXISTS role TEXT;
 `;
 
 function makePgDriver() {

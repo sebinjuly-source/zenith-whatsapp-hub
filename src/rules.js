@@ -19,8 +19,10 @@
  */
 import { query, logEvent } from './db.js';
 
-export async function listRules(accountId) {
-  return query(`SELECT * FROM rules WHERE ($1::text IS NULL OR account_id = $1) ORDER BY id`, [accountId || null]);
+/** role: a campaign → its own rules plus the ones for everyone (no campaign condition); omitted = all. */
+export async function listRules(accountId, { role } = {}) {
+  return query(`SELECT * FROM rules WHERE ($1::text IS NULL OR account_id = $1)
+    AND ($2::text IS NULL OR COALESCE(conditions->>'role', '') = '' OR lower(conditions->>'role') = lower($2)) ORDER BY id`, [accountId || null, role || null]);
 }
 
 export async function saveRule({ id, account, name, enabled = true, conditions = {}, actions = {} }) {
@@ -76,7 +78,8 @@ function normalizeActions(a) {
 /** Does this incoming message match the rule's conditions? (pure; `isNew` = never messaged by you) */
 export function matches(rule, msg, { isGroup, isNew, role = null }) {
   const c = rule.conditions || {};
-  if (c.role && String(role || '').toLowerCase() !== c.role.toLowerCase()) return false;
+  // "none" = only people on no list (hotel guests)
+  if (c.role && (c.role.toLowerCase() === 'none' ? !!role : String(role || '').toLowerCase() !== c.role.toLowerCase())) return false;
   if (c.chat === 'direct' && isGroup) return false;
   if (c.chat === 'group' && !isGroup) return false;
   if (c.types?.length && !c.types.includes(msg.type)) return false;

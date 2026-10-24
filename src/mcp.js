@@ -24,6 +24,8 @@ import { logEvent } from './db.js';
 import { HISTORY_MODES } from './describe.js';
 import { normalizeSettings } from './settings.js';
 import { priceRows, money, getPricing } from './pricing.js';
+import * as scope from './scope.js';
+import { roleOf, roleFilter } from './campaign.js';
 
 const ai = (accountId, text, role = null) => logEvent(accountId, 'info', text, 'ai', role);
 
@@ -156,12 +158,79 @@ const msgLine = (m, maxLen) => {
   return `[${fmtTime(m.ts)}] ${who}: ${body}${q}`;
 };
 
-function buildServer(playbook = '') {
+/**
+ * Campaign scope for one MCP session (see scope.js): the arguments of every tool are checked before it runs —
+ * campaign filters are filled in, and anything that belongs to another campaign is refused.
+ */
+const CAMPAIGN_ARG = { hub_overview: 'campaign', list_chats: 'campaign', list_outbox: 'campaign', recent_activity: 'role', list_lists: 'role',
+  pipeline: 'role', known_candidates: 'role', import_list: 'role', list_tasks: 'role', create_task: 'campaign', get_playbook: 'campaign', save_playbook: 'campaign' };
+const LIST_TOOLS = ['archive_list', 'remove_list_member', 'list_members', 'send_to_list', 'set_followup', 'update_list_member', 'set_pipeline'];
+const TASK_TOOLS = ['update_task', 'add_task_note', 'log_call_result', 'task_history', 'approve_task'];
+const DRAFT_TOOLS = ['approve_draft', 'reject_draft', 'edit_draft'];
+const CHAT_TOOLS = { get_messages: 'chat', get_contact: 'chat', update_contact: 'chat', set_chat_state: 'chat', fetch_older_messages: 'chat', save_media: 'chat', send_message: 'to', search_messages: 'chat', list_shared_contacts: 'chat' };
+const isPhone = (q) => /^[+\d\s()-]{8,}$/.test(q) || q.includes('@');
+export async function enforceScope(focus, name, a) {
+  if (!focus) return;
+  const arg = CAMPAIGN_ARG[name];
+  if (arg) {
+    if (name === 'save_playbook' && !a.campaign) throw new Error(`You are working in ${scope.label(focus)}: only its own playbook can be changed here (campaign="${focus}"). The main playbook is changed with all campaigns selected.`);
+    if (a[arg] && !scope.same(a[arg], focus)) scope.assertSame(focus, a[arg], name === 'save_playbook' ? 'That playbook' : `Campaign "${a[arg]}"`);
+    a[arg] = focus;
+  }
+  if (LIST_TOOLS.includes(name)) await scope.assertList(focus, a.list);
+  if (TASK_TOOLS.includes(name)) await scope.assertTask(focus, a.id);
+  if (name === 'update_task' && a.campaign !== undefined && !scope.same(a.campaign || 'none', focus)) scope.assertSame(focus, a.campaign || 'none', 'Moving the card to that campaign');
+  if (DRAFT_TOOLS.includes(name)) await scope.assertDrafts(focus, [a.id]);
+  if (name === 'move_messages') await scope.assertDrafts(focus, a.ids);
+  const chatKey = CHAT_TOOLS[name];
+  if (chatKey && a[chatKey]) {
+    const acc = (await manager.resolve(a.account)).id;
+    await scope.assertPerson(focus, acc, await resolveChat(acc, a[chatKey]));
+  }
+  if (name === 'person_context' || name === 'find_person') {
+    const key = name === 'person_context' ? 'person' : 'query';
+    const q = String(a[key] ?? '').trim();
+    const jids = isPhone(q) ? [store.toJid(q)] : [...new Set((await findPerson(q)).map((h) => h.jid))];
+    const inside = [];
+    for (const j of jids) if (await scope.personIn(focus, null, j)) inside.push(j);
+    if (jids.length && !inside.length) await scope.assertPerson(focus, null, jids[0]);
+    if (!isPhone(q) && inside.length === 1) a[key] = inside[0].split('@')[0]; // a name that also matches people elsewhere → the one in this campaign
+    if (!isPhone(q) && inside.length > 1 && inside.length < jids.length) throw new Error(`"${q}" matches several people in ${scope.label(focus)} — pass the number: ${inside.map((j) => j.split('@')[0]).join(', ')}`);
+  }
+  if (name === 'message_timeline' && isPhone(String(a.q || '').trim())) await scope.assertPerson(focus, (await manager.resolve(a.account)).id, store.toJid(a.q));
+  if (name === 'bulk_send') {
+    const acc = (await manager.resolve(a.account)).id;
+    for (const r of a.recipients || []) await scope.assertPerson(focus, acc, store.toJid(r.to), 'Recipient');
+  }
+  if (name === 'save_rule') {
+    if (a.role && !scope.same(a.role, focus)) scope.assertSame(focus, a.role, 'That rule');
+    a.role = focus;
+    if (a.id) {
+      const [r] = await query('SELECT conditions FROM rules WHERE id = $1', [a.id]);
+      if (r) scope.assertSame(focus, r.conditions?.role || '(all campaigns)', `Rule #${a.id}`);
+    }
+  }
+  if (name === 'save_template' && a.id) {
+    const [t] = await query('SELECT role FROM templates WHERE id = $1', [a.id]);
+    if (t) scope.assertSame(focus, t.role || '(all campaigns)', `Template #${a.id}`);
+  }
+  if (['send_message', 'bulk_send', 'send_to_list', 'set_followup'].includes(name) && a.template) {
+    const t = await templates.getTemplate(a.account ? (await manager.resolve(a.account)).id : null, a.template).catch(() => null);
+    if (t?.role) scope.assertSame(focus, t.role, `Template "${t.name}"`);
+  }
+}
+
+function buildServer(playbook = '', focus = '') {
+  // a send made inside a campaign belongs to it ("none" = no campaign)
+  const scopeRole = focus && !scope.same(focus, 'none') ? focus : null;
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    { instructions: `${focus ? `CAMPAIGN SCOPE: you are working in ${scope.label(focus)} — like a separate user. You see only its chats, drafts, Board cards, lists, contacts, templates and rules; anything belonging to another campaign is hidden and every action on it is refused. Numbers are shared. To work on another campaign the owner switches it in the dashboard.\n\n` : ''}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
-  const tool = (name, description, inputSchema, fn) => server.registerTool(name, { description, inputSchema }, safe(fn, name === 'get_playbook' ? Infinity : RESPONSE_BUDGET)); // the owner's rules are never cut
+  const tool = (name, description, inputSchema, fn) => server.registerTool(name, { description, inputSchema }, safe(async (a = {}) => {
+    await enforceScope(focus, name, a);
+    return fn(a);
+  }, name === 'get_playbook' ? Infinity : RESPONSE_BUDGET)); // the owner's rules are never cut
 
   tool('list_accounts', 'List the WhatsApp numbers in the hub: id, purpose, phone, connection status, AI mode (approve/auto), and how much history is stored. Start here.', {}, async () => {
     const lines = [];
@@ -198,13 +267,13 @@ function buildServer(playbook = '') {
       out.push(cp ? `CAMPAIGN PLAYBOOK — ${cp.campaign} (follow it together with the main playbook):\n${cp.text}\n---` : `(No campaign playbook for "${a.campaign}" — follow the main playbook.)`);
     }
     const campaigns = await query(`SELECT DISTINCT role FROM lists WHERE role IS NOT NULL AND archived IS NULL ORDER BY role`);
-    if (!a.campaign && campaigns.length > 1) out.push(`Campaigns running: ${campaigns.map((c) => c.role).join(', ')} — pass campaign=<role> to focus on one.`);
+    if (!a.campaign && !focus && campaigns.length > 1) out.push(`Campaigns running: ${campaigns.map((c) => c.role).join(', ')} — pass campaign=<role> to focus on one.`);
     const dueNow = open.filter((t) => !t.due_at || new Date(t.due_at) <= new Date(now.getTime() + 3600e3));
     const later = open.filter((t) => t.due_at && new Date(t.due_at) > new Date(now.getTime() + 3600e3));
     const byKind = (rows, k) => rows.filter((t) => t.kind === k).length;
     out.push(`1. DUE NOW (${dueNow.length}): ${byKind(dueNow, 'reply')} replies to answer, ${byKind(dueNow, 'followup')} follow-ups, ${dueNow.filter((t) => /^Call notes needed/.test(t.title)).length} call notes needed, ${dueNow.filter((t) => t.priority && (t.assignee || 'you') === 'you').length} owner must-dos. → list_tasks(for="ai", due_now=true), list_tasks(kind="reply")`);
     for (const t of dueNow.filter((x) => x.priority || x.kind === 'reply' || x.kind === 'followup').slice(0, 12)) out.push(`   - #${t.id} ${(t.assignee || 'you') === 'ai' ? 'AI' : 'owner'}${t.priority ? ' PRIORITY' : ''}: ${trim(t.title, 90)}`);
-    const recentlyClosed = (await tasks.listTasks({ past: true, limit: 300 })).filter((t) => t.completed_at && new Date(t.completed_at) > new Date(Date.now() - 7 * 86400e3));
+    const recentlyClosed = (await tasks.listTasks({ past: true, limit: 300, role: a.campaign })).filter((t) => t.completed_at && new Date(t.completed_at) > new Date(Date.now() - 7 * 86400e3));
     const pendingNotes = [...open, ...recentlyClosed].filter((t) => t.owner_note_pending);
     if (pendingNotes.length) {
       out.push(`   OWNER NOTES TO ACT ON (${pendingNotes.length}) → list_tasks(owner_notes=true), do what each says, then add_task_note:`);
@@ -212,12 +281,12 @@ function buildServer(playbook = '') {
     }
     const upcomingVisits = later.filter((t) => t.kind === 'visit').slice(0, 5);
     out.push(`2. COMING UP: ${later.length} dated cards${upcomingVisits.length ? '; interviews: ' + upcomingVisits.map((t) => trim(t.title.replace(/^Interview: /, ''), 50)).join('; ') : ''}`);
-    const { roleOf, roleFilter } = await import('./campaign.js');
     const [dr] = a.campaign
       ? await query(`SELECT count(*)::int n FROM outbox o WHERE o.status = 'draft' AND ${roleFilter(`COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')})`, 1)}`, [a.campaign])
       : await query(`SELECT count(*)::int n, count(DISTINCT account_id)::int a FROM outbox WHERE status = 'draft'`);
     out.push(`3. DRAFTS WAITING FOR OWNER APPROVAL: ${dr.n}${dr.n ? ' (list_outbox status=draft) — the owner approves; never approve unless told to' : ''}`);
-    const rej = await query(`SELECT o.id, o.account_id, o.to_jid, o.error FROM outbox o WHERE o.status = 'rejected' AND o.source <> 'campaign' AND o.created_at > now() - interval '48 hours' ORDER BY o.id DESC LIMIT 8`);
+    const rej = await query(`SELECT o.id, o.account_id, o.to_jid, o.error FROM outbox o WHERE o.status = 'rejected' AND o.source <> 'campaign' AND o.created_at > now() - interval '48 hours'
+      AND ($1::text IS NULL OR ${roleFilter(`COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')})`, 1)}) ORDER BY o.id DESC LIMIT 8`, [a.campaign || null]);
     if (rej.length) out.push(`   Owner REJECTED recently (don't draft the same again; the reason is a note on their card): ${rej.map((r) => `#${r.id} ${r.to_jid.split('@')[0]} on ${r.account_id}${r.error?.startsWith('Rejected:') ? ' — ' + r.error.slice(10, 90) : ''}`).join('; ')}`);
     out.push('4. NUMBERS:');
     for (const a of manager.list()) out.push(`   - ${a.id} (${a.label}, ${a.provider === 'cloud' ? 'Meta API' : 'linked phone'}): ${a.status}${await sendingLine(a)}`);
@@ -225,7 +294,8 @@ function buildServer(playbook = '') {
     const arch = (await query(`SELECT count(*)::int n FROM lists WHERE archived IS NOT NULL`))[0].n;
     out.push(`5. LISTS (all numbers${arch ? `; ${arch} archived hidden — list_lists(include_archived=true)` : ''}):`);
     for (const l of ls.slice(0, 15)) out.push(`   - #${l.id} ${l.name} on ${l.account_id}: ${l.total} people, ${l.new} new, ${l.queued} queued, ${l.replied} replied, ${l.failed} failed`);
-    const fails = await query(`SELECT account_id, error, count(*)::int n FROM outbox WHERE status = 'failed' AND created_at > now() - interval '24 hours' GROUP BY 1,2 ORDER BY 3 DESC LIMIT 5`);
+    const fails = await query(`SELECT o.account_id, o.error, count(*)::int n FROM outbox o WHERE o.status = 'failed' AND o.created_at > now() - interval '24 hours'
+      AND ($1::text IS NULL OR ${roleFilter(`COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')})`, 1)}) GROUP BY 1,2 ORDER BY 3 DESC LIMIT 5`, [a.campaign || null]);
     out.push(`6. FAILED LAST 24 H: ${fails.length ? fails.map((f) => `${f.n}× on ${f.account_id}: ${trim(f.error, 90)}${helpFor(f.error)}`).join('\n   ') : 'none'}`);
     out.push('Done/finished tasks are hidden by default: list_tasks(past=true). Tool guide: get_playbook (section HOW TO USE THE HUB).');
     return out.join('\n');
@@ -294,7 +364,7 @@ function buildServer(playbook = '') {
       const accountId = a.account ? (await manager.resolve(a.account)).id : null;
       const chatJid = a.chat && accountId ? await resolveChat(accountId, a.chat) : a.chat;
       const rows = await store.searchMessages(accountId, a.query, {
-        chatJid, fromMe: a.from_me, sinceTs: toTs(a.since), untilTs: toTs(a.until), type: a.type, limit: a.limit || 20,
+        chatJid, fromMe: a.from_me, sinceTs: toTs(a.since), untilTs: toTs(a.until), type: a.type, limit: a.limit || 20, campaign: focus || undefined,
       });
       return rows.length
         ? rows.map((m) => `${m.account_id} | ${m.chat_jid} | ${trim(m.chat_name, 30)} | ${msgLine(m, 200)}`).join('\n')
@@ -312,7 +382,7 @@ function buildServer(playbook = '') {
   }, async (a) => {
     const s = await manager.resolve(a.account);
     const r = await store.searchPeople(s.id, a.words, { who: a.who || 'them', sinceTs: toTs(a.since), untilTs: toTs(a.until),
-      peopleOnly: !a.include_groups, excludeCandidates: !a.include_candidates, excludePhones: await (await import('./notify.js')).alertPhones(), limit: Math.min(a.limit || 50, 60), offset: a.offset || 0 });
+      peopleOnly: !a.include_groups, excludeCandidates: !a.include_candidates && (!focus || scope.same(focus, 'none')), campaign: focus || undefined, excludePhones: await (await import('./notify.js')).alertPhones(), limit: Math.min(a.limit || 50, 60), offset: a.offset || 0 });
     if (!r.total) return `Nobody on ${s.id} matches ${r.words.join(', ')}${a.who === 'me' ? '' : ' (in their own messages — try who="any")'}.`;
     const from = (a.offset || 0) + 1;
     const lines = r.rows.map((x) => [x.chat_jid.split('@')[0], trim(x.name, 34), x.n ? `${x.n}× last ${fmtTime(x.last_hit).slice(0, 10)}: "${trim(x.sample, 80)}"` : 'name matches',
@@ -330,6 +400,10 @@ function buildServer(playbook = '') {
       const chatJid = a.chat ? await resolveChat(s.id, a.chat) : null;
       const p = [s.id];
       let where = "m.account_id = $1 AND m.type = 'contact'";
+      if (focus) {
+        p.push(focus);
+        where += ` AND ${scope.personInSql('m.chat_jid', p.length)}`;
+      }
       if (chatJid) {
         p.push(chatJid);
         where += ` AND m.chat_jid = $${p.length}`;
@@ -391,6 +465,10 @@ function buildServer(playbook = '') {
         where.push(`$${p.length} = ANY(ct.tags)`);
       }
       if (a.skip_reviewed !== false) where.push('ct.reviewed_at IS NULL');
+      if (focus) {
+        p.push(focus);
+        where.push(scope.personInSql('ch.jid', p.length));
+      }
       where.push("NOT ('opted-out' = ANY(COALESCE(ct.tags, '{}')))");
       p.push(a.limit || 30, a.offset || 0);
       const rows = await query(
@@ -485,7 +563,7 @@ function buildServer(playbook = '') {
       }
       if (a.wa_template) {
         const vars = await import('./templates.js').then((t) => t.contactFields(s.id, jid));
-        const row = await outbox.enqueue({ account: s.id, to: jid, payload: { waTemplate: outbox.fillWaTemplate(a.wa_template, vars) }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt });
+        const row = await outbox.enqueue({ account: s.id, to: jid, payload: { waTemplate: outbox.fillWaTemplate(a.wa_template, vars) }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt, role: scopeRole });
         if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
         await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} Meta template "${a.wa_template.name}" #${row.id} to ${jid.split('@')[0]}${a.note ? ` — ${a.note}` : ''}`);
         return `${row.status === 'draft' ? 'Draft' : 'Queued'} #${row.id} (Meta template "${a.wa_template.name}"): "${trim(row.payload.text, 200)}"`;
@@ -499,7 +577,7 @@ function buildServer(playbook = '') {
         attachment = attachment || r.payload.attachment;
       }
       const payload = { text, attachment, ...(a.reply_to_message_id ? { replyTo: a.reply_to_message_id } : {}), ...(a.buttons?.length && !attachment ? { buttons: a.buttons } : {}) };
-      const row = await outbox.enqueue({ account: s.id, to: jid, payload, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt });
+      const row = await outbox.enqueue({ account: s.id, to: jid, payload, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt, role: scopeRole });
       if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
       const later = scheduledAt ? ` for ${d(scheduledAt)}` : '';
       await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} message #${row.id} to ${jid.split('@')[0]}${later}${a.note ? ` — ${a.note}` : ''}`);
@@ -516,7 +594,7 @@ function buildServer(playbook = '') {
     account: z.string().optional().describe('Number whose inbox should also show this name (makes a chat to message them)'),
   }, async (a) => {
     const d = await import('./directory.js');
-    const row = await d.saveEntry({ phone: a.phone, name: a.name, category: a.group, reason: a.reason, notes: a.notes, tags: a.tags, referredBy: a.referred_by, account: a.account ? (await manager.resolve(a.account)).id : null, createdBy: 'ai' });
+    const row = await d.saveEntry({ phone: a.phone, name: a.name, category: a.group, reason: a.reason, notes: a.notes, tags: a.tags, referredBy: a.referred_by, account: a.account ? (await manager.resolve(a.account)).id : null, createdBy: 'ai', role: focus || null });
     if (a.account) await store.saveContact((await manager.resolve(a.account)).id, a.phone, a.name);
     await ai(a.account ? (await manager.resolve(a.account)).id : null, `Saved ${row.name} in Contacts → ${row.category}`);
     return `Saved ${row.name} (+${row.phone}) in "${row.category}" — ${row.reason || ''}`;
@@ -527,10 +605,10 @@ function buildServer(playbook = '') {
   }, async (a) => {
     const d = await import('./directory.js');
     if (!a.query && !a.group) {
-      const g = await d.groups();
+      const g = await d.groups({ role: focus || null });
       return g.length ? 'Contact groups:\n' + g.map((x) => `${x.category}: ${x.n}`).join('\n') : 'No contacts saved yet.';
     }
-    const rows = await d.search({ q: a.query || '', category: a.group || '' });
+    const rows = await d.search({ q: a.query || '', category: a.group || '', role: focus || null });
     return rows.length
       ? rows.map((r) => [`${r.name || '-'} | +${r.phone} | ${r.category}`, r.reason, r.notes ? `notes: ${trim(r.notes, 120)}` : null, r.referred_by_name ? `referred by ${r.referred_by_name}` : null,
           r.tags?.length ? `tags: ${r.tags.join(',')}` : null, r.chat_accounts?.length ? `chat on ${r.chat_accounts.join(', ')}` : 'no chat yet'].filter(Boolean).join(' | ')).join('\n')
@@ -629,9 +707,9 @@ function buildServer(playbook = '') {
   tool('list_templates', 'Saved message templates (name, which number, text with {fields}, attached file). Use them via send_message/bulk_send template=.', {
     account: z.string().optional(),
   }, async (a) => {
-    const rows = await templates.listTemplates(a.account ? (await manager.resolve(a.account)).id : undefined);
+    const rows = await templates.listTemplates(a.account ? (await manager.resolve(a.account)).id : undefined, { role: focus || null });
     return rows.length
-      ? rows.map((t) => `#${t.id} | ${t.name} | ${t.account_id || 'all numbers'} | fields: ${templates.fieldsIn(t.body).join(',') || '-'}${t.attachment?.url ? ' | file' : ''} | ${trim(t.body, 160)}`).join('\n')
+      ? rows.map((t) => `#${t.id} | ${t.name} | ${t.account_id || 'all numbers'} | ${t.role ? `campaign ${t.role}` : 'all campaigns'} | fields: ${templates.fieldsIn(t.body).join(',') || '-'}${t.attachment?.url ? ' | file' : ''} | ${trim(t.body, 160)}`).join('\n')
       : 'No templates yet.';
   });
 
@@ -700,7 +778,7 @@ function buildServer(playbook = '') {
   }, async (a) => {
     const t = await templates.saveTemplate({
       id: a.id, account: a.account ? (await manager.resolve(a.account)).id : null, name: a.name, body: a.body,
-      attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : null,
+      attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : null, role: focus || null,
     });
     await ai(t.account_id, `Saved template "${t.name}"`);
     return `Template #${t.id} "${t.name}" saved.`;
@@ -797,7 +875,7 @@ function buildServer(playbook = '') {
   });
 
   tool('list_rules', 'Automatic rules for incoming messages on each number (conditions → actions) and how often they ran.', { account: z.string().optional() }, async (a) => {
-    const rows = await rules.listRules(a.account ? (await manager.resolve(a.account)).id : undefined);
+    const rows = await rules.listRules(a.account ? (await manager.resolve(a.account)).id : undefined, { role: focus || null });
     return rows.length
       ? rows.map((r) => `#${r.id} | ${r.account_id} | ${r.enabled ? 'on' : 'off'} | ${r.name} | if ${JSON.stringify(r.conditions)} then ${JSON.stringify(r.actions)} | ran ${r.runs}x`).join('\n')
       : 'No rules yet.';
@@ -1258,10 +1336,22 @@ export function mountMcp(app) {
     const key = req.params.key || req.get('x-api-key') || req.query.key;
     if (key !== config.apiKey) return res.status(401).json({ error: 'Unauthorized' });
     if (req.method !== 'POST') return res.status(405).set('Allow', 'POST').json({ error: 'Method not allowed' });
+    // Campaign scope: the URL can pin one (/mcp/<key>/<campaign>, ?campaign=…; "all" = every campaign) — e.g. for a
+    // background routine that always works on Chef hiring. Otherwise the campaign chosen in the dashboard applies.
+    const pinned = req.params.campaign ?? req.query.campaign;
+    const focus = pinned !== undefined ? (/^all$/i.test(pinned) ? '' : String(pinned)) : await scope.getFocus().catch(() => '');
     const main = (await getPlaybook().catch(() => ({ text: '' }))).text;
-    const camps = await listCampaignPlaybooks().catch(() => []);
-    // the main playbook in full; campaign playbooks by name only (the AI reads the one it works on)
-    const server = buildServer(camps.length ? `${main}\n\nCAMPAIGN PLAYBOOKS (own rules per campaign — read the one you work on with get_playbook(campaign=…) or hub_overview(campaign=…)): ${camps.map((c) => c.campaign).join(', ')}` : main);
+    let instructions;
+    if (focus) {
+      // inside a campaign: the main rules plus that campaign's own playbook, in full; other campaigns are not mentioned
+      const cp = await getCampaignPlaybook(focus).catch(() => null);
+      instructions = `${main}\n\n${cp ? `CAMPAIGN PLAYBOOK — ${cp.campaign} (follow it together with the main rules):\n${cp.text}` : `(No playbook for ${scope.label(focus)} yet — follow the main rules.)`}`;
+    } else {
+      const camps = await listCampaignPlaybooks().catch(() => []);
+      // the main playbook in full; campaign playbooks by name only (the AI reads the one it works on)
+      instructions = camps.length ? `${main}\n\nCAMPAIGN PLAYBOOKS (own rules per campaign — read the one you work on with get_playbook(campaign=…) or hub_overview(campaign=…)): ${camps.map((c) => c.campaign).join(', ')}` : main;
+    }
+    const server = buildServer(instructions, focus);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => {
       transport.close();
@@ -1271,5 +1361,6 @@ export function mountMcp(app) {
     await transport.handleRequest(req, res, req.body);
   };
   app.all('/mcp/:key', handler);
+  app.all('/mcp/:key/:campaign', handler);
   app.all('/mcp', handler);
 }

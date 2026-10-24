@@ -53,7 +53,7 @@ async function assertCloudWindow(session, jid, payload) {
   }
 }
 
-export async function enqueue({ account, to, payload, source, note, scheduledAt, taskId = null, idemKey = null }) {
+export async function enqueue({ account, to, payload, source, note, scheduledAt, taskId = null, idemKey = null, role = null }) {
   const session = await manager.resolve(account);
   if (!payload?.text && !payload?.attachment && !payload?.waTemplate) throw new Error('Nothing to send: give text and/or attachment');
   const jid = toJid(to);
@@ -83,7 +83,8 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
     return { ...dup, duplicate: true };
   }
   // the campaign this message belongs to (from the person's list) — stored, so the data stays demarcated
-  await query(`UPDATE outbox SET role = ${roleOf('$2', '$3')} WHERE id = $1 AND role IS NULL`, [row.id, session.id, jid]).catch(() => {});
+  // (a send made inside a campaign is that campaign's, even if the person is also on another campaign's list)
+  await query(`UPDATE outbox SET role = COALESCE($4::text, ${roleOf('$2', '$3')}) WHERE id = $1 AND role IS NULL`, [row.id, session.id, jid, role || null]).catch(() => {});
   if (taskId) await refreshTask(taskId);
   if (status === 'queued') wake(session.id);
   // A single message for later shows on the Board until it goes out

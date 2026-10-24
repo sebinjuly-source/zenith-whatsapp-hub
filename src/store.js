@@ -4,6 +4,7 @@
  * WhatsApp's privacy IDs (…@lid) are mapped back to numbers via lid_map and merged later if needed.
  */
 import { jidNormalizedUser, isLidUser, isJidGroup } from '@whiskeysockets/baileys';
+import { personInSql } from './scope.js';
 import { query, insertMany } from './db.js';
 import { roleOf, roleFilter } from './campaign.js';
 import config from './config.js';
@@ -406,9 +407,13 @@ export async function getMessages(accountId, chatJid, { limit = 30, beforeTs, af
   return rows.reverse();
 }
 
-export async function searchMessages(accountId, text, { chatJid, fromMe, sinceTs, untilTs, type, limit = 30 } = {}) {
+export async function searchMessages(accountId, text, { chatJid, fromMe, sinceTs, untilTs, type, limit = 30, campaign } = {}) {
   const p = [];
   const where = [];
+  if (campaign) {
+    p.push(campaign);
+    where.push(personInSql('m.chat_jid', p.length));
+  }
   if (accountId) {
     p.push(accountId);
     where.push(`m.account_id = $${p.length}`);
@@ -459,7 +464,7 @@ export async function searchMessages(accountId, text, { chatJid, fromMe, sinceTs
  * inside longer words (travel → travels, Youngtravels); shorter ones ("HR") must be whole words.
  * who: 'them' (they wrote it — what they want), 'me', or any. Returns { total, rows }.
  */
-export async function searchPeople(accountId, text, { who, sinceTs, untilTs, peopleOnly = true, excludeCandidates = true, excludePhones = [], limit = 50, offset = 0 } = {}) {
+export async function searchPeople(accountId, text, { who, sinceTs, untilTs, peopleOnly = true, excludeCandidates = true, excludePhones = [], limit = 50, offset = 0, campaign } = {}) {
   const words = [...new Set(String(text || '').replace(/["()]/g, ' ').split(/[\s,]+/).filter((w) => w && !/^(or|and)$/i.test(w) && !w.startsWith('-')).map((w) => w.toLowerCase()))].slice(0, 20);
   if (!words.length) throw new Error('Give the words to look for, e.g. "company GST travels agency booking"');
   const p = [accountId];
@@ -482,6 +487,7 @@ export async function searchPeople(accountId, text, { who, sinceTs, untilTs, peo
     "split_part(ch.jid, '@', 1) NOT IN (SELECT phone FROM accounts WHERE phone IS NOT NULL)",
     "NOT ('own-number' = ANY(COALESCE(ct.tags, '{}')))",
     excludePhones.length ? `split_part(ch.jid, '@', 1) <> ALL(${add(excludePhones)}::text[])` : 'TRUE',
+    campaign ? personInSql('ch.jid', (add(campaign), p.length)) : 'TRUE',
   ].join(' AND ');
   const namePattern = long.length ? add(long.map((w) => `%${w}%`)) : null;
   const sql = `

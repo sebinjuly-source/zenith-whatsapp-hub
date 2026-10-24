@@ -2006,3 +2006,92 @@ test('sales and guest lists start without the candidate pipeline (no Hinglish in
   await mcp('import_list', { account: 'sales1', name: 'Chef – pipeline default', members: [{ phone: '9733900002', name: 'Cook' }] });
   assert.notEqual((await listsMod.getList('Chef – pipeline default')).pipeline.enabled, false);
 });
+
+test('campaign scope: a campaign is like a separate user — the dashboard and the AI see and change only it', async () => {
+  await manager.create({ id: 'scopeacc', label: 'ScopeAcc' });
+  fake('scopeacc');
+  await manager.update('scopeacc', { settings: { aiMode: 'approve' } });
+  const mcpAt = async (url, name, args = {}) => {
+    const r = await (await fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: ++mcpId, method: 'tools/call', params: { name, arguments: args } }) })).json();
+    return r.result.content[0].text;
+  };
+  // the owner's dashboard (logged-in cookie); the test's API key stands for a script, which is never tied to a campaign
+  const login = await fetch(`${base}/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: 'k' }) });
+  const cookie = (login.headers.get('set-cookie') || '').split(';')[0];
+  assert.ok(cookie, 'logged in');
+  const asOwner = async (method, p, body) => {
+    const r = await fetch(base + p, { method, headers: { 'content-type': 'application/json', cookie }, body: body ? JSON.stringify(body) : undefined });
+    const text = await r.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = text; }
+    return { status: r.status, data };
+  };
+  // a campaign can be created from the dashboard (with its rules for the AI)
+  const c = (await asOwner('POST', '/api/campaigns', { name: 'Scope Alpha', playbook: 'Alpha rules: be brief.' })).data;
+  assert.equal(c.created, true);
+  assert.ok((await asOwner('GET', '/api/campaigns')).data.some((x) => x.role === 'Scope Alpha'), 'listed before it has any list');
+  await mcp('import_list', { account: 'scopeacc', name: 'Alpha people', role: 'Scope Alpha', members: [{ phone: '9744000001', name: 'Alpha One' }] });
+  await mcp('import_list', { account: 'scopeacc', name: 'Beta people', role: 'Scope Beta', members: [{ phone: '9744000002', name: 'Beta Two' }] });
+  const dA = Number((await mcp('send_message', { account: 'scopeacc', to: '919744000001', text: 'Hi alpha' })).match(/#(\d+)/)[1]);
+  const dB = Number((await mcp('send_message', { account: 'scopeacc', to: '919744000002', text: 'Hi beta' })).match(/#(\d+)/)[1]);
+  const sharedTpl = Number((await mcp('save_template', { name: 'Shared hello', body: 'Hello {first_name}' })).match(/#(\d+)/)[1]);
+  const allCount = (await call('GET', '/api/outbox/count?status=draft')).data.n;
+  try {
+    // ---- dashboard: pick Alpha
+    assert.equal((await asOwner('PUT', '/api/focus', { campaign: 'Scope Alpha' })).data.campaign, 'Scope Alpha');
+    assert.equal((await call('GET', '/api/outbox/count?status=draft')).data.n, allCount, 'scripts (API key) still see everything');
+    assert.equal((await asOwner('GET', '/api/outbox/count?status=draft')).data.n, 1, 'the Drafts badge counts only this campaign');
+    assert.deepEqual((await asOwner('GET', '/api/outbox?status=draft&limit=500')).data.map((r) => r.id), [dA], 'the Drafts page lists only this campaign');
+    assert.ok((await asOwner('GET', '/api/outbox?status=draft&role=Scope%20Beta')).status >= 400, 'asking for another campaign is refused');
+    for (const [m, p, b] of [['POST', `/api/outbox/${dB}/approve`, {}], ['POST', '/api/outbox/approve-selected', { ids: [dB] }], ['PATCH', `/api/outbox/${dB}`, { text: 'x' }],
+      ['POST', '/api/outbox/reject-selected', { ids: [dA, dB] }], ['GET', '/api/accounts/scopeacc/chats/919744000002@s.whatsapp.net/messages']]) {
+      const r = await asOwner(m, p, b);
+      assert.ok(r.status >= 400, `${m} ${p} on another campaign is refused`);
+      assert.match(JSON.stringify(r.data), /out of scope/);
+    }
+    assert.equal((await query('SELECT status FROM outbox WHERE id = $1', [dB]))[0].status, 'draft', 'nothing happened to the other campaign');
+    assert.equal((await query('SELECT status FROM outbox WHERE id = $1', [dA]))[0].status, 'draft', 'a refused mixed selection changes nothing');
+    assert.equal((await asOwner('POST', '/api/outbox/approve-selected', { ids: [dA] })).data.approved, 1, 'its own drafts can be approved');
+    // templates: new ones belong to the campaign; shared ones are shown but changed only with All campaigns
+    const own = (await asOwner('POST', '/api/templates', { name: 'Alpha only', body: 'Hi' })).data;
+    assert.equal(own.role, 'Scope Alpha');
+    const names = (await asOwner('GET', '/api/templates')).data.map((t) => t.name);
+    assert.ok(names.includes('Alpha only') && names.includes('Shared hello'));
+    assert.ok((await asOwner('PATCH', `/api/templates/${sharedTpl}`, { name: 'Shared hello', body: 'changed' })).status >= 400, 'a shared template is not changed from inside a campaign');
+    // contacts and lists
+    assert.equal((await asOwner('POST', '/api/directory', { phone: '9744000001', name: 'Alpha One', category: 'Alpha – leads' })).data.role, 'Scope Alpha');
+    assert.deepEqual((await asOwner('GET', '/api/lists')).data.map((l) => l.name), ['Alpha people']);
+    assert.match((await asOwner('GET', '/api/playbook')).data.text, /Alpha rules/, 'the Settings page shows the campaign playbook');
+    // every page of the dashboard loads inside a campaign
+    for (const p of ['/api/directory?q=&category=', '/api/directory/groups', '/api/events?limit=20', '/api/tasks', '/api/rules', '/api/outbox/status',
+      '/api/accounts/scopeacc/chats?limit=20', '/api/people?q=Alpha', '/api/pipeline', '/api/campaigns', '/api/playbooks', '/api/search?q=Hi']) {
+      const r = await asOwner('GET', p);
+      assert.equal(r.status, 200, `${p} loads inside a campaign: ${JSON.stringify(r.data).slice(0, 120)}`);
+    }
+    assert.ok((await asOwner('GET', '/api/directory?q=')).data.some((x) => x.name === 'Alpha One'), 'the campaign’s contacts are found');
+    assert.ok((await asOwner('GET', '/api/events?limit=50')).data.every((e) => !e.role || e.role === 'Scope Alpha'), 'activity shows only this campaign');
+    assert.ok((await asOwner('PUT', '/api/playbook', { text: 'x', campaign: 'Scope Beta' })).status >= 400, 'another campaign playbook is not changed');
+
+    // ---- the AI (default MCP URL) follows the dashboard's campaign
+    assert.match(await mcp('hub_overview'), /FOCUS: campaign "Scope Alpha"/);
+    const ob = await mcp('list_outbox', { status: 'draft,queued,sent' });
+    assert.match(ob, /919744000001/);
+    assert.ok(!/919744000002/.test(ob), 'the AI does not see the other campaign');
+    for (const [tool, args] of [['reject_draft', { id: dB }], ['edit_draft', { id: dB, text: 'x' }], ['send_message', { account: 'scopeacc', to: '919744000002', text: 'hi' }],
+      ['get_messages', { account: 'scopeacc', chat: '919744000002' }], ['list_members', { list: 'Beta people' }], ['list_outbox', { campaign: 'Scope Beta' }],
+      ['save_playbook', { text: 'new main rules' }], ['person_context', { person: '919744000002' }]]) {
+      assert.match(await mcp(tool, args), /^Error: .*(out of scope|only its own playbook)/, `${tool} on another campaign is refused`);
+    }
+    assert.match(await mcp('get_playbook'), /Alpha rules: be brief/, 'the campaign playbook is the one the AI reads');
+    // a person on no list of the campaign must be added to one of its lists first
+    assert.match(await mcp('send_message', { account: 'scopeacc', to: '919744000099', text: 'hi' }), /on no list of campaign "Scope Alpha"/);
+    // a pinned URL (e.g. a background routine) keeps its own campaign
+    assert.match(await mcpAt('/mcp/k/all', 'list_outbox', { status: 'draft' }), /919744000002/);
+    assert.match(await mcpAt(`/mcp/k/${encodeURIComponent('Scope Beta')}`, 'list_outbox', { status: 'draft' }), /919744000002/);
+    assert.match(await mcpAt(`/mcp/k/${encodeURIComponent('Scope Beta')}`, 'reject_draft', { id: dA }), /^Error: .*belongs to campaign "Scope Alpha"/);
+  } finally {
+    await asOwner('PUT', '/api/focus', { campaign: '' });
+  }
+  assert.equal((await call('GET', '/api/focus')).data.campaign, '');
+});

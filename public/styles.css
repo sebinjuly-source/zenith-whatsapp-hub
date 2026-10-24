@@ -411,3 +411,8 @@ details.day > summary .selall { margin-left: 8px; }
 }
 .callrow[hidden] { display: none; }
 .callrow { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 2px; }
+/* Drafts: long-press selection like the Board; the action bar stays at the bottom of the screen */
+.card.draftcard { touch-action: manipulation; }
+.card.draftcard.picked { outline: 2px solid var(--accent); outline-offset: 1px; }
+.card.draftcard .pick { width: 18px; height: 18px; accent-color: var(--accent); flex: 0 0 auto; cursor: pointer; }
+.pickbar select { width: auto; max-width: 180px; color: var(--ink); background: var(--panel); }

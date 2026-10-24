@@ -18,13 +18,13 @@ export const SUGGESTED_GROUPS = [
 const clean = (s, n = 300) => (s == null ? null : String(s).trim().slice(0, n) || null);
 
 /** Save (or update) a person in a group. Merges tags; a new reason or note is added to the old one, not lost. */
-export async function saveEntry({ phone, name, category, reason, notes, tags = [], account = null, referredBy = null, createdBy = 'you' }) {
+export async function saveEntry({ phone, name, category, reason, notes, tags = [], account = null, referredBy = null, createdBy = 'you', role = null }) {
   const jid = toJid(phone);
   if (!clean(category)) throw new Error('Choose a group, e.g. "Chef hiring – Referrers" or "Catering"');
   const refJid = referredBy ? toJid(referredBy) : null;
   const [row] = await query(
-    `INSERT INTO directory (jid, phone, name, category, reason, notes, tags, account_id, referred_by, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    `INSERT INTO directory (jid, phone, name, category, reason, notes, tags, account_id, referred_by, created_by, role)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      ON CONFLICT (jid, category) DO UPDATE SET
        name = COALESCE(EXCLUDED.name, directory.name),
        reason = CASE WHEN EXCLUDED.reason IS NULL OR directory.reason LIKE '%' || EXCLUDED.reason || '%' THEN directory.reason
@@ -34,10 +34,11 @@ export async function saveEntry({ phone, name, category, reason, notes, tags = [
        tags = (SELECT COALESCE(array_agg(DISTINCT t ORDER BY t), '{}') FROM unnest(directory.tags || EXCLUDED.tags) t),
        account_id = COALESCE(directory.account_id, EXCLUDED.account_id),
        referred_by = COALESCE(EXCLUDED.referred_by, directory.referred_by),
+       role = COALESCE(directory.role, EXCLUDED.role),
        updated_at = now()
      RETURNING *`,
     [jid, jid.split('@')[0], clean(name, 100), clean(category, 80), clean(reason), clean(notes, 1000),
-      (tags || []).map((t) => String(t).trim().toLowerCase()).filter(Boolean), account, refJid, createdBy],
+      (tags || []).map((t) => String(t).trim().toLowerCase()).filter(Boolean), account, refJid, createdBy, role || null],
   );
   return row;
 }
@@ -46,9 +47,13 @@ export async function saveEntry({ phone, name, category, reason, notes, tags = [
  * Find people for a need: every word must appear somewhere (name, phone, group, reason, notes, tags, or the
  * referrer's name). "chef" finds chef referrers and referred chefs; "caterer" finds the catering group.
  */
-export async function search({ q = '', category = '', limit = 100 } = {}) {
+export async function search({ q = '', category = '', limit = 100, role = null } = {}) {
   const p = [];
   const where = [];
+  if (role) {
+    p.push(role);
+    where.push(`(d.role IS NULL OR lower(d.role) = lower($${p.length}))`);
+  }
   if (category) {
     p.push(`%${category}%`);
     where.push(`d.category ILIKE $${p.length}`);
@@ -72,8 +77,9 @@ export async function search({ q = '', category = '', limit = 100 } = {}) {
   );
 }
 
-export async function groups() {
-  return query(`SELECT category, count(*)::int AS n, max(updated_at) AS last FROM directory GROUP BY category ORDER BY category`);
+export async function groups({ role = null } = {}) {
+  return query(`SELECT category, count(*)::int AS n, max(updated_at) AS last FROM directory
+    WHERE $1::text IS NULL OR role IS NULL OR lower(role) = lower($1) GROUP BY category ORDER BY category`, [role || null]);
 }
 
 export async function remove(id) {
@@ -114,8 +120,8 @@ export async function noteSharedContacts(accountId, r) {
     const phone = v.phones?.[0];
     if (!phone || phone.length < 10) continue;
     const name = v.name || phone;
-    await saveEntry({ phone, name, category: `${prefix} – Referred`, reason: `Referred by ${senderName} (+${r.chatJid.split('@')[0]}) on ${day}`, account: accountId, referredBy: r.chatJid, createdBy: 'hub' });
-    await saveEntry({ phone: r.chatJid, name: senderName, category: `${prefix} – Referrers`, reason: `Referred ${name} (+${phone}) on ${day}`, account: accountId, createdBy: 'hub' });
+    await saveEntry({ phone, name, category: `${prefix} – Referred`, reason: `Referred by ${senderName} (+${r.chatJid.split('@')[0]}) on ${day}`, account: accountId, referredBy: r.chatJid, createdBy: 'hub', role });
+    await saveEntry({ phone: r.chatJid, name: senderName, category: `${prefix} – Referrers`, reason: `Referred ${name} (+${phone}) on ${day}`, account: accountId, createdBy: 'hub', role });
     await createTask({
       account: accountId, assignee: 'you', priority: true, createdBy: 'rule', role,
       title: `Call ${name} – referred by ${senderName}`,

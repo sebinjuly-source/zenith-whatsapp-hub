@@ -6,11 +6,13 @@
  */
 import { query } from './db.js';
 
-export async function listTemplates(accountId) {
+/** role: a campaign → its own templates plus the shared ones (role NULL); omitted = all. */
+export async function listTemplates(accountId, { role } = {}) {
   return query(
-    `SELECT * FROM templates WHERE account_id IS NULL OR account_id = $1 OR $1::text IS NULL
+    `SELECT * FROM templates WHERE (account_id IS NULL OR account_id = $1 OR $1::text IS NULL)
+       AND ($2::text IS NULL OR role IS NULL OR lower(role) = lower($2))
      ORDER BY lower(name)`,
-    [accountId || null],
+    [accountId || null, role || null],
   );
 }
 
@@ -26,20 +28,20 @@ export async function getTemplate(accountId, idOrName) {
   return t || null;
 }
 
-export async function saveTemplate({ id, account, name, body, attachment }) {
+export async function saveTemplate({ id, account, name, body, attachment, role }) {
   if (!name?.trim()) throw new Error('A template needs a name');
   if (!body?.trim() && !attachment?.url) throw new Error('A template needs text or a file');
   if (id) {
     const [t] = await query(
-      `UPDATE templates SET name = $2, body = $3, attachment = $4, account_id = $5, updated_at = now() WHERE id = $1 RETURNING *`,
-      [id, name.trim(), body || '', attachment ? JSON.stringify(attachment) : null, account || null],
+      `UPDATE templates SET name = $2, body = $3, attachment = $4, account_id = $5, role = COALESCE($6, role), updated_at = now() WHERE id = $1 RETURNING *`,
+      [id, name.trim(), body || '', attachment ? JSON.stringify(attachment) : null, account || null, role || null],
     );
     if (!t) throw new Error('Template not found');
     return t;
   }
   const [t] = await query(
-    `INSERT INTO templates (account_id, name, body, attachment) VALUES ($1,$2,$3,$4) RETURNING *`,
-    [account || null, name.trim(), body || '', attachment ? JSON.stringify(attachment) : null],
+    `INSERT INTO templates (account_id, name, body, attachment, role) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [account || null, name.trim(), body || '', attachment ? JSON.stringify(attachment) : null, role || null],
   );
   return t;
 }
