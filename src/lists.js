@@ -60,7 +60,9 @@ export const CLOSED_STAGES = ['joined', 'not_interested', 'rejected'];
 const DEFAULT_PIPELINE = {
   enabled: true,
   autoSend: false, // false = reminders/questions wait for approval like other AI messages
-  remindHoursBefore: 18,
+  remindHoursBefore: 18, // old single reminder — no longer used (kept so stored settings stay valid)
+  eveningReminderAt: '18:00', // interview reminders: the evening before at this time…
+  sameDayHoursBefore: 3, // …and this many hours before, on the day
   askDateAfterHours: 4,
   askDateText: 'Namaste {first_name} ji, aap kis din aa sakte hain? Date aur time bata dijiye. - Zenith Suites HR',
   reminderText: 'Namaste {first_name} ji, yaad dila rahe hain: aap {visit_date} ko Zenith Suites (Amrutha Halli) aa rahe hain. Koi problem ho to call karein: 9353315601. - Zenith Suites HR',
@@ -354,6 +356,7 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
        stage_at = CASE WHEN $5::text IS NULL THEN stage_at ELSE now() END,
        visit_at = CASE WHEN $6::text = 'keep' THEN visit_at WHEN $6 = 'clear' THEN NULL ELSE $7::timestamptz END,
        reminded_at = CASE WHEN $6::text = 'keep' THEN reminded_at ELSE NULL END,
+       reminded2_at = CASE WHEN $6::text = 'keep' THEN reminded2_at ELSE NULL END,
        checked_at = CASE WHEN $6::text = 'keep' THEN checked_at ELSE NULL END,
        followup_at = CASE WHEN $8::text = 'keep' THEN followup_at WHEN $8 = 'clear' THEN NULL ELSE $9::timestamptz END,
        followup_note = CASE WHEN $8::text = 'clear' THEN NULL ELSE COALESCE($10, followup_note) END,
@@ -394,6 +397,8 @@ export async function setPipeline(listId, settings) {
   if (!l) throw new Error('List not found');
   const p = { ...DEFAULT_PIPELINE, ...(l.pipeline || {}), ...Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== undefined)) };
   p.remindHoursBefore = Math.max(1, Number(p.remindHoursBefore) || 18);
+  p.eveningReminderAt = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(p.eveningReminderAt)) ? String(p.eveningReminderAt) : '18:00';
+  p.sameDayHoursBefore = Math.min(12, Math.max(1, Number(p.sameDayHoursBefore) || 3));
   p.askDateAfterHours = Math.max(1, Number(p.askDateAfterHours) || 4);
   p.enabled = p.enabled !== false;
   p.autoSend = !!p.autoSend;
@@ -426,7 +431,8 @@ const fmtVisit = (t) => new Date(t).toLocaleString('en-IN', { timeZone: config.t
 /**
  * Warm-lead automation (runs with follow-ups every 10 min, on the server holding the number):
  *  - stage "interested", no date, quiet for askDateAfterHours → ask for a date (once)
- *  - stage "date_given" → reminder message remindHoursBefore the visit (once) + a board task for you
+ *  - stage "date_given" → two reminders: the evening before at eveningReminderAt (18:00) and sameDayHoursBefore (3 h)
+ *    before the interview; none when the date was fixed less than 2 h earlier (that conversation just happened)
  *  - visit time passed by 3 h and stage still "date_given" → board task "Did X come?" (once)
  * These come before bulk sends and follow-ups (priority 5).
  */
@@ -477,21 +483,35 @@ export async function runPipeline() {
         await query('UPDATE list_members SET asked_date_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
         asked++;
       }
-      // 2. date given → reminder before the visit + task for you
-      const remind = await query(
-        `SELECT m.* FROM list_members m WHERE m.list_id = $1 AND m.stage = 'date_given' AND m.visit_at IS NOT NULL AND m.reminded_at IS NULL
-           AND m.visit_at > now() AND m.visit_at <= now() + ($2 || ' hours')::interval`,
-        [list.id, String(p.remindHoursBefore)],
+      // 2. date given → reminder the evening before (18:00) and again N hours before, on the day
+      const { upsertRefTask, logTask } = await import('./tasks.js');
+      const eve = (m) => localDate(`${new Date(new Date(m.visit_at).getTime() - 86400000).toLocaleDateString('en-CA', { timeZone: config.tz })} ${p.eveningReminderAt}`);
+      const due = await query(
+        `SELECT m.*, (m.stage_at > now() - interval '2 hours') AS just_fixed FROM list_members m WHERE m.list_id = $1 AND m.stage = 'date_given' AND m.visit_at > now()
+           AND (m.reminded_at IS NULL OR m.reminded2_at IS NULL) AND m.visit_at <= now() + interval '36 hours'`,
+        [list.id],
       );
       let reminded = 0;
-      for (const m of remind) {
-        if (!(await send(m, p.reminderText, 'visit-reminder', p.reminderWaTemplate))) continue;
+      for (const m of due) {
+        const sameDay = new Date(m.visit_at).getTime() - p.sameDayHoursBefore * 3600e3 <= Date.now();
+        const which = sameDay ? (m.reminded2_at ? null : 'reminded2_at') : (!m.reminded_at && eve(m) <= new Date() ? 'reminded_at' : null);
+        if (!which) continue;
+        if (m.just_fixed) {
+          // the date was agreed a moment ago: no reminder now (an evening one is not "skipped" when the day-of one is due)
+          await query(`UPDATE list_members SET ${which} = now() WHERE list_id = $1 AND jid = $2`, [list.id, m.jid]);
+          continue;
+        }
+        const note = sameDay ? 'visit-reminder-today' : 'visit-reminder';
+        const text = sameDay ? (p.sameDayReminderText || p.reminderText) : p.reminderText;
+        if (!(await send(m, text, note, p.reminderWaTemplate))) continue;
         reminded++;
-        // the visit card already exists (made when the date was set) — just note the reminder on it
-        const { upsertRefTask } = await import('./tasks.js');
-        await upsertRefTask(`visit:${list.id}:${m.jid}`, { account: list.account_id, kind: 'visit', role: list.role, dueAt: new Date(m.visit_at).toISOString(), assignee: 'you', priority: true,
-          title: `Interview: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminder sent to +${m.phone}. Take the interview / cooking test, then set the stage (visited / trial / no_show).` });
-        await query('UPDATE list_members SET reminded_at = now() WHERE list_id = $1 AND jid = $2', [list.id, m.jid]);
+        // an evening reminder makes the same-day one due only on the day; once on the day, both count as done
+        await query(`UPDATE list_members SET ${which} = now()${sameDay ? ', reminded_at = COALESCE(reminded_at, now())' : ''} WHERE list_id = $1 AND jid = $2`, [list.id, m.jid]);
+        const ref = `visit:${list.id}:${m.jid}`;
+        await upsertRefTask(ref, { account: list.account_id, kind: 'visit', role: list.role, dueAt: new Date(m.visit_at).toISOString(), assignee: 'you', priority: true,
+          title: `Interview: ${m.name || m.phone} — ${fmtVisit(m.visit_at)}`, details: `${list.name}. Reminders to +${m.phone}: evening before and ${p.sameDayHoursBefore} h before. Take the interview / cooking test, then set the stage (visited / trial / no_show).` });
+        const [card] = await query(`SELECT id FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled') ORDER BY id DESC LIMIT 1`, [ref]);
+        if (card) await logTask(card.id, `${sameDay ? `Reminder (${p.sameDayHoursBefore} h before)` : 'Evening-before reminder'} ${p.autoSend ? 'sent' : 'drafted'} to +${m.phone}`);
       }
       // 3. visit time passed, stage not updated → ask you
       const check = await query(

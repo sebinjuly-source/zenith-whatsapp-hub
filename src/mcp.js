@@ -298,6 +298,25 @@ function buildServer(playbook = '') {
     },
   );
 
+  tool('find_people', 'Find PEOPLE (one line per chat) whose messages or saved name mention any of the words — for campaigns and segments: old guests to win back, company HRs / corporate bookers, travel agents, people who asked about rooms or rates. Unlike search_messages (newest 100 messages), this covers ALL history and lists each person once with how many messages matched, when, a sample and their last message. Skips groups and job candidates by default. Page with offset; then read promising chats with person_context or get_messages before drafting.', {
+    account: accountArg,
+    words: z.string().describe('Words to look for, any of them, e.g. "corporate company GST invoice travels agency booking rooms rate". 4+ letters also match inside words (travel → Youngtravels); shorter ones (HR) only as whole words'),
+    who: z.enum(['them', 'me', 'any']).optional().describe('"them" (default) = they wrote it — what they asked for; "me" = we wrote it; "any"'),
+    since: z.string().optional(), until: z.string().optional().describe('Only matches before this date (YYYY-MM-DD) — e.g. old leads'),
+    include_groups: z.boolean().optional(), include_candidates: z.boolean().optional().describe('Also people on job candidate lists (default false)'),
+    limit: z.number().int().min(1).max(200).optional(), offset: z.number().int().min(0).optional(),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    const r = await store.searchPeople(s.id, a.words, { who: a.who || 'them', sinceTs: toTs(a.since), untilTs: toTs(a.until),
+      peopleOnly: !a.include_groups, excludeCandidates: !a.include_candidates, limit: a.limit || 60, offset: a.offset || 0 });
+    if (!r.total) return `Nobody on ${s.id} matches ${r.words.join(', ')}${a.who === 'me' ? '' : ' (in their own messages — try who="any")'}.`;
+    const from = (a.offset || 0) + 1;
+    const lines = r.rows.map((x) => [x.chat_jid.split('@')[0], trim(x.name, 34), x.n ? `${x.n} match${x.n > 1 ? 'es' : ''}, last ${fmtTime(x.last_hit)}: "${trim(x.sample, 110)}"` : 'name matches',
+      `chat last ${fmtTime(x.last_ts)} (${x.last_from_me ? 'me' : 'them'}): ${trim(x.last_preview, 70)}`, x.tags?.length ? `tags:${x.tags.join(',')}` : null, x.summary ? `summary:${trim(x.summary, 100)}` : null].filter(Boolean).join(' | '));
+    const next = r.total > from - 1 + r.rows.length ? `\nMore: offset=${from - 1 + r.rows.length} (${r.total - (from - 1 + r.rows.length)} left).` : '';
+    return `${r.total} people on ${s.id} match ${r.words.join(', ')} — showing ${from}–${from - 1 + r.rows.length}, most recent match first (number | name | matches | their chat):\n${lines.join('\n')}${next}`;
+  });
+
   tool(
     'list_shared_contacts',
     'List contact cards (vCards) shared in chats/groups — e.g. leads posted in a group. Returns name, organisation, phone numbers, where and when it was shared.',
@@ -691,6 +710,68 @@ function buildServer(playbook = '') {
     return a.state === 'snoozed' ? `Reminder set for ${fmtTime(Math.floor(new Date(until).getTime() / 1000))}.` : `Chat marked ${a.state}.`;
   });
 
+  tool('person_context', 'EVERYTHING about one person in one call, before you act on them: their chats on every number (latest messages, oldest→newest; messages that came AFTER their Board card was last updated are marked NEW — the card may be out of date), list stage / interview date / follow-up / outcome, open and recent Board cards with notes and call results, drafts and queued messages to them, contact-book entries, tags and summary. Use it before drafting to a candidate or guest.', {
+    person: z.string().describe('Phone number (any format) or name'), messages: z.number().int().min(1).max(60).optional().describe('Messages per chat (default 12)'),
+  }, async (a) => {
+    let jid;
+    if (/^[+\d\s()-]{8,}$/.test(a.person.trim()) || a.person.includes('@')) jid = store.toJid(a.person);
+    else {
+      const hits = await findPerson(a.person);
+      const jids = [...new Set(hits.map((h) => h.jid))];
+      if (!jids.length) return `Nobody called "${a.person}" on any number.`;
+      if (jids.length > 1) return `"${a.person}" matches ${jids.length} people — pass the number:\n${hits.slice(0, 15).map((h) => `${h.jid.split('@')[0]} | ${trim(h.name, 30)} | ${h.account_id}`).join('\n')}`;
+      jid = jids[0];
+    }
+    const phone = jid.split('@')[0];
+    const out = [];
+    const contacts = await query(`SELECT ct.account_id, COALESCE(ct.saved_name, ct.name, ct.notify) AS name, ct.tags, ct.lead_status, ct.summary, ct.notes, ct.is_blocked FROM contacts ct WHERE ct.jid = $1`, [jid]);
+    const otherNames = await query(`SELECT name FROM list_members WHERE jid = $1 AND COALESCE(name, '') <> '' UNION SELECT name FROM chats WHERE jid = $1 AND COALESCE(name, '') <> ''`, [jid]);
+    const names = [...new Set([...contacts.map((c) => c.name), ...otherNames.map((r) => r.name)].filter(Boolean))];
+    out.push(`PERSON +${phone}${names.length ? ` — ${names.join(' / ')}` : ''}`);
+    for (const c of contacts) {
+      const bits = [c.tags?.length ? `tags:${c.tags.join(',')}` : null, c.lead_status ? `status:${c.lead_status}` : null, c.summary ? `summary:${trim(c.summary, 200)}` : null, c.notes ? `notes:${trim(c.notes, 200)}` : null, c.is_blocked ? 'BLOCKED' : null].filter(Boolean);
+      if (bits.length) out.push(`  on ${c.account_id}: ${bits.join(' | ')}`);
+    }
+    const dir = await query(`SELECT category, reason, notes FROM directory WHERE jid = $1`, [jid]);
+    if (dir.length) out.push(`CONTACT BOOK: ${dir.map((d) => `${d.category}${d.reason ? ` (${trim(d.reason, 80)})` : ''}`).join('; ')}`);
+    const mem = await query(
+      `SELECT l.id, l.name, l.role, l.account_id, l.archived, m.status, m.stage, m.visit_at, m.followup_at, m.followup_note, m.outcome, m.notes, m.last_sent_at, m.last_reply_at, m.reminded_at, m.reminded2_at
+       FROM list_members m JOIN lists l ON l.id = m.list_id WHERE m.jid = $1 ORDER BY l.id DESC`, [jid]);
+    out.push(mem.length ? 'LISTS:' : 'LISTS: none (not a candidate on any list)');
+    for (const m of mem) {
+      out.push(`  #${m.id} ${m.name} (${m.role || '-'}, number ${m.account_id})${m.archived ? ' ARCHIVED' : ''}: ${m.status}${m.stage ? `, stage ${m.stage}` : ''}${m.visit_at ? `, interview ${d(m.visit_at)}${m.reminded_at || m.reminded2_at ? ` (reminded${m.reminded2_at ? ' on the day' : ' the evening before'})` : ''}` : ''}${m.followup_at ? `, follow up ${d(m.followup_at)}${m.followup_note ? ` — ${trim(m.followup_note, 80)}` : ''}` : ''}${m.outcome ? `, outcome: ${trim(m.outcome, 80)}` : ''}${m.notes ? `, notes: ${trim(m.notes, 80)}` : ''}`);
+    }
+    const cards = await query(
+      `SELECT t.id, t.title, t.status, t.kind, t.due_at, t.assignee, t.priority, t.updated_at, t.completed_at,
+         (SELECT l.text FROM task_log l WHERE l.task_id = t.id AND l.kind = 'note' ORDER BY l.id DESC LIMIT 1) AS last_note,
+         (SELECT l.actor FROM task_log l WHERE l.task_id = t.id AND l.kind = 'note' ORDER BY l.id DESC LIMIT 1) AS note_by
+       FROM tasks t WHERE (t.ref LIKE '%:' || $1 OR t.title LIKE '%' || $2 || '%' OR t.details LIKE '%' || $2 || '%')
+         AND (t.status NOT IN ('done','cancelled') OR t.completed_at > now() - interval '14 days')
+       ORDER BY (t.status IN ('done','cancelled')), t.due_at NULLS LAST LIMIT 15`, [jid, phone.slice(-10)]);
+    out.push(cards.length ? 'BOARD CARDS (open first, then closed in the last 14 days):' : 'BOARD CARDS: none');
+    for (const c of cards) {
+      out.push(`  #${c.id} ${c.status}${c.priority ? ' PRIORITY' : ''} for ${c.assignee === 'ai' ? 'AI' : 'owner'} | ${trim(c.title, 90)}${c.due_at ? ` | due ${d(c.due_at)}` : ''} | card updated ${d(c.updated_at)}${c.last_note ? ` | latest note (${c.note_by === 'you' ? 'owner' : c.note_by}): "${trim(c.last_note, 200)}"` : ''}`);
+    }
+    // a message is NEW when at least one open card was last updated before it (that card may be out of date)
+    const openCards = cards.filter((c) => !['done', 'cancelled'].includes(c.status));
+    const oldest = openCards.length ? openCards.reduce((x, c) => (new Date(c.updated_at) < new Date(x.updated_at) ? c : x)) : null;
+    const cardTs = oldest ? new Date(oldest.updated_at).getTime() / 1000 : null;
+    const pending = await query(`SELECT id, account_id, status, scheduled_at, left(COALESCE(payload->>'text', payload->'waTemplate'->>'name', '[file]'), 120) AS text, error FROM outbox
+      WHERE to_jid = $1 AND (status IN ('draft','queued','sending') OR (status IN ('failed','rejected') AND created_at > now() - interval '14 days')) ORDER BY id DESC LIMIT 10`, [jid]);
+    if (pending.length) {
+      out.push('MESSAGES WAITING / RECENTLY NOT SENT:');
+      for (const o of pending) out.push(`  #${o.id} ${o.status} on ${o.account_id}${o.status === 'queued' && new Date(o.scheduled_at) > new Date() ? ` for ${d(o.scheduled_at)}` : ''}: "${trim(o.text, 110)}"${o.error ? ` — ${trim(o.error, 100)}` : ''}`);
+    }
+    const chats = await query(`SELECT account_id, max(ts) AS last FROM messages WHERE chat_jid = $1 GROUP BY account_id ORDER BY max(ts) DESC`, [jid]);
+    if (!chats.length) out.push('CHATS: no messages with this person on any number');
+    for (const ch of chats) {
+      const rows = await store.getMessages(ch.account_id, jid, { limit: a.messages || 12 });
+      out.push(`CHAT on ${ch.account_id} (latest ${rows.length}, oldest→newest${cardTs ? `; NEW = after card #${oldest.id} was last updated` : ''}):`);
+      for (const m of rows) out.push(`  ${cardTs && !m.from_me && Number(m.ts) > cardTs ? 'NEW ' : ''}${msgLine(m, 300)}`);
+    }
+    return out.join('\n');
+  });
+
   tool('find_person', 'Look up one person across ALL numbers (e.g. a guest who also messaged the hiring number): name, tags, status, notes and last contact per number.', {
     query: z.string().describe('Phone number or name'),
   }, async (a) => {
@@ -865,16 +946,18 @@ function buildServer(playbook = '') {
 
   tool('set_pipeline', 'Pipeline automation for a list: ask interested people for a date, remind people before their visit date, and add owner tasks. Texts may use {first_name}, {visit_date}.', {
     list: listArg, enabled: z.boolean().optional(), auto_send: z.boolean().optional().describe('Send these without approval'),
-    remind_hours_before: z.number().optional(), ask_date_after_hours: z.number().optional(),
+    evening_reminder_at: z.string().optional().describe('Interview reminder the evening before at HH:MM (default 18:00)'),
+    same_day_hours_before: z.number().optional().describe('Second reminder this many hours before, on the day (default 3)'),
+    remind_hours_before: z.number().optional().describe('Old single-reminder setting — not used any more'), ask_date_after_hours: z.number().optional(),
     reminder_text: z.string().optional(), ask_date_text: z.string().optional(),
     reminder_wa_template: waTemplateArg.describe('Meta numbers: template for the visit reminder when the person has not written in 24 h (may use {visit_date})'),
     ask_date_wa_template: waTemplateArg.describe('Meta numbers: template for asking a date when the 24 h window has closed'),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    const u = await lists.setPipeline(l.id, { enabled: a.enabled, autoSend: a.auto_send, remindHoursBefore: a.remind_hours_before, askDateAfterHours: a.ask_date_after_hours, reminderText: a.reminder_text, askDateText: a.ask_date_text, reminderWaTemplate: a.reminder_wa_template, askDateWaTemplate: a.ask_date_wa_template });
+    const u = await lists.setPipeline(l.id, { enabled: a.enabled, autoSend: a.auto_send, remindHoursBefore: a.remind_hours_before, eveningReminderAt: a.evening_reminder_at, sameDayHoursBefore: a.same_day_hours_before, askDateAfterHours: a.ask_date_after_hours, reminderText: a.reminder_text, askDateText: a.ask_date_text, reminderWaTemplate: a.reminder_wa_template, askDateWaTemplate: a.ask_date_wa_template });
     await ai(l.account_id, `Pipeline settings for "${l.name}" updated`, l.role);
     const p = u.pipeline;
-    return `Pipeline for "${l.name}": ${p.enabled ? 'on' : 'off'}, ${p.autoSend ? 'sends automatically' : 'drafts for approval'}, reminder ${p.remindHoursBefore}h before visits, ask for a date after ${p.askDateAfterHours}h.`;
+    return `Pipeline for "${l.name}": ${p.enabled ? 'on' : 'off'}, ${p.autoSend ? 'sends automatically' : 'drafts for approval'}, reminders the evening before at ${p.eveningReminderAt} and ${p.sameDayHoursBefore} h before each interview, ask for a date after ${p.askDateAfterHours}h.`;
   });
 
   tool('known_candidates', 'People already on any list for a job role (all earlier batches). Use it to de-duplicate a new WorkIndia batch BEFORE unlocking or messaging: pass names, phones or places in query (several, comma-separated) and get only the matches — import_list also skips known people by itself and says why. Without query: counts per list, plus everyone only if all=true (long).', {
@@ -899,6 +982,75 @@ function buildServer(playbook = '') {
   });
 
   tool('get_playbook', "The owner's standing rules (hiring policy, priorities, tone). Read before acting on candidates or guests.", {}, async () => (await getPlaybook()).text);
+
+  // Settings the AI may change (asked by the owner). Owner-only: approval mode, daily / new-number limits and the gap
+  // between messages (they protect the numbers from WhatsApp bans and keep AI messages behind approval), Meta prices.
+  const AI_SETTINGS = ['sendStart', 'sendEnd', 'sendDays', 'anytime', 'typing', 'followupStart', 'followupDailyMax', 'storeGroups',
+    'autosaveImages', 'autosaveDocuments', 'autosaveKnownOnly', 'autosaveMaxMb', 'optOutWords', 'webhookUrl'];
+  const OWNER_ONLY = { aiMode: 'approval mode', dailyCap: 'daily limit', newChatsPer24h: 'new-number limit', delayMinSec: 'gap between messages', delayMaxSec: 'gap between messages' };
+
+  tool('get_settings', 'Settings of one number (or the shared defaults for all numbers): sending hours/days, follow-up time and daily max, typing, auto-save, opt-out words, notify URL, approval mode and limits (read-only for the AI); plus the morning summary and alert phones. Which settings a number has changed itself is marked "own".', {
+    account: z.string().optional().describe('Number id; "all" = the shared defaults; omit = every number, short'),
+  }, async (a) => {
+    const defs = await import('./defaults.js');
+    const dflt = await defs.getDefaults();
+    const line = (s) => Object.entries(normalizeSettings(s)).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(',') : v}${OWNER_ONLY[k] ? ' (owner only)' : ''}`).join(' | ');
+    const out = [];
+    if (a.account === 'all') out.push(`ALL NUMBERS (defaults): ${line(dflt)}`);
+    else {
+      const accs = a.account ? [(await manager.resolve(a.account)).account] : manager.list();
+      for (const acc of accs) out.push(`${acc.id} (${acc.label}) purpose: ${acc.purpose || '-'}${acc.enabled === false ? ' PAUSED' : ''} | own: ${defs.ownKeys(acc.settings, dflt).join(',') || 'none'}\n  ${line(acc.settings)}`);
+    }
+    const dg = await import('./digest.js').then((m) => m.getDigest());
+    const { alertPhones } = await import('./notify.js');
+    out.push(`MORNING SUMMARY: ${dg.enabled ? `on at ${dg.time} from ${dg.account}` : 'off'} | ALERT PHONES: ${(await alertPhones()).map((p) => '+' + p).join(', ') || 'none'}`);
+    out.push(`You may change: ${AI_SETTINGS.join(', ')}, purpose, the morning summary and alert phones (update_settings). Owner only: ${[...new Set(Object.values(OWNER_ONLY))].join(', ')}, Meta prices.`);
+    return out.join('\n');
+  });
+
+  tool('update_settings', 'Change settings when the owner asks: sending hours and days (sendStart, sendEnd, sendDays 0=Sun…6, anytime), typing, follow-up time and daily max (followupStart, followupDailyMax), auto-save of media, opt-out words, notify URL (webhookUrl, integrations), storeGroups; a number\'s purpose; the morning summary (time, number, on/off) and alert phones. account="all" changes the shared defaults (numbers with their own value keep it). Approval mode, daily / new-number limits, message gaps and Meta prices are owner-only (dashboard).', {
+    account: z.string().optional().describe('Number id, or "all" for every number (defaults). Needed for settings/purpose'),
+    settings: z.record(z.string(), z.any()).optional().describe('e.g. {"sendStart":"09:00","sendEnd":"20:00","followupStart":"19:00","optOutWords":["stop","band karo"]}'),
+    purpose: z.string().optional(),
+    morning_summary: z.object({ enabled: z.boolean().optional(), time: z.string().optional(), account: z.string().optional() }).optional(),
+    alert_phones: z.array(z.string()).optional().describe('Replaces the list of phones that get alerts and the morning summary'),
+  }, async (a) => {
+    const done = [];
+    const s = a.settings || {};
+    const refused = Object.keys(s).filter((k) => OWNER_ONLY[k]);
+    if (refused.length) throw new Error(`${refused.map((k) => OWNER_ONLY[k]).join(', ')}: owner only — ask the owner to change it in the dashboard (Settings). Nothing was changed.`);
+    const unknown = Object.keys(s).filter((k) => !AI_SETTINGS.includes(k));
+    if (unknown.length) throw new Error(`Unknown setting(s): ${unknown.join(', ')}. Allowed: ${AI_SETTINGS.join(', ')}`);
+    if (Object.keys(s).length || a.purpose !== undefined) {
+      if (!a.account) throw new Error('Say which number (account), or "all"');
+      const { describeSettingsChange } = await import('./describe.js');
+      if (a.account === 'all') {
+        if (a.purpose !== undefined) throw new Error('purpose belongs to one number');
+        const defs = await import('./defaults.js');
+        const r = await defs.saveDefaults(s, manager);
+        done.push(`defaults for all numbers (applied to ${r.numbers.filter((n) => n.changed.length).map((n) => n.id).join(', ') || 'none'}; own values kept on ${r.numbers.filter((n) => n.own.length).map((n) => n.id).join(', ') || 'none'})`);
+        await ai(null, `Changed settings for all numbers: ${Object.keys(s).join(', ')} (owner asked)`);
+      } else {
+        const sess = await manager.resolve(a.account);
+        const before = normalizeSettings(sess.account.settings);
+        const acc = await manager.update(sess.id, { ...(Object.keys(s).length ? { settings: s } : {}), ...(a.purpose !== undefined ? { purpose: a.purpose } : {}) });
+        const what = [describeSettingsChange(before, normalizeSettings(acc.settings)), a.purpose !== undefined ? `Purpose: ${a.purpose}` : null].filter(Boolean).join('; ');
+        await ai(sess.id, `Changed settings — ${what || 'no change'} (owner asked)`);
+        done.push(`${sess.id}: ${what || 'no change'}`);
+      }
+    }
+    if (a.morning_summary) {
+      const dg = await (await import('./digest.js')).saveDigest({ ...a.morning_summary, ...(a.morning_summary.account ? { account: (await manager.resolve(a.morning_summary.account)).id } : {}) });
+      await ai(null, `Morning summary: ${dg.enabled ? `on at ${dg.time} from ${dg.account}` : 'off'} (owner asked)`);
+      done.push(`morning summary ${dg.enabled ? `on at ${dg.time} from ${dg.account}` : 'off'}`);
+    }
+    if (a.alert_phones) {
+      const phones = await (await import('./notify.js')).setAlertPhones(a.alert_phones);
+      await ai(null, `Alert phones set: ${phones.map((p) => '+' + p).join(', ') || 'none'} (owner asked)`);
+      done.push(`alert phones ${phones.map((p) => '+' + p).join(', ') || 'none'}`);
+    }
+    return done.length ? `Saved: ${done.join(' · ')}.` : 'Nothing to change — give settings, purpose, morning_summary or alert_phones.';
+  });
 
   tool('save_playbook', "Replace the owner's playbook text. Only when the owner asks to change their rules.", { text: z.string() }, async (a) => {
     await savePlaybook(a.text);
@@ -960,7 +1112,22 @@ function buildServer(playbook = '') {
       const [k, x, j] = String(t.ref || '').split(':');
       return ['reply', 'remind'].includes(k) ? ` | chat ${j} on ${x}` : ['followup', 'visit'].includes(k) ? ` | chat ${j} on ${t.account_id} | list #${x}` : '';
     };
-    if (rows.length) return rows.map((t) => `${taskLine(t)}${chatOf(t)}`).join('\n');
+    // the chat as it is NOW next to each person's card (the card may be older than their latest message)
+    const jidOf = (t) => String(t.ref || '').split(':')[2] || null;
+    const jids = [...new Set(rows.map(jidOf).filter((j) => j && j.includes('@')))];
+    const latest = new Map();
+    if (jids.length && !a.past) {
+      for (const r of await query(
+        `SELECT DISTINCT ON (chat_jid) chat_jid, from_me, ts, left(regexp_replace(coalesce(body, '[' || type || ']'), '\\s+', ' ', 'g'), 90) AS body
+         FROM messages WHERE chat_jid = ANY($1) ORDER BY chat_jid, ts DESC`, [jids])) latest.set(r.chat_jid, r);
+    }
+    const nowLine = (t) => {
+      const m = latest.get(jidOf(t));
+      if (!m) return '';
+      const newer = !m.from_me && Number(m.ts) > new Date(t.updated_at).getTime() / 1000;
+      return ` | chat now: ${m.from_me ? 'me' : 'them'} ${fmtTime(m.ts)} "${m.body}"${newer ? ' (NEWER than this card — read person_context)' : ''}`;
+    };
+    if (rows.length) return rows.map((t) => `${taskLine(t)}${chatOf(t)}${nowLine(t)}`).join('\n');
     if (a.past) return 'No finished tasks match.';
     const [p] = await query(`SELECT count(*)::int n FROM tasks WHERE status IN ('done','cancelled') AND completed_at > now() - interval '7 days'`);
     return `No open tasks match${a.account || a.for || a.kind || a.role ? ' these filters' : ''}. (${p.n} finished in the last 7 days — they are hidden; use past=true. A finished bulk send means everything went out.)`;

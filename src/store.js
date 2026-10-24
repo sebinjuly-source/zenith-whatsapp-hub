@@ -452,6 +452,57 @@ export async function searchMessages(accountId, text, { chatJid, fromMe, sinceTs
   );
 }
 
+/**
+ * People (one row per chat) whose messages — or whose name — mention any of the words. For campaigns and segments
+ * ("old guests who mentioned company / GST / travels"): message search lists messages newest first and stops after
+ * 100, so older people and people with many matching messages crowd out the rest. Words of 4+ letters also match
+ * inside longer words (travel → travels, Youngtravels); shorter ones ("HR") must be whole words.
+ * who: 'them' (they wrote it — what they want), 'me', or any. Returns { total, rows }.
+ */
+export async function searchPeople(accountId, text, { who, sinceTs, untilTs, peopleOnly = true, excludeCandidates = true, limit = 50, offset = 0 } = {}) {
+  const words = [...new Set(String(text || '').replace(/["()]/g, ' ').split(/[\s,]+/).filter((w) => w && !/^(or|and)$/i.test(w) && !w.startsWith('-')).map((w) => w.toLowerCase()))].slice(0, 20);
+  if (!words.length) throw new Error('Give the words to look for, e.g. "company GST travels agency booking"');
+  const p = [accountId];
+  const add = (v) => { p.push(v); return `$${p.length}`; };
+  const long = words.filter((w) => w.length >= 4);
+  const short = words.filter((w) => w.length < 4);
+  const bodyMatch = [
+    long.length ? `m.body ILIKE ANY(${add(long.map((w) => `%${w}%`))}::text[])` : null,
+    short.length ? `to_tsvector('simple', coalesce(m.body, '')) @@ to_tsquery('simple', ${add(short.map((w) => w.replace(/[^\p{L}\p{N}]/gu, '')).filter(Boolean).join(' | ') || 'zzzz')})` : null,
+  ].filter(Boolean).join(' OR ');
+  const where = ['m.account_id = $1', `(${bodyMatch})`];
+  if (who === 'them') where.push('NOT m.from_me');
+  if (who === 'me') where.push('m.from_me');
+  if (sinceTs) where.push(`m.ts >= ${add(sinceTs)}`);
+  if (untilTs) where.push(`m.ts < ${add(untilTs)}`);
+  const chatScope = [
+    peopleOnly ? `ch.jid NOT LIKE '%@g.us' AND ch.jid NOT LIKE '%broadcast%' AND ch.jid NOT LIKE '%@newsletter'` : 'TRUE',
+    excludeCandidates ? 'NOT EXISTS (SELECT 1 FROM list_members lm WHERE lm.jid = ch.jid)' : 'TRUE',
+  ].join(' AND ');
+  const namePattern = long.length ? add(long.map((w) => `%${w}%`)) : null;
+  const sql = `
+    WITH hits AS (
+      SELECT m.chat_jid, count(*)::int AS n, max(m.ts) AS last_hit,
+             (array_agg(left(regexp_replace(coalesce(m.body, ''), '\\s+', ' ', 'g'), 160) ORDER BY m.ts DESC))[1] AS sample,
+             bool_or(NOT m.from_me) AS they_wrote
+      FROM messages m WHERE ${where.join(' AND ')} GROUP BY m.chat_jid
+    ), named AS (
+      ${namePattern ? `SELECT ch.jid AS chat_jid FROM chats ch LEFT JOIN contacts ct ON ct.account_id = ch.account_id AND ct.jid = ch.jid
+         WHERE ch.account_id = $1 AND (ch.name ILIKE ANY(${namePattern}::text[]) OR ct.name ILIKE ANY(${namePattern}::text[]) OR ct.notify ILIKE ANY(${namePattern}::text[]) OR ct.verified_name ILIKE ANY(${namePattern}::text[]))` : 'SELECT NULL::text AS chat_jid WHERE FALSE'}
+    ), found AS (
+      SELECT COALESCE(h.chat_jid, n.chat_jid) AS chat_jid, COALESCE(h.n, 0) AS n, h.last_hit, h.sample, h.they_wrote, (n.chat_jid IS NOT NULL) AS name_hit
+      FROM hits h FULL JOIN named n ON n.chat_jid = h.chat_jid
+    )
+    SELECT f.*, ${DISPLAY} AS name, ch.last_ts, ch.last_from_me, ch.last_preview, ct.tags, ct.summary, ct.lead_status, count(*) OVER ()::int AS total
+    FROM found f JOIN chats ch ON ch.account_id = $1 AND ch.jid = f.chat_jid
+    LEFT JOIN contacts ct ON ct.account_id = ch.account_id AND ct.jid = ch.jid
+    WHERE ${chatScope}
+    ORDER BY COALESCE(f.last_hit, ch.last_ts) DESC NULLS LAST
+    LIMIT ${add(Math.min(limit, 200))} OFFSET ${add(offset)}`;
+  const rows = await query(sql, p);
+  return { total: rows[0]?.total || 0, rows, words };
+}
+
 export async function getContact(accountId, jid) {
   const rows = await query(
     `SELECT ct.*, ch.name AS chat_name, ch.last_ts, ch.last_from_me,

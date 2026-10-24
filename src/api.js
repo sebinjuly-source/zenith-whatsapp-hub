@@ -692,9 +692,20 @@ export function buildApp() {
     const row = rows[0];
     if (!row?.media) return res.status(404).json({ error: 'No media on this message' });
     const session = manager.get(id);
-    let ref = row.media_saved;
-    if (!ref && req.query.save === '1') ref = await session.saveMedia(jid, msgId);
-    const { buffer, mimetype } = ref ? await getMedia(ref) : { buffer: await session.downloadMedia(row), mimetype: row.media.mimetype };
+    let file;
+    try {
+      let ref = row.media_saved;
+      if (!ref && req.query.save === '1') ref = await session.saveMedia(jid, msgId);
+      file = ref ? await getMedia(ref) : { buffer: await session.downloadMedia(row), mimetype: row.media.mimetype };
+    } catch (err) {
+      // the dashboard opens this link in a tab: give a readable page there, JSON for scripts
+      if (req.accepts(['json', 'html']) === 'html') {
+        const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+        return res.status(404).type('html').send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>File not available</title><body style="font-family:system-ui;max-width:560px;margin:40px auto;padding:0 16px;line-height:1.5"><h2>File not available</h2><p>${esc(err.message)}</p><p><a href="javascript:history.back()">← Back</a></p></body>`);
+      }
+      throw err;
+    }
+    const { buffer, mimetype } = file;
     res.setHeader('Content-Type', mimetype || 'application/octet-stream');
     // ?download=1 saves the file on the device (phones ignore 'open in new tab' for many types)
     const ext = (mimetype || '').split('/')[1]?.split(';')[0]?.replace('jpeg', 'jpg').replace('quicktime', 'mov') || 'bin';

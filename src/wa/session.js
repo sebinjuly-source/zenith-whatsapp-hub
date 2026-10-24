@@ -792,10 +792,43 @@ export class Session extends EventEmitter {
     return ref;
   }
 
+  /**
+   * A file someone sent. WhatsApp's download link expires after a while; then the phone is asked to upload it
+   * again (Baileys' own re-upload check reads `error.status`, which its errors don't have, so it never fired).
+   * The fresh link is remembered and a copy kept, so the file never expires again. Clear errors when it can't.
+   */
   async downloadMedia(row) {
     const waMsg = mediaMessageFromRow(row);
-    const ctx = this.sock ? { logger: this.log, reuploadRequest: this.sock.updateMediaMessage } : undefined;
-    return downloadMediaMessage(waMsg, 'buffer', {}, ctx);
+    const download = this.downloadImpl || downloadMediaMessage; // swappable in tests (no calls to WhatsApp's servers)
+    try {
+      return await download(waMsg, 'buffer', {});
+    } catch (err) {
+      const status = err?.output?.statusCode ?? err?.status;
+      const expired = [403, 404, 410].includes(status) || /Failed to fetch stream/i.test(err?.message || '');
+      if (!expired) throw new Error(`Could not get this file from WhatsApp right now (${err.message}) — try again in a minute`);
+      const sent = new Date(Number(row.ts) * 1000).toLocaleDateString('en-IN', { timeZone: config.tz, day: 'numeric', month: 'short', year: 'numeric' });
+      if (!this.sock || this.status !== 'open') {
+        throw new Error(`WhatsApp's link to this file (sent ${sent}) has expired, and "${this.account.label}" is not connected right now to ask the phone for it again. Try again once it is connected.`);
+      }
+      let fresh;
+      try {
+        fresh = await withTimeout(this.sock.updateMediaMessage(waMsg), 45000, 'Asking the phone for the file');
+      } catch (e) {
+        throw new Error(`This file (sent ${sent}) is no longer on WhatsApp's servers and the phone could not send it again (${e.message}). Open the chat on the phone, or ask them to send it once more.`);
+      }
+      const buffer = await download(fresh, 'buffer', {});
+      const m = fresh.message?.[row.media.kind];
+      if (m?.directPath) {
+        await query(`UPDATE messages SET media = media || jsonb_build_object('directPath', $4::text, 'url', $5::text) WHERE account_id = $1 AND chat_jid = $2 AND id = $3`,
+          [this.id, row.chat_jid, row.id, m.directPath, m.url || null]).catch(() => {});
+      }
+      // keep a copy: this link will expire again
+      if (!row.media_saved) {
+        const ref = await putMedia(mediaPath(this.id, row.chat_jid, row.id, row.media.mimetype, row.media.fileName), buffer, row.media.mimetype).catch(() => null);
+        if (ref) await query('UPDATE messages SET media_saved = $4 WHERE account_id = $1 AND chat_jid = $2 AND id = $3', [this.id, row.chat_jid, row.id, ref]).catch(() => {});
+      }
+      return buffer;
+    }
   }
 
   /**

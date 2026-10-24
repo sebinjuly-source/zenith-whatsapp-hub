@@ -742,10 +742,11 @@ test('priorities: rejected people are never messaged; follow-ups wait for days w
   assert.equal(fu[0].priority, -1, 'follow-ups sit behind first messages in the queue');
 
   // a follow-up already queued is held back at send time if new outreach starts that day
-  await query(`UPDATE outbox SET status = 'queued' WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
+  // (new person first, then the follow-up: the sender polls every 10 s and must not see the follow-up alone)
+  const before = sent.length;
   await outboxMod.enqueue({ account: 'hire2', to: '9600000009', payload: { text: 'first message to a new person' }, source: 'campaign' });
   await query(`UPDATE outbox SET status = 'queued' WHERE account_id = 'hire2' AND to_jid = '919600000009@s.whatsapp.net'`); // approved
-  const before = sent.length;
+  await query(`UPDATE outbox SET status = 'queued' WHERE list_id = $1 AND note = 'follow-up'`, [l.id]);
   outboxMod.wakeAccount('hire2');
   await until(() => sent.slice(before).some((x) => x.jid === '919600000009@s.whatsapp.net'), 6000);
   await sleep(300);
@@ -765,15 +766,16 @@ test('pipeline: stages, visit dates, ask-for-date, visit reminder + owner tasks,
   // Ajay is interested (no date yet) — 5 hours ago
   await mcp('update_list_member', { list: 'Funnel', phone: '9500000001', stage: 'interested' });
   await query(`UPDATE list_members SET stage_at = now() - interval '5 hours', updated_at = now() - interval '5 hours' WHERE list_id = $1 AND phone = '919500000001'`, [l.id]);
-  // Bala gave a date 10 hours from now (date-only/IST parsing checked separately)
-  const soon = new Date(Date.now() + 10 * 3600 * 1000).toISOString();
+  // Bala's interview is in 2 hours (agreed earlier) → the same-day reminder (date-only/IST parsing checked separately)
+  const soon = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
   assert.match(await mcp('update_list_member', { list: 'Funnel', phone: '9500000002', visit_at: soon }), /stage date_given, visit/);
+  await query(`UPDATE list_members SET stage_at = now() - interval '5 hours' WHERE list_id = $1 AND phone = '919500000002'`, [l.id]);
   // Chetan's visit was yesterday and nobody updated the stage
   await mcp('update_list_member', { list: 'Funnel', phone: '9500000003', visit_at: new Date(Date.now() - 20 * 3600 * 1000).toISOString() });
   await query(`UPDATE list_members SET reminded_at = now() WHERE list_id = $1 AND phone = '919500000003'`, [l.id]);
   await listsMod.runPipeline();
   const rows = await query(`SELECT to_jid, note, priority, status, payload FROM outbox WHERE list_id = $1 ORDER BY to_jid`, [l.id]);
-  assert.deepEqual(rows.map((r) => [r.to_jid.slice(0, 12), r.note]), [['919500000001', 'ask-date'], ['919500000002', 'visit-reminder']]);
+  assert.deepEqual(rows.map((r) => [r.to_jid.slice(0, 12), r.note]), [['919500000001', 'ask-date'], ['919500000002', 'visit-reminder-today']]);
   // the owner's own wording is set at setup: check it is filled in for each person, not the exact words
   assert.match(rows[0].payload.text, /Ajay/);
   assert.match(rows[1].payload.text, /Bala/);
@@ -1612,6 +1614,10 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('list_chats', { account: 'mcpall', campaign: 'Chef' });
   await run('get_messages', { account: 'mcpall', chat: P });
   await run('search_messages', { query: 'interested', account: 'mcpall' });
+  await run('find_people', { account: 'mcpall', words: 'interested aana' });
+  await run('person_context', { person: P });
+  await run('get_settings', { account: 'mcpall' });
+  await run('update_settings', { account: 'mcpall', settings: { typing: false } });
   await run('list_shared_contacts', { account: 'mcpall' });
   await run('find_followups', { account: 'mcpall', inactive_days: 1 });
   await run('get_contact', { account: 'mcpall', chat: P });
@@ -1763,4 +1769,141 @@ test('MCP response budget: long answers are cut at a line and say what was left 
   assert.ok(out.length < 16400);
   assert.match(out, /more line\(s\) not shown/);
   assert.equal(budget('short'), 'short');
+});
+
+test('find_people: one line per person across all history, names count, candidates and groups skipped', async () => {
+  await manager.create({ id: 'leads1', label: 'Leads1' });
+  fake('leads1');
+  const old = Math.floor(Date.UTC(2025, 2, 1) / 1000);
+  const recent = Math.floor(Date.now() / 1000) - 3600;
+  const msg = (jid, id, ts, body, fromMe = false) => ({ id, fromMe, ts, chatJid: jid, type: 'text', body, forwarded: false });
+  const rows = [
+    msg('919733600001@s.whatsapp.net', 'L1', old, 'Need 3 rooms for our company team, GST invoice please'),
+    msg('919733600002@s.whatsapp.net', 'L2', old + 10, 'Hello'), // matched by name only (Young Travels)
+    msg('919733600003@s.whatsapp.net', 'L3', recent, 'Rate for weekly stay?'),
+    msg('919733600004@s.whatsapp.net', 'L4', recent, 'Interested in chef job, rooms near?'), // candidate: skipped
+    msg('120363000000000001@g.us', 'L5', recent, 'corporate booking anyone?'), // group: skipped
+    msg('919733600006@s.whatsapp.net', 'L6', recent, 'We are a corporate hotel', true), // only we said it
+  ];
+  // 120 noise messages that also match, newer than the old lead — a newest-100 message search would hide L1
+  for (let i = 0; i < 120; i++) rows.push(msg('919733600009@s.whatsapp.net', `N${i}`, recent - i, `rooms available today ${i}`));
+  const store = await import('../src/store.js');
+  await store.insertMessages('leads1', rows);
+  await store.upsertChats('leads1', [{ jid: '919733600002@s.whatsapp.net', name: 'Bala Young Travels' }]);
+  await mcp('import_list', { account: 'leads1', name: 'Chef – Leads test', members: [{ phone: '9733600004', name: 'Cook' }] });
+  const out = await mcp('find_people', { account: 'leads1', words: 'company GST travels rooms rate corporate' });
+  assert.match(out, /^4 people on leads1 match/);
+  assert.match(out, /919733600001 .*1 match/);
+  assert.match(out, /919733600002 \| Bala Young Travels \| name matches/);
+  assert.match(out, /919733600009 .*120 matches/, 'many matching messages are one line');
+  assert.doesNotMatch(out, /919733600004|120363000000000001|919733600006/);
+  // old leads only, and what we said ourselves when asked
+  assert.match(await mcp('find_people', { account: 'leads1', words: 'company', until: '2025-12-31' }), /^1 people/);
+  assert.match(await mcp('find_people', { account: 'leads1', words: 'corporate', who: 'me' }), /919733600006/);
+  // paging
+  const p1 = await mcp('find_people', { account: 'leads1', words: 'company GST travels rooms rate', limit: 2 });
+  assert.match(p1, /More: offset=2 \(2 left\)/);
+});
+
+test('media: an expired WhatsApp link asks the phone again, keeps a copy; a gone file gets a clear message', async () => {
+  const s = manager.get('leads1');
+  const now = Math.floor(Date.now() / 1000);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body, media) VALUES
+    ('leads1','919733600001@s.whatsapp.net','DOC1',false,$1,'document','cv.pdf','{"kind":"documentMessage","mimetype":"application/pdf","fileName":"cv.pdf","url":"https://x/expired","directPath":"/old","mediaKey":"AAAA"}')`, [now - 86400 * 70]);
+  // the real downloadMedia, with a fake socket that "re-uploads"
+  const { Session } = await import('../src/wa/session.js');
+  const real = Session.prototype.downloadMedia;
+  const fakeSock = { updateMediaMessage: async (m) => { s.reuploadAsked = (s.reuploadAsked || 0) + 1; throw new Error('media not found on the phone'); } };
+  const savedSock = s.sock;
+  s.sock = fakeSock;
+  delete s.downloadMedia; // use the class method, not a test stub
+  // WhatsApp's server answers 410 Gone for the old link (as Baileys reports it: Boom with output.statusCode)
+  s.downloadImpl = async () => { const e = new Error('Failed to fetch stream from https://mmg.whatsapp.net/x'); e.output = { statusCode: 410 }; throw e; };
+  try {
+    const res = await fetch(`${base}/api/media/leads1/919733600001@s.whatsapp.net/DOC1?download=1`, { headers: { 'x-api-key': 'k', accept: 'text/html' } });
+    const html = await res.text();
+    assert.equal(res.status, 404);
+    assert.match(html, /File not available/);
+    assert.match(html, /no longer on WhatsApp's servers and the phone could not send it again/);
+    assert.equal(s.reuploadAsked, 1, 'the phone was asked for the file');
+    // scripts get JSON
+    const j = await fetch(`${base}/api/media/leads1/919733600001@s.whatsapp.net/DOC1`, { headers: { 'x-api-key': 'k', accept: 'application/json' } });
+    assert.match((await j.json()).error, /no longer on WhatsApp/);
+  } finally {
+    s.sock = savedSock;
+    delete s.downloadImpl;
+    assert.ok(real);
+  }
+});
+
+test('interview reminders: the evening before and 3 h before on the day; none right after the date was agreed', async () => {
+  const listsMod = await import('../src/lists.js');
+  await manager.create({ id: 'rem1', label: 'Rem1' });
+  fake('rem1');
+  await manager.update('rem1', { settings: { aiMode: 'auto' } });
+  await mcp('import_list', { account: 'rem1', name: 'Chef – Reminders', members: [1, 2, 3, 4].map((i) => ({ phone: `973370000${i}`, name: `Rem${i}` })) });
+  const l = await listsMod.getList('Chef – Reminders');
+  // evening reminder "at 00:00" so the evening before has always begun when the interview is ~24 h away
+  await listsMod.setPipeline(l.id, { autoSend: true, eveningReminderAt: '00:00', sameDayHoursBefore: 3 });
+  const J = (i) => `91973370000${i}@s.whatsapp.net`;
+  const at = (ms) => new Date(Date.now() + ms).toISOString();
+  await listsMod.updateMember(l.id, J(1), { visitAt: at(2 * 3600e3) }); // today, in 2 h → same-day reminder
+  await listsMod.updateMember(l.id, J(2), { visitAt: at(24 * 3600e3 + 60e3) }); // tomorrow → evening-before reminder
+  await listsMod.updateMember(l.id, J(3), { visitAt: at(2 * 3600e3) }); // agreed just now → no reminder
+  await listsMod.updateMember(l.id, J(4), { visitAt: at(30 * 86400e3) }); // far away → nothing yet
+  await query(`UPDATE list_members SET stage_at = now() - interval '5 hours' WHERE list_id = $1 AND jid <> $2`, [l.id, J(3)]);
+  await listsMod.runPipeline();
+  const sentRows = await query(`SELECT to_jid, note FROM outbox WHERE list_id = $1 AND note LIKE 'visit-reminder%' ORDER BY to_jid`, [l.id]);
+  assert.deepEqual(sentRows.map((r) => [r.to_jid, r.note]), [[J(1), 'visit-reminder-today'], [J(2), 'visit-reminder']]);
+  const m = Object.fromEntries((await query(`SELECT jid, reminded_at, reminded2_at FROM list_members WHERE list_id = $1`, [l.id])).map((r) => [r.jid, r]));
+  assert.ok(m[J(3)].reminded2_at && !(await query(`SELECT 1 FROM outbox WHERE to_jid = $1`, [J(3)])).length, 'agreed a moment ago: marked, nothing sent');
+  assert.ok(!m[J(4)].reminded_at && !m[J(4)].reminded2_at);
+  // running again sends nothing new; a new date resets both reminders
+  await listsMod.runPipeline();
+  assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE list_id = $1 AND note LIKE 'visit-reminder%'`, [l.id]))[0].n, 2);
+  await listsMod.updateMember(l.id, J(2), { visitAt: at(3 * 86400e3) });
+  const [r2] = await query(`SELECT reminded_at, reminded2_at FROM list_members WHERE list_id = $1 AND jid = $2`, [l.id, J(2)]);
+  assert.ok(!r2.reminded_at && !r2.reminded2_at);
+  // the interview card says both reminders, and logs the one sent
+  const [card] = await query(`SELECT id, details FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled')`, [`visit:${l.id}:${J(1)}`]);
+  assert.ok((await (await import('../src/tasks.js')).taskLog(card.id)).some((x) => /Reminder \(3 h before\) sent/.test(x.text)));
+});
+
+test('person_context and cards show the chat as it is now; settings: allowed ones change, owner-only ones are refused', async () => {
+  await manager.create({ id: 'ctx1', label: 'Ctx1' });
+  fake('ctx1');
+  const store = await import('../src/store.js');
+  const J = '919733800001@s.whatsapp.net';
+  const t0 = Math.floor(Date.now() / 1000) - 7200;
+  await store.insertMessages('ctx1', [{ id: 'C1', fromMe: false, ts: t0, chatJid: J, type: 'text', body: 'Haan interested', forwarded: false }]);
+  await mcp('import_list', { account: 'ctx1', name: 'Front office – Ctx', role: 'Front office', members: [{ phone: '9733800001', name: 'Priya Ctx' }] });
+  await mcp('update_list_member', { list: 'Front office – Ctx', phone: '9733800001', stage: 'interested', follow_up_at: '2026-12-01 10:00', follow_up_note: 'free in December' });
+  const card = (await call('POST', '/api/tasks', { account: 'ctx1', title: 'Call Priya Ctx 9733800001' })).data;
+  await call('POST', `/api/tasks/${card.id}/notes`, { text: 'Spoke on phone: wants night shift only' });
+  await query(`UPDATE tasks SET updated_at = now() - interval '1 hour' WHERE id = $1`, [card.id]);
+  // she wrote again AFTER the card was last updated
+  await store.insertMessages('ctx1', [{ id: 'C2', fromMe: false, ts: Math.floor(Date.now() / 1000) - 60, chatJid: J, type: 'text', body: 'Sorry, I got another job', forwarded: false }]);
+  const ctx = await mcp('person_context', { person: '97338 00001' });
+  assert.match(ctx, /PERSON \+919733800001 — Priya Ctx/);
+  assert.match(ctx, /Front office – Ctx \(Front office, number ctx1\): \w+, stage interested, follow up .* free in December/);
+  assert.match(ctx, /#\d+ upcoming for owner \| Call Priya Ctx .*latest note \(owner\): "Spoke on phone: wants night shift only"/);
+  assert.match(ctx, /CHAT on ctx1/);
+  assert.match(ctx, /NEW \[.*\] .*Sorry, I got another job/, 'the newer reply is marked');
+  assert.doesNotMatch(ctx, /NEW \[.*Haan interested/);
+  assert.match(await mcp('person_context', { person: 'Priya Ctx' }), /PERSON \+919733800001/);
+  // the Board line for a hub card shows the chat now and says it is newer than the card
+  await query(`INSERT INTO tasks (account_id, title, kind, status, ref, assignee, updated_at) VALUES ('ctx1','Reply to Priya Ctx: "Haan interested"','reply','upcoming',$1,'ai', now() - interval '1 hour')`, [`reply:ctx1:${J}`]);
+  assert.match(await mcp('list_tasks', { kind: 'reply', account: 'ctx1' }), /chat now: them .* "Sorry, I got another job" \(NEWER than this card/);
+  // settings
+  assert.match(await mcp('get_settings', { account: 'ctx1' }), /ctx1 \(Ctx1\)[\s\S]*aiMode=approve \(owner only\)[\s\S]*You may change/);
+  assert.match(await mcp('update_settings', { account: 'ctx1', settings: { sendStart: '09:00', optOutWords: ['stop', 'band karo'] }, purpose: 'Reception hiring' }), /Saved: ctx1: .*Send from: .*09:00/);
+  const acc = manager.get('ctx1').account;
+  assert.equal(acc.settings.sendStart, '09:00');
+  assert.equal(acc.purpose, 'Reception hiring');
+  const refused = await mcp('update_settings', { account: 'ctx1', settings: { aiMode: 'auto', sendEnd: '22:00' } });
+  assert.match(refused, /^Error: approval mode: owner only/);
+  assert.notEqual(manager.get('ctx1').account.settings.sendEnd, '22:00', 'nothing changed when one key is refused');
+  assert.match(await mcp('update_settings', { settings: { dailyCap: 500 }, account: 'ctx1' }), /daily limit: owner only/);
+  assert.match(await mcp('update_settings', { morning_summary: { time: '06:30' } }), /morning summary on at 06:30/);
+  await mcp('update_settings', { morning_summary: { time: '06:00' } });
 });

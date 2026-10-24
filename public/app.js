@@ -1392,13 +1392,13 @@
         m.followup_at ? h('div', { class: 'muted', style: 'font-size:12px' }, '🔁 Follow up ', fmtD(m.followup_at), m.followup_note ? ` — ${m.followup_note}` : '') : null,
         m.notes ? h('div', { class: 'muted', style: 'font-size:12px' }, m.notes) : null);
     }) : h('p', { class: 'muted' }, 'Nobody here.'));
-    const p = { remindHoursBefore: 18, askDateAfterHours: 4, enabled: true, ...(sel.pipeline || {}) };
+    const p = { eveningReminderAt: '18:00', sameDayHoursBefore: 3, askDateAfterHours: 4, enabled: true, ...(sel.pipeline || {}) };
     const askWa = cloudList ? waTemplateField(sel.account_id, p.askDateWaTemplate, { label: 'Meta template: ask for a date' }) : null;
     const remWa = cloudList ? waTemplateField(sel.account_id, p.reminderWaTemplate, { label: 'Meta template: visit reminder', hint: '{visit_date} fills in their date.' }) : null;
     const pipeForm = h('form', { class: 'card', onsubmit: guard(async (e) => {
       e.preventDefault();
       const x = e.target;
-      await api(`/api/lists/${sel.id}/pipeline`, { method: 'PATCH', body: { enabled: x.enabled.checked, autoSend: x.autoSend.checked, remindHoursBefore: Number(x.hours.value), askDateAfterHours: Number(x.askAfter.value), askDateText: x.askText.value || undefined, reminderText: x.remText.value || undefined,
+      await api(`/api/lists/${sel.id}/pipeline`, { method: 'PATCH', body: { enabled: x.enabled.checked, autoSend: x.autoSend.checked, eveningReminderAt: x.eve.value, sameDayHoursBefore: Number(x.hours.value), askDateAfterHours: Number(x.askAfter.value), askDateText: x.askText.value || undefined, reminderText: x.remText.value || undefined,
         ...(askWa ? { askDateWaTemplate: askWa.value(), reminderWaTemplate: remWa.value() } : {}) } });
       toast('Pipeline settings saved');
       viewLists();
@@ -1407,7 +1407,8 @@
       h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: p.enabled !== false }), h('span', {}, 'On', h('em', {}, 'Interested without a date → ask for one. Date given → reminder before the visit + a Board task for you. Date passed → "Did they come?" task.'))),
       h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'autoSend', checked: !!p.autoSend }), h('span', {}, 'Send these without approval')),
       h('div', { class: 'row' },
-        h('label', { class: 'field grow' }, h('span', {}, 'Remind (hours before visit)'), h('input', { type: 'number', name: 'hours', min: 1, value: p.remindHoursBefore })),
+        h('label', { class: 'field grow' }, h('span', {}, 'Reminder the evening before at'), h('input', { type: 'time', name: 'eve', value: p.eveningReminderAt || '18:00' })),
+        h('label', { class: 'field grow' }, h('span', {}, 'and on the day, hours before'), h('input', { type: 'number', name: 'hours', min: 1, max: 12, value: p.sameDayHoursBefore || 3 })),
         h('label', { class: 'field grow' }, h('span', {}, 'Ask for a date after (hours)'), h('input', { type: 'number', name: 'askAfter', min: 1, value: p.askDateAfterHours }))),
       h('label', { class: 'field' }, h('span', {}, 'Ask-for-date message'), h('textarea', { name: 'askText', rows: 2, value: p.askDateText || '', placeholder: 'Default: Namaste {first_name} ji, aap kis din aa sakte hain? …' })),
       h('label', { class: 'field' }, h('span', {}, 'Visit reminder ({visit_date} = their date)'), h('textarea', { name: 'remText', rows: 2, value: p.reminderText || '', placeholder: 'Default: Namaste {first_name} ji, yaad dila rahe hain: aap {visit_date} ko …' })),

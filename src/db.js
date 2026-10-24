@@ -236,6 +236,8 @@ ALTER TABLE list_members ADD COLUMN IF NOT EXISTS stage TEXT;
 ALTER TABLE list_members ADD COLUMN IF NOT EXISTS visit_at TIMESTAMPTZ;
 ALTER TABLE list_members ADD COLUMN IF NOT EXISTS stage_at TIMESTAMPTZ;
 ALTER TABLE list_members ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMPTZ;
+-- second interview reminder (same day, N hours before); reminded_at = the evening-before one
+ALTER TABLE list_members ADD COLUMN IF NOT EXISTS reminded2_at TIMESTAMPTZ;
 ALTER TABLE list_members ADD COLUMN IF NOT EXISTS checked_at TIMESTAMPTZ;
 ALTER TABLE list_members ADD COLUMN IF NOT EXISTS asked_date_at TIMESTAMPTZ;
 ALTER TABLE lists ADD COLUMN IF NOT EXISTS pipeline JSONB NOT NULL DEFAULT '{}';
