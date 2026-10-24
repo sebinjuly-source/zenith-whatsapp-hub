@@ -1645,6 +1645,9 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('hub_overview', {});
   await run('list_accounts', {});
   await run('get_playbook', {});
+  await run('list_campaigns', {});
+  await run('create_campaign', { name: 'Toolbox campaign' });
+  await run('switch_campaign', { campaign: 'all' });
   await run('import_list', { account: 'mcpall', name: 'Chef – Toolbox', members: [{ phone: P, name: 'Toolbox Ravi' }, { phone: '9733300002', name: 'Second' }] });
   await run('list_lists', { account: 'mcpall' });
   await run('list_members', { list: 'Chef – Toolbox' });
@@ -2078,18 +2081,38 @@ test('campaign scope: a campaign is like a separate user — the dashboard and t
     const ob = await mcp('list_outbox', { status: 'draft,queued,sent' });
     assert.match(ob, /919744000001/);
     assert.ok(!/919744000002/.test(ob), 'the AI does not see the other campaign');
+    // by accident (no campaign given) nothing of another campaign is touched — and the error says how to do it on purpose
     for (const [tool, args] of [['reject_draft', { id: dB }], ['edit_draft', { id: dB, text: 'x' }], ['send_message', { account: 'scopeacc', to: '919744000002', text: 'hi' }],
-      ['get_messages', { account: 'scopeacc', chat: '919744000002' }], ['list_members', { list: 'Beta people' }], ['list_outbox', { campaign: 'Scope Beta' }],
-      ['save_playbook', { text: 'new main rules' }], ['person_context', { person: '919744000002' }]]) {
-      assert.match(await mcp(tool, args), /^Error: .*(out of scope|only its own playbook)/, `${tool} on another campaign is refused`);
+      ['get_messages', { account: 'scopeacc', chat: '919744000002' }], ['list_members', { list: 'Beta people' }], ['person_context', { person: '919744000002' }]]) {
+      assert.match(await mcp(tool, args), /^Error: .*out of scope here\. To work on it on purpose: AI → pass campaign="Scope Beta"/, `${tool} on another campaign is refused by default`);
     }
-    assert.match(await mcp('get_playbook'), /Alpha rules: be brief/, 'the campaign playbook is the one the AI reads');
+    // …but the campaign is a filter, not a wall: the AI can look at or work on another campaign by naming it, or "all"
+    assert.match(await mcp('list_outbox', { status: 'draft', campaign: 'Scope Beta' }), /919744000002/);
+    assert.ok(!/919744000001/.test(await mcp('list_outbox', { status: 'draft,queued,sent', campaign: 'Scope Beta' })), 'and then sees only that one');
+    assert.match(await mcp('list_outbox', { status: 'draft,queued,sent', campaign: 'all' }), /919744000002[\s\S]*|919744000001/);
+    assert.match(await mcp('get_messages', { account: 'scopeacc', chat: '919744000002', campaign: 'Scope Beta' }), /919744000002/);
+    assert.match(await mcp('edit_draft', { id: dB, text: 'Hi beta, edited', campaign: 'Scope Beta' }), /updated/);
+    assert.match(await mcp('list_tasks', { campaign: 'all' }), /./);
+    // playbooks: the campaign's own, plus the main rules for every campaign
+    const pb = await mcp('get_playbook');
+    assert.match(pb, /MAIN PLAYBOOK/);
+    assert.match(pb, /Alpha rules: be brief/, 'the campaign playbook is the one the AI reads');
+    // campaigns: the AI lists, creates and (when asked) switches them
+    assert.match(await mcp('list_campaigns'), /Scope Alpha \(open\)/);
+    assert.match(await mcp('create_campaign', { name: 'Scope Gamma', playbook: 'INCLUDE: Hiring – all roles\nGamma rules' }), /created, playbook saved/);
+    assert.match(await mcp('get_playbook', { campaign: 'Scope Gamma' }), /Gamma rules/);
+    assert.match(await mcp('switch_campaign', { campaign: 'Scope Gamma' }), /Now open: campaign "Scope Gamma"/);
+    assert.equal((await call('GET', '/api/focus')).data.campaign, 'Scope Gamma', 'the dashboard follows');
+    assert.match(await mcp('switch_campaign', { campaign: 'all' }), /Now open: all campaigns/);
+    await asOwner('PUT', '/api/focus', { campaign: 'Scope Alpha' });
+    // save_playbook never writes into the open campaign by default
+    assert.match(await mcp('save_playbook', { text: (await call('GET', '/api/playbook')).data.text || 'main' }), /Main playbook saved/);
     // a person on no list of the campaign must be added to one of its lists first
     assert.match(await mcp('send_message', { account: 'scopeacc', to: '919744000099', text: 'hi' }), /on no list of campaign "Scope Alpha"/);
     // a pinned URL (e.g. a background routine) keeps its own campaign
     assert.match(await mcpAt('/mcp/k/all', 'list_outbox', { status: 'draft' }), /919744000002/);
     assert.match(await mcpAt(`/mcp/k/${encodeURIComponent('Scope Beta')}`, 'list_outbox', { status: 'draft' }), /919744000002/);
-    assert.match(await mcpAt(`/mcp/k/${encodeURIComponent('Scope Beta')}`, 'reject_draft', { id: dA }), /^Error: .*belongs to campaign "Scope Alpha"/);
+    assert.match(await mcpAt(`/mcp/k/${encodeURIComponent("Scope Beta")}`, "reject_draft", { id: dA }), /^Error: .*belongs to campaign "Scope Alpha"/);
   } finally {
     await asOwner('PUT', '/api/focus', { campaign: '' });
   }

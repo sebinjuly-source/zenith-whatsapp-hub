@@ -163,23 +163,25 @@ const msgLine = (m, maxLen) => {
  * campaign filters are filled in, and anything that belongs to another campaign is refused.
  */
 const CAMPAIGN_ARG = { hub_overview: 'campaign', list_chats: 'campaign', list_outbox: 'campaign', recent_activity: 'role', list_lists: 'role',
-  pipeline: 'role', known_candidates: 'role', import_list: 'role', list_tasks: 'role', create_task: 'campaign', get_playbook: 'campaign', save_playbook: 'campaign' };
+  pipeline: 'role', known_candidates: 'role', import_list: 'role', list_tasks: 'role', create_task: 'campaign', get_playbook: 'campaign' };
 const LIST_TOOLS = ['archive_list', 'remove_list_member', 'list_members', 'send_to_list', 'set_followup', 'update_list_member', 'set_pipeline'];
 const TASK_TOOLS = ['update_task', 'add_task_note', 'log_call_result', 'task_history', 'approve_task'];
 const DRAFT_TOOLS = ['approve_draft', 'reject_draft', 'edit_draft'];
 const CHAT_TOOLS = { get_messages: 'chat', get_contact: 'chat', update_contact: 'chat', set_chat_state: 'chat', fetch_older_messages: 'chat', save_media: 'chat', send_message: 'to', search_messages: 'chat', list_shared_contacts: 'chat' };
 const isPhone = (q) => /^[+\d\s()-]{8,}$/.test(q) || q.includes('@');
+/** The campaign a call works in: its own campaign argument ("all" = every campaign), else the hub's current one. */
+function callCampaign(name, a, focus) {
+  const explicit = name === 'update_task' ? a.in_campaign : a.campaign ?? (CAMPAIGN_ARG[name] === 'role' ? a.role : undefined);
+  if (explicit !== undefined && String(explicit).trim() !== '') return /^all$/i.test(String(explicit).trim()) ? '' : String(explicit).trim();
+  return focus;
+}
 export async function enforceScope(focus, name, a) {
-  if (!focus) return;
   const arg = CAMPAIGN_ARG[name];
-  if (arg) {
-    if (name === 'save_playbook' && !a.campaign) throw new Error(`You are working in ${scope.label(focus)}: only its own playbook can be changed here (campaign="${focus}"). The main playbook is changed with all campaigns selected.`);
-    if (a[arg] && !scope.same(a[arg], focus)) scope.assertSame(focus, a[arg], name === 'save_playbook' ? 'That playbook' : `Campaign "${a[arg]}"`);
-    a[arg] = focus;
-  }
+  // the tool's own campaign / role filter is the call's campaign ('' = all campaigns)
+  if (arg) a[arg] = focus || undefined;
+  if (!focus) return;
   if (LIST_TOOLS.includes(name)) await scope.assertList(focus, a.list);
   if (TASK_TOOLS.includes(name)) await scope.assertTask(focus, a.id);
-  if (name === 'update_task' && a.campaign !== undefined && !scope.same(a.campaign || 'none', focus)) scope.assertSame(focus, a.campaign || 'none', 'Moving the card to that campaign');
   if (DRAFT_TOOLS.includes(name)) await scope.assertDrafts(focus, [a.id]);
   if (name === 'move_messages') await scope.assertDrafts(focus, a.ids);
   const chatKey = CHAT_TOOLS[name];
@@ -203,7 +205,6 @@ export async function enforceScope(focus, name, a) {
     for (const r of a.recipients || []) await scope.assertPerson(focus, acc, store.toJid(r.to), 'Recipient');
   }
   if (name === 'save_rule') {
-    if (a.role && !scope.same(a.role, focus)) scope.assertSame(focus, a.role, 'That rule');
     a.role = focus;
     if (a.id) {
       const [r] = await query('SELECT conditions FROM rules WHERE id = $1', [a.id]);
@@ -221,16 +222,23 @@ export async function enforceScope(focus, name, a) {
 }
 
 function buildServer(playbook = '', focus = '') {
-  // a send made inside a campaign belongs to it ("none" = no campaign)
-  const scopeRole = focus && !scope.same(focus, 'none') ? focus : null;
+
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `${focus ? `CAMPAIGN SCOPE: you are working in ${scope.label(focus)} — like a separate user. You see only its chats, drafts, Board cards, lists, contacts, templates and rules; anything belonging to another campaign is hidden and every action on it is refused. Numbers are shared. To work on another campaign the owner switches it in the dashboard.\n\n` : ''}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
-  const tool = (name, description, inputSchema, fn) => server.registerTool(name, { description, inputSchema }, safe(async (a = {}) => {
-    await enforceScope(focus, name, a);
-    return fn(a);
-  }, name === 'get_playbook' ? Infinity : RESPONSE_BUDGET)); // the owner's rules are never cut
+  const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter for this call: a campaign name, "none" (hotel / no campaign) or "all". Default: ${focus ? `"${focus}" (the campaign the owner has open)` : 'all campaigns'}.`);
+  const tool = (name, description, inputSchema, fn) => {
+    const shape = { ...inputSchema };
+    if (name === 'update_task') shape.in_campaign = CAMPAIGN_FILTER;
+    else if (!shape.campaign) shape.campaign = CAMPAIGN_FILTER;
+    server.registerTool(name, { description, inputSchema: shape }, safe(async (a = {}) => {
+      const c = callCampaign(name, a, focus);
+      await enforceScope(c, name, a);
+      a._c = c; // handlers filter by it
+      return fn(a);
+    }, name === 'get_playbook' ? Infinity : RESPONSE_BUDGET)); // the owner's rules are never cut
+  };
 
   tool('list_accounts', 'List the WhatsApp numbers in the hub: id, purpose, phone, connection status, AI mode (approve/auto), and how much history is stored. Start here.', {}, async () => {
     const lines = [];
@@ -267,7 +275,7 @@ function buildServer(playbook = '', focus = '') {
       out.push(cp ? `CAMPAIGN PLAYBOOK — ${cp.campaign} (follow it together with the main playbook):\n${cp.text}\n---` : `(No campaign playbook for "${a.campaign}" — follow the main playbook.)`);
     }
     const campaigns = await query(`SELECT DISTINCT role FROM lists WHERE role IS NOT NULL AND archived IS NULL ORDER BY role`);
-    if (!a.campaign && !focus && campaigns.length > 1) out.push(`Campaigns running: ${campaigns.map((c) => c.role).join(', ')} — pass campaign=<role> to focus on one.`);
+    if (!a.campaign && campaigns.length > 1) out.push(`Campaigns running: ${campaigns.map((c) => c.role).join(', ')} — pass campaign=<role> to focus on one.`);
     const dueNow = open.filter((t) => !t.due_at || new Date(t.due_at) <= new Date(now.getTime() + 3600e3));
     const later = open.filter((t) => t.due_at && new Date(t.due_at) > new Date(now.getTime() + 3600e3));
     const byKind = (rows, k) => rows.filter((t) => t.kind === k).length;
@@ -364,7 +372,7 @@ function buildServer(playbook = '', focus = '') {
       const accountId = a.account ? (await manager.resolve(a.account)).id : null;
       const chatJid = a.chat && accountId ? await resolveChat(accountId, a.chat) : a.chat;
       const rows = await store.searchMessages(accountId, a.query, {
-        chatJid, fromMe: a.from_me, sinceTs: toTs(a.since), untilTs: toTs(a.until), type: a.type, limit: a.limit || 20, campaign: focus || undefined,
+        chatJid, fromMe: a.from_me, sinceTs: toTs(a.since), untilTs: toTs(a.until), type: a.type, limit: a.limit || 20, campaign: a._c || undefined,
       });
       return rows.length
         ? rows.map((m) => `${m.account_id} | ${m.chat_jid} | ${trim(m.chat_name, 30)} | ${msgLine(m, 200)}`).join('\n')
@@ -382,7 +390,7 @@ function buildServer(playbook = '', focus = '') {
   }, async (a) => {
     const s = await manager.resolve(a.account);
     const r = await store.searchPeople(s.id, a.words, { who: a.who || 'them', sinceTs: toTs(a.since), untilTs: toTs(a.until),
-      peopleOnly: !a.include_groups, excludeCandidates: !a.include_candidates && (!focus || scope.same(focus, 'none')), campaign: focus || undefined, excludePhones: await (await import('./notify.js')).alertPhones(), limit: Math.min(a.limit || 50, 60), offset: a.offset || 0 });
+      peopleOnly: !a.include_groups, excludeCandidates: !a.include_candidates && (!a._c || scope.same(a._c, 'none')), campaign: a._c || undefined, excludePhones: await (await import('./notify.js')).alertPhones(), limit: Math.min(a.limit || 50, 60), offset: a.offset || 0 });
     if (!r.total) return `Nobody on ${s.id} matches ${r.words.join(', ')}${a.who === 'me' ? '' : ' (in their own messages — try who="any")'}.`;
     const from = (a.offset || 0) + 1;
     const lines = r.rows.map((x) => [x.chat_jid.split('@')[0], trim(x.name, 34), x.n ? `${x.n}× last ${fmtTime(x.last_hit).slice(0, 10)}: "${trim(x.sample, 80)}"` : 'name matches',
@@ -400,8 +408,8 @@ function buildServer(playbook = '', focus = '') {
       const chatJid = a.chat ? await resolveChat(s.id, a.chat) : null;
       const p = [s.id];
       let where = "m.account_id = $1 AND m.type = 'contact'";
-      if (focus) {
-        p.push(focus);
+      if (a._c) {
+        p.push(a._c);
         where += ` AND ${scope.personInSql('m.chat_jid', p.length)}`;
       }
       if (chatJid) {
@@ -465,8 +473,8 @@ function buildServer(playbook = '', focus = '') {
         where.push(`$${p.length} = ANY(ct.tags)`);
       }
       if (a.skip_reviewed !== false) where.push('ct.reviewed_at IS NULL');
-      if (focus) {
-        p.push(focus);
+      if (a._c) {
+        p.push(a._c);
         where.push(scope.personInSql('ch.jid', p.length));
       }
       where.push("NOT ('opted-out' = ANY(COALESCE(ct.tags, '{}')))");
@@ -563,7 +571,7 @@ function buildServer(playbook = '', focus = '') {
       }
       if (a.wa_template) {
         const vars = await import('./templates.js').then((t) => t.contactFields(s.id, jid));
-        const row = await outbox.enqueue({ account: s.id, to: jid, payload: { waTemplate: outbox.fillWaTemplate(a.wa_template, vars) }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt, role: scopeRole });
+        const row = await outbox.enqueue({ account: s.id, to: jid, payload: { waTemplate: outbox.fillWaTemplate(a.wa_template, vars) }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt, role: a._c && !scope.same(a._c, 'none') ? a._c : null });
         if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
         await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} Meta template "${a.wa_template.name}" #${row.id} to ${jid.split('@')[0]}${a.note ? ` — ${a.note}` : ''}`);
         return `${row.status === 'draft' ? 'Draft' : 'Queued'} #${row.id} (Meta template "${a.wa_template.name}"): "${trim(row.payload.text, 200)}"`;
@@ -577,7 +585,7 @@ function buildServer(playbook = '', focus = '') {
         attachment = attachment || r.payload.attachment;
       }
       const payload = { text, attachment, ...(a.reply_to_message_id ? { replyTo: a.reply_to_message_id } : {}), ...(a.buttons?.length && !attachment ? { buttons: a.buttons } : {}) };
-      const row = await outbox.enqueue({ account: s.id, to: jid, payload, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt, role: scopeRole });
+      const row = await outbox.enqueue({ account: s.id, to: jid, payload, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt, role: a._c && !scope.same(a._c, 'none') ? a._c : null });
       if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
       const later = scheduledAt ? ` for ${d(scheduledAt)}` : '';
       await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} message #${row.id} to ${jid.split('@')[0]}${later}${a.note ? ` — ${a.note}` : ''}`);
@@ -594,7 +602,7 @@ function buildServer(playbook = '', focus = '') {
     account: z.string().optional().describe('Number whose inbox should also show this name (makes a chat to message them)'),
   }, async (a) => {
     const d = await import('./directory.js');
-    const row = await d.saveEntry({ phone: a.phone, name: a.name, category: a.group, reason: a.reason, notes: a.notes, tags: a.tags, referredBy: a.referred_by, account: a.account ? (await manager.resolve(a.account)).id : null, createdBy: 'ai', role: focus || null });
+    const row = await d.saveEntry({ phone: a.phone, name: a.name, category: a.group, reason: a.reason, notes: a.notes, tags: a.tags, referredBy: a.referred_by, account: a.account ? (await manager.resolve(a.account)).id : null, createdBy: 'ai', role: a._c || null });
     if (a.account) await store.saveContact((await manager.resolve(a.account)).id, a.phone, a.name);
     await ai(a.account ? (await manager.resolve(a.account)).id : null, `Saved ${row.name} in Contacts → ${row.category}`);
     return `Saved ${row.name} (+${row.phone}) in "${row.category}" — ${row.reason || ''}`;
@@ -605,10 +613,10 @@ function buildServer(playbook = '', focus = '') {
   }, async (a) => {
     const d = await import('./directory.js');
     if (!a.query && !a.group) {
-      const g = await d.groups({ role: focus || null });
+      const g = await d.groups({ role: a._c || null });
       return g.length ? 'Contact groups:\n' + g.map((x) => `${x.category}: ${x.n}`).join('\n') : 'No contacts saved yet.';
     }
-    const rows = await d.search({ q: a.query || '', category: a.group || '', role: focus || null });
+    const rows = await d.search({ q: a.query || '', category: a.group || '', role: a._c || null });
     return rows.length
       ? rows.map((r) => [`${r.name || '-'} | +${r.phone} | ${r.category}`, r.reason, r.notes ? `notes: ${trim(r.notes, 120)}` : null, r.referred_by_name ? `referred by ${r.referred_by_name}` : null,
           r.tags?.length ? `tags: ${r.tags.join(',')}` : null, r.chat_accounts?.length ? `chat on ${r.chat_accounts.join(', ')}` : 'no chat yet'].filter(Boolean).join(' | ')).join('\n')
@@ -707,7 +715,7 @@ function buildServer(playbook = '', focus = '') {
   tool('list_templates', 'Saved message templates (name, which number, text with {fields}, attached file). Use them via send_message/bulk_send template=.', {
     account: z.string().optional(),
   }, async (a) => {
-    const rows = await templates.listTemplates(a.account ? (await manager.resolve(a.account)).id : undefined, { role: focus || null });
+    const rows = await templates.listTemplates(a.account ? (await manager.resolve(a.account)).id : undefined, { role: a._c || null });
     return rows.length
       ? rows.map((t) => `#${t.id} | ${t.name} | ${t.account_id || 'all numbers'} | ${t.role ? `campaign ${t.role}` : 'all campaigns'} | fields: ${templates.fieldsIn(t.body).join(',') || '-'}${t.attachment?.url ? ' | file' : ''} | ${trim(t.body, 160)}`).join('\n')
       : 'No templates yet.';
@@ -778,7 +786,7 @@ function buildServer(playbook = '', focus = '') {
   }, async (a) => {
     const t = await templates.saveTemplate({
       id: a.id, account: a.account ? (await manager.resolve(a.account)).id : null, name: a.name, body: a.body,
-      attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : null, role: focus || null,
+      attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : null, role: a._c || null,
     });
     await ai(t.account_id, `Saved template "${t.name}"`);
     return `Template #${t.id} "${t.name}" saved.`;
@@ -875,7 +883,7 @@ function buildServer(playbook = '', focus = '') {
   });
 
   tool('list_rules', 'Automatic rules for incoming messages on each number (conditions → actions) and how often they ran.', { account: z.string().optional() }, async (a) => {
-    const rows = await rules.listRules(a.account ? (await manager.resolve(a.account)).id : undefined, { role: focus || null });
+    const rows = await rules.listRules(a.account ? (await manager.resolve(a.account)).id : undefined, { role: a._c || null });
     return rows.length
       ? rows.map((r) => `#${r.id} | ${r.account_id} | ${r.enabled ? 'on' : 'off'} | ${r.name} | if ${JSON.stringify(r.conditions)} then ${JSON.stringify(r.actions)} | ran ${r.runs}x`).join('\n')
       : 'No rules yet.';
@@ -1081,12 +1089,13 @@ function buildServer(playbook = '', focus = '') {
     campaign: z.string().optional().describe('Campaign name; omit for the main playbook'),
   }, async (a) => {
     const list = await listCampaignPlaybooks();
-    if (a.campaign) {
-      const p = await getCampaignPlaybook(a.campaign);
-      if (!p) return `No playbook for campaign "${a.campaign}" yet. Campaign playbooks: ${list.map((c) => c.campaign).join(', ') || 'none'}. Follow the main playbook; the owner can add one (save_playbook with campaign).`;
-      return `CAMPAIGN PLAYBOOK — ${p.campaign} (the main playbook applies too):\n${p.text}`;
-    }
     const main = (await getPlaybook()).text;
+    if (a.campaign) {
+      // every campaign works under the main rules too; hiring campaigns include the shared hiring playbook (INCLUDE)
+      const p = await getCampaignPlaybook(a.campaign);
+      if (!p) return `MAIN PLAYBOOK:\n${main}\n\n(No playbook for campaign "${a.campaign}" yet — follow the main rules. Campaign playbooks: ${list.map((c) => c.campaign).join(', ') || 'none'}; the owner can add one: save_playbook with campaign.)`;
+      return `MAIN PLAYBOOK (applies to every campaign):\n${main}\n\n=== CAMPAIGN PLAYBOOK — ${p.campaign} ===\n${p.text}`;
+    }
     return list.length ? `${main}\n\nCAMPAIGN PLAYBOOKS: ${list.map((c) => c.campaign).join(', ')} — get_playbook(campaign=…) for one.` : main;
   });
 
@@ -1160,11 +1169,43 @@ function buildServer(playbook = '', focus = '') {
   });
 
   tool('save_playbook', "Replace the main playbook, or one campaign's playbook (campaign=…, created if new — e.g. \"Corporate sales\", \"Win-back\", \"Chef\"). Only when the owner asks to change their rules, or to write down the rules of a campaign the owner set up. Keep campaign-specific rules (offer, wording, who to target) in the campaign's playbook and general rules in the main one.", {
-    text: z.string(), campaign: z.string().optional().describe('Campaign name; omit for the main playbook'),
+    text: z.string(), campaign: z.string().optional().describe('Campaign name; omit (or "all") for the MAIN playbook — never the open campaign by default'),
   }, async (a) => {
-    await savePlaybook(a.text, a.campaign || null);
-    await ai(null, a.campaign ? `Updated the "${a.campaign}" campaign playbook` : 'Updated the playbook');
-    return a.campaign ? `Campaign playbook "${a.campaign}" saved.` : 'Playbook saved.';
+    const camp = a.campaign && !/^all$/i.test(a.campaign) ? a.campaign : null;
+    await savePlaybook(a.text, camp);
+    await ai(null, camp ? `Updated the "${camp}" campaign playbook` : 'Updated the playbook');
+    return camp ? `Campaign playbook "${camp}" saved.` : 'Main playbook saved.';
+  });
+
+  tool('list_campaigns', 'The campaigns (like separate users: Chef, Front office, Corporate sales, Win-back …) with their lists, open Board cards and drafts, and which one the owner has open. Pass campaign="<name>" to any tool to work in one.', {}, async () => {
+    const names = await scope.campaignNames();
+    const rows = await query(
+      `SELECT r.role, (SELECT count(*)::int FROM lists l WHERE l.role = r.role AND l.archived IS NULL) AS lists,
+         (SELECT count(*)::int FROM outbox o WHERE o.status = 'draft' AND COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')}) = r.role) AS drafts,
+         (SELECT count(*)::int FROM tasks t WHERE t.status NOT IN ('done','cancelled') AND t.role = r.role) AS cards
+       FROM unnest($1::text[]) AS r(role) ORDER BY lower(r.role)`, [names]);
+    const open = await scope.getFocus();
+    const pbs = new Set((await listCampaignPlaybooks()).map((p) => p.campaign.toLowerCase()));
+    return [`Open in the dashboard: ${open ? scope.label(open) : 'all campaigns'}`,
+      ...rows.map((r) => `${r.role}${scope.same(r.role, open) ? ' (open)' : ''} | ${r.lists} lists | ${r.cards} open cards | ${r.drafts} drafts | playbook: ${pbs.has(r.role.toLowerCase()) ? 'yes' : 'no'}`),
+      'none = Hotel / no campaign (people on no list)'].join('\n');
+  });
+  tool('create_campaign', 'Create a campaign when the owner asks (e.g. "Diwali offer", "Driver hiring"), optionally with its playbook (rules: who to contact, what to say and never say). Then add people with import_list(role=<campaign>). It does not switch the owner\'s dashboard unless open=true.', {
+    name: z.string(), playbook: z.string().optional().describe('The campaign\'s own rules; start with "INCLUDE: Hiring – all roles" for a hiring campaign'),
+    open: z.boolean().optional().describe('Also open it in the dashboard (switch_campaign)'),
+  }, async (a) => {
+    const r = await scope.createCampaign(a.name);
+    if (a.playbook?.trim()) await savePlaybook(a.playbook, r.name);
+    if (a.open) await scope.setFocus(r.name);
+    await ai(null, `${r.created ? 'Created' : 'Found'} campaign "${r.name}"${a.playbook ? ' with its playbook' : ''}${a.open ? ' and opened it' : ''}`, r.name);
+    return `Campaign "${r.name}" ${r.created ? 'created' : 'already existed'}${a.playbook ? ', playbook saved' : ''}${a.open ? ' — now open in the dashboard' : ''}.`;
+  });
+  tool('switch_campaign', 'Open another campaign for the owner\'s dashboard and the default of every tool ("all" = all campaigns, "none" = hotel / no campaign). Only when the owner asks — they see the dashboard change. To just look at another campaign, pass campaign="<name>" to a tool instead.', {
+    campaign: z.string().describe('Campaign name, "all" or "none"'),
+  }, async (a) => {
+    const c = await scope.setFocus(/^all$/i.test(a.campaign) ? '' : a.campaign);
+    await ai(null, `Opened ${scope.label(c)} (owner asked)`, c && !scope.same(c, 'none') ? c : null);
+    return `Now open: ${scope.label(c)}. The dashboard and every tool (by default) show only it from the next call.`;
   });
 
   tool('save_media', 'Download and keep a file from a message (e.g. a candidate\'s resume). Use the media id shown by get_messages.', {

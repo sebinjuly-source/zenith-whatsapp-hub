@@ -84,7 +84,7 @@ export async function listCampaign(idOrName) {
 /** Throws a clear message when <what> (in campaign <c>) is outside the focus. */
 export function assertSame(focus, c, what) {
   if (!focus || same(focus, c)) return;
-  throw new Error(`${what} belongs to ${label(c)}, but you are working in ${label(focus)} — it is out of scope. Ask the owner to switch campaign in the dashboard if it really must be done.`);
+  throw new Error(`${what} belongs to ${label(c)}, but you are working in ${label(focus)} — it is out of scope here. To work on it on purpose: AI → pass campaign="${c || NONE}" (or "all") to this tool; dashboard → pick that campaign at the top.`);
 }
 export async function assertPerson(focus, accountId, jid, what = 'This person') {
   if (!focus || (await personIn(focus, accountId, jid))) return;
