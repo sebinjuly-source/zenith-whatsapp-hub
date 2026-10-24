@@ -881,7 +881,11 @@ test('job roles: lists, tasks and log kept separate per role; earlier batches ne
   assert.ok(!/Same person, other job/.test(known));
   // filters
   assert.ok(!/Front office/.test(await mcp('list_lists', { account: 'hire5', role: 'Chef' })));
-  await mcp('send_to_list', { list: 'Front office – Batch 1', text: 'Hi {first_name}' });
+  const foSend = await mcp('send_to_list', { list: 'Front office – Batch 1', text: 'Hi {first_name}', attachment_url: 'https://example.com/poster.jpg' });
+  const foId = Number(foSend.match(/Task #(\d+)/)[1]);
+  const [foRow] = await query('SELECT payload FROM outbox WHERE task_id = $1', [foId]);
+  assert.equal(foRow.payload.attachment.url, 'https://example.com/poster.jpg', 'list sends can carry one image for everyone');
+  assert.match(foRow.payload.text, /^Hi /, 'each person’s message stays as the caption');
   const foTasks = await mcp('list_tasks', { account: 'hire5', role: 'Front office' });
   assert.match(foTasks, /Front office – Batch 1: message 1/);
   assert.ok(!/Chef/.test(foTasks));

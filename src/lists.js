@@ -577,7 +577,7 @@ export async function setFollowup(listId, settings) {
  * Message the members with the given statuses (default: new + failed). Each gets their own prepared message
  * from the list (column "message") unless a text/template is given. One board task per call.
  */
-export async function sendToList(listId, { statuses = ['new', 'failed'], text, template, waTemplate, onlyPhones, createdBy = 'you', source = 'campaign', scheduledAt } = {}) {
+export async function sendToList(listId, { statuses = ['new', 'failed'], text, template, waTemplate, onlyPhones, attachment, createdBy = 'you', source = 'campaign', scheduledAt } = {}) {
   const at = scheduledAt ? new Date(scheduledAt) : null;
   if (at && isNaN(at)) throw new Error('scheduledAt is not a valid date/time');
   const list = await getList(listId);
@@ -606,7 +606,7 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
       skipped.push({ to: m.phone, reason: 'no message prepared for this person' });
       continue;
     }
-    const r = await payloadFor(session, m.jid, body, waTemplate, vars, { attachment: tpl?.attachment || undefined });
+    const r = await payloadFor(session, m.jid, body, waTemplate, vars, { attachment: attachment || tpl?.attachment || undefined });
     if (r.skip) {
       skipped.push({ to: m.phone, reason: r.skip });
       continue;
