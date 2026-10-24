@@ -5,7 +5,7 @@ import { EventEmitter } from 'events';
 import { query, logEvent } from '../db.js';
 import { Session } from './session.js';
 import { CloudSession } from './cloud.js';
-import { hasAuthState, clearAuthState } from './auth-state.js';
+import { clearAuthState } from './auth-state.js';
 import { normalizeSettings, NEW_CHATS_HARD_MAX } from '../settings.js';
 
 class Manager extends EventEmitter {

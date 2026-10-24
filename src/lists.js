@@ -164,7 +164,7 @@ export async function importList({ account, name, role, since, source, members, 
       continue;
     }
     (already.has(jid) ? updated : added).push(m.name || jid.split('@')[0]);
-    const { phone, to, name: nm, message, row, ...fields } = m;
+    const { phone: _phone, to: _to, name: nm, message, row, ...fields } = m; // phone/to are the jid already, not list fields
     rows.push([list.id, jid, jid.split('@')[0], nm || fields.Name || null, JSON.stringify(fields), decodeMessage(message) || null, row != null ? String(row) : null]);
   }
   if (rows.length) {

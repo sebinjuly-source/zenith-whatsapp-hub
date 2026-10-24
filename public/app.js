@@ -965,10 +965,9 @@
     if (b.account && !accs.find((a) => a.id === b.account)) b.account = '';
     const formAccount = b.account || (accs.find((a) => a.isDefault) || accs[0]).id;
     const q = (extra) => `/api/tasks?${new URLSearchParams({ ...(b.account ? { account: b.account } : {}), ...(state.campaign ? { role: state.campaign } : {}), ...extra })}`;
-    const [active, past, roles, tplList] = await Promise.all([
+    const [active, past, tplList] = await Promise.all([
       api(q({})),
       b.past ? api(q({ past: '1' })) : Promise.resolve([]),
-      api('/api/roles').catch(() => []),
       api(`/api/templates?account=${encodeURIComponent(formAccount)}`).catch(() => []),
     ]);
     const labelOf = (id) => accs.find((a) => a.id === id)?.label || id;
@@ -1809,8 +1808,8 @@
         boxes.push(entry);
       }
       const from = movable(r) && state.accounts.length > 1
-        ? h('select', { class: 'tag', title: 'Number that sends this message', style: 'width:auto;padding:2px 6px', onchange: guard(async (e) => {
-            if (!confirm(`Send this message from "${labelOf(e.target.value)}" instead?${r.status === 'queued' ? ' It is already approved and will go out from there by itself.' : ' It stays a draft until you approve it.'}`)) { e.target.value = r.account_id; return; }
+        ? h('select', { class: 'tag', title: 'Number that sends this message — changes as soon as you pick another', style: 'width:auto;padding:2px 6px', onchange: guard(async (e) => {
+            await r.saveNow?.();
             await moveTo([r.id], e.target.value);
           }) }, accountOptions(r.account_id))
         : h('span', { class: 'tag', title: 'Sent from this number' }, 'From: ' + labelOf(r.account_id));
@@ -1864,7 +1863,17 @@
       return card;
     });
     const picked = () => rows.filter((r) => sel.has(r.id));
-    const moveSel = h('select', { style: 'width:auto' }, h('option', { value: '' }, 'Send from…'), accountOptions(''));
+    const moveSel = h('select', { style: 'width:auto', title: 'Send the ticked messages from another number — moves them as soon as you pick it', onchange: guard(async (e) => {
+      const to = e.target.value;
+      e.target.value = '';
+      if (!to) return;
+      if (!sel.size) return toast('Tick the messages first');
+      const toMove = picked().filter((r) => !r.handled && r.account_id !== to);
+      if (!toMove.length) return toast(`They are already on ${labelOf(to)}`);
+      sel.clear();
+      state.outboxSelecting = false;
+      await moveTo(toMove.map((r) => r.id), to);
+    }) }, h('option', { value: '' }, '📱 Send from…'), accountOptions(''));
     const after = () => { sel.clear(); state.outboxSelecting = false; viewOutbox({ keepScroll: true }); };
     const selectBtn = !selecting && boxes.length
       ? h('div', { class: 'row', style: 'max-width:820px;margin-bottom:12px;align-items:center;gap:8px' },
@@ -1889,6 +1898,14 @@
         toast(`Approved ${r.approved} — queued`);
         after();
       }) }, '✅ Approve') : null,
+      h('button', { class: 'btn small danger', onclick: guard(async () => {
+        if (!sel.size) return toast('Tick the messages first');
+        const reason = prompt(`${tab === 'queued' ? 'Cancel' : 'Reject'} ${sel.size} selected messages? They will not be sent.\nWhy? (optional — the AI reads it)`, '');
+        if (reason === null) return;
+        const r = await api('/api/outbox/reject-selected', { body: { ids: [...sel], reason } });
+        toast(`${tab === 'queued' ? 'Cancelled' : 'Rejected'} ${r.rejected}`);
+        after();
+      }) }, tab === 'queued' ? '✖ Cancel' : '✖ Reject'),
       tab === 'draft' ? h('button', { class: 'btn small', title: 'Tell the AI what to change in the ticked drafts — it edits them and they come back here for your approval', onclick: guard(async () => {
         if (!sel.size) return toast('Tick the drafts first');
         const text = prompt(`Note for the AI about the ${sel.size} ticked drafts — what should it change?\n(e.g. "address them as Mr / Ms", "make it shorter", "mention the airport")`, '');
@@ -1901,25 +1918,6 @@
         if (await reschedule(picked().filter((r) => !r.handled))) after();
       }) }, '🕒 Reschedule'),
       state.accounts.length > 1 ? moveSel : null,
-      state.accounts.length > 1 ? h('button', { class: 'btn small', onclick: guard(async () => {
-        if (!sel.size) return toast('Tick the messages first');
-        if (!moveSel.value) return toast('Choose the number that should send them');
-        const toMove = picked().filter((r) => r.account_id !== moveSel.value);
-        if (!toMove.length) return toast(`They are already on ${labelOf(moveSel.value)}`);
-        const nApproved = toMove.filter((r) => r.status === 'queued').length;
-        if (!confirm(`Move ${toMove.length} messages to "${labelOf(moveSel.value)}"?${sel.size > toMove.length ? ` (${sel.size - toMove.length} ticked are already there.)` : ''}\n\n${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel.value)} by themselves, within its limits.\n` : ''}${toMove.length - nApproved ? `${toMove.length - nApproved} drafts: they still need your approval.` : ''}`)) return;
-        await moveTo(toMove.map((r) => r.id), moveSel.value);
-        sel.clear();
-        state.outboxSelecting = false;
-      }) }, 'Move') : null,
-      h('button', { class: 'btn small danger', onclick: guard(async () => {
-        if (!sel.size) return toast('Tick the messages first');
-        const reason = prompt(`${tab === 'queued' ? 'Cancel' : 'Reject'} ${sel.size} selected messages? They will not be sent.\nWhy? (optional — the AI reads it)`, '');
-        if (reason === null) return;
-        const r = await api('/api/outbox/reject-selected', { body: { ids: [...sel], reason } });
-        toast(`${tab === 'queued' ? 'Cancelled' : 'Rejected'} ${r.rejected}`);
-        after();
-      }) }, tab === 'queued' ? '✖ Cancel' : '✖ Reject'),
       h('span', { class: 'grow' }),
       h('button', { class: 'btn small', onclick: stopSelecting }, 'Done')) : null;
     refreshSel();
@@ -1971,6 +1969,12 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
       pickBar,
     ]);
     if (scrollY) requestAnimationFrame(() => { const m = document.querySelector('main'); if (m) m.scrollTop = scrollY; });
+    if (selecting) {
+      document.querySelector('main')?.addEventListener('click', (e) => {
+        if (e.target.closest('.card, .pickbar, .modal-back, button, a, input, select, textarea, label, summary, .seg')) return;
+        stopSelecting();
+      });
+    }
   }
 
   // ---------- settings ----------
@@ -2236,6 +2240,19 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
     state.route = location.hash.slice(1) || 'board';
     state.reloadChats = state.reloadThread = null;
     try {
+      // the open campaign lives on the server (another device or the AI may have switched it): follow it on every page
+      const f = (await api('/api/focus').catch(() => null))?.campaign;
+      if (typeof f === 'string' && f !== (state.campaign || '')) {
+        state.campaign = f;
+        state.listRole = f && f !== 'none' ? f : '';
+        state.listId = null;
+        state.outboxTask = null;
+        state.outboxPicked?.clear();
+        state.outboxSelecting = false;
+        state.campaignsAt = 0;
+        await loadAccounts(true); // badge counts are per campaign
+        toast(`Now working in ${f ? (f === 'none' ? 'Hotel / no campaign' : `campaign "${f}"`) : 'all campaigns'} (changed elsewhere)`);
+      }
       await (views[state.route] || viewAccounts)();
     } catch (e) {
       if (e.message !== 'Please log in') toast(e.message);
