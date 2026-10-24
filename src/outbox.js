@@ -332,6 +332,42 @@ async function afterBatchChange(rows) {
   }
 }
 
+/** Save new wording for a draft without approving it (the Drafts page saves as you type). */
+export async function editDraft(id, text) {
+  if (typeof text !== 'string' || !text.trim()) throw new Error('The message is empty');
+  const [row] = await query(`SELECT * FROM outbox WHERE id = $1`, [id]);
+  if (!row) throw new Error('Draft not found');
+  if (row.status !== 'draft') throw new Error(`Item is ${row.status}, not a draft — it can't be edited any more`);
+  if (row.payload.waTemplate) throw new Error('This is a Meta template message — its wording is fixed by Meta');
+  const payload = { ...row.payload };
+  if (payload.attachment && !payload.text) payload.attachment = { ...payload.attachment, caption: text };
+  else payload.text = text;
+  const [u] = await query(`UPDATE outbox SET payload = $2 WHERE id = $1 AND status = 'draft' RETURNING *`, [id, JSON.stringify(payload)]);
+  if (!u) throw new Error('Draft was already handled');
+  return u;
+}
+
+/** The owner's note on several drafts → one card for the AI listing them (it edits or redrafts them; the owner approves). */
+export async function draftsNoteForAi(ids, text, { actor = 'you' } = {}) {
+  const list = [...new Set((ids || []).map(Number).filter(Boolean))];
+  if (!list.length) throw new Error('Select at least one draft');
+  if (!String(text || '').trim()) throw new Error('Write the note first');
+  const rows = await query(`SELECT o.*, c.name AS to_name FROM outbox o LEFT JOIN contacts c ON c.account_id = o.account_id AND c.jid = o.to_jid
+    WHERE o.id = ANY($1::bigint[]) AND o.status = 'draft' ORDER BY o.id`, [list]);
+  if (!rows.length) throw new Error('None of these are drafts any more');
+  const counts = {};
+  for (const r of rows) counts[r.account_id] = (counts[r.account_id] || 0) + 1;
+  const account = Object.entries(counts).sort((x, y) => y[1] - x[1])[0][0];
+  const note = String(text).trim();
+  const lines = rows.map((r) => `- draft #${r.id} on ${r.account_id} to ${r.to_jid.split('@')[0]}${r.to_name ? ` (${r.to_name})` : ''}: "${String(r.payload.text || r.payload.attachment?.caption || '').replace(/\s+/g, ' ').slice(0, 90)}…"`);
+  const task = await createTask({
+    account, kind: 'todo', assignee: 'ai', dueAt: new Date().toISOString(), createdBy: actor,
+    title: `Owner: ${note.replace(/\s+/g, ' ').slice(0, 70)} (${rows.length} drafts)`,
+    details: `${note}\n\nDrafts:\n${lines.join('\n')}\n\nChange each draft as the note asks with edit_draft(id, text) (keeps its picture and send time), or reject_draft + a new draft if it must change more. Leave them as drafts for the owner to approve, then mark this card done.`,
+  });
+  return { drafts: rows.length, task };
+}
+
 export async function reject(id, { reason = '', actor = 'you' } = {}) {
   const [row] = await query(
     `UPDATE outbox SET status = 'rejected' WHERE id = $1 AND status IN ('draft','queued') RETURNING *`,

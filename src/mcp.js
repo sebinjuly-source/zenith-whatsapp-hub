@@ -572,6 +572,14 @@ function buildServer(playbook = '') {
     return `#${a.id} rejected.`;
   });
 
+  tool('edit_draft', 'Change the wording of a draft that is still waiting for the owner\'s approval (e.g. after an owner note on the Drafts page). Keeps its picture, number and send time; it stays a draft. For Meta template drafts the wording is fixed — reject and redraft instead.', {
+    id: z.number().int(), text: z.string().min(1).describe('The full new message (or picture caption)'),
+  }, async (a) => {
+    const r = await outbox.editDraft(a.id, a.text);
+    await ai(r.account_id, `Edited draft #${r.id} to ${r.to_jid.split('@')[0]}`);
+    return `Draft #${r.id} updated — still waiting for the owner's approval${new Date(r.scheduled_at) > new Date(Date.now() + 60000) ? ` (goes out ${d(r.scheduled_at)} once approved)` : ''}.`;
+  });
+
   tool(
     'backfill_history',
     'Deep history: pull older messages from the phone chat by chat (50 at a time, paced like scrolling up) for numbers whose initial import was short. Runs in the background for a while (hours for ~1000 chats); progress shows in list_accounts. The phone must stay online.',

@@ -1601,7 +1601,8 @@
       h('div', { style: `color:${retrying ? 'inherit' : 'var(--bad)'};font-size:13px` }, retrying ? '🔁 ' : '⚠️ ', err),
       todo ? h('div', { style: 'font-size:12px;margin-top:3px' }, h('b', {}, 'What to do: '), todo) : null);
   };
-  async function viewOutbox() {
+  async function viewOutbox({ keepScroll = false } = {}) {
+    const scrollY = keepScroll ? document.querySelector('main')?.scrollTop || 0 : 0;
     const tab = state.outboxTab || 'draft';
     if (!state.accounts.length) await loadAccounts();
     const help = await metaHelpTable();
@@ -1647,11 +1648,49 @@
     const moveTo = async (ids, to) => {
       const r = await api('/api/outbox/move', { body: { ids, account: to } });
       toast(r.moved ? `Moved ${r.moved} to ${r.toLabel}${r.approved ? ` — ${r.approved} go out from there by themselves` : ''}${r.drafts ? ` — ${r.drafts} drafts still need your approval` : ''}${r.kept ? ` — ${r.kept} stayed: a Meta API number can only send them a template` : ''}` : 'Nothing to move: they are already on that number');
-      viewOutbox();
+      viewOutbox({ keepScroll: true });
+    };
+    const later = (r) => r.scheduled_at && new Date(r.scheduled_at) - Date.now() > 60000;
+    const whenLong = (t) => new Date(t).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', year: new Date(t).getFullYear() === new Date().getFullYear() ? undefined : 'numeric', hour: '2-digit', minute: '2-digit' });
+    const dueTag = (r) => (!['draft', 'queued'].includes(r.status) ? null
+      : later(r)
+        ? h('div', { class: 'tag', style: 'margin:4px 0;background:var(--accent-soft);color:var(--ink)', title: 'Approving does not send it early — it waits until this time' },
+            '🕒 Goes out ', h('b', {}, whenLong(r.scheduled_at)), r.status === 'draft' ? ' — approving now keeps this date' : ' (approved, waiting)')
+        : h('div', { class: 'tag', style: 'margin:4px 0' }, r.status === 'draft' ? '⚡ Goes out soon after you approve (within sending hours)' : '⚡ Next in line (within sending hours)'));
+    const done = (card, r, text) => {
+      // replace just this card: the list, the other cards' edits and the scroll position stay as they are
+      card.replaceChildren(h('div', { class: 'row', style: 'align-items:center' }, h('b', { class: 'grow' }, r.to_name || '+' + r.to_jid.split('@')[0]), h('span', { class: 'muted' }, text)));
+      card.style.opacity = '.6';
+      const i = boxes.findIndex(([, id]) => id === r.id);
+      if (i >= 0) { boxes.splice(i, 1); sel.delete(r.id); refreshSel(); }
+      if (r.status === 'draft' && state.draftsCount) {
+        state.draftsCount--;
+        document.querySelectorAll('.badge').forEach((b) => { if (/^\d+$/.test(b.textContent)) b.textContent = state.draftsCount || ''; });
+      }
     };
     const items = rows.map((r) => {
       const ta = h('textarea', { rows: 3, value: r.payload.text || r.payload.attachment?.caption || '', readonly: !!r.payload.waTemplate,
         title: r.payload.waTemplate ? 'Meta template wording is fixed by Meta' : undefined });
+      const saved = h('span', { class: 'muted', style: 'font-size:12px;align-self:center' });
+      if (r.status === 'draft' && !r.payload.waTemplate) {
+        // edits are saved as you type, so approving another draft (or reloading) never loses them
+        let timer = null;
+        let last = ta.value;
+        const save = async () => {
+          clearTimeout(timer);
+          if (ta.value === last || !ta.value.trim()) return;
+          const text = ta.value;
+          saved.textContent = 'Saving…';
+          try {
+            await api(`/api/outbox/${r.id}`, { method: 'PATCH', body: { text } });
+            last = text;
+            saved.textContent = '✓ Saved';
+          } catch (e) { saved.textContent = '⚠️ Not saved: ' + e.message; }
+        };
+        ta.addEventListener('input', () => { saved.textContent = 'Editing…'; clearTimeout(timer); timer = setTimeout(save, 800); });
+        ta.addEventListener('blur', save);
+        r.saveNow = save;
+      }
       let cb = null;
       if (movable(r)) {
         cb = h('input', { type: 'checkbox', 'aria-label': `Select ${r.to_name || r.to_jid.split('@')[0]}`, onchange: (e) => { if (e.target.checked) sel.add(r.id); else sel.delete(r.id); refreshSel(); } });
@@ -1663,7 +1702,7 @@
             await moveTo([r.id], e.target.value);
           }) }, accountOptions(r.account_id))
         : h('span', { class: 'tag', title: 'Sent from this number' }, 'From: ' + labelOf(r.account_id));
-      return h('div', { class: 'card' },
+      const card = h('div', { class: 'card' },
         h('div', { class: 'row', style: 'align-items:center' },
           cb,
           h('b', { class: 'grow' }, r.to_name || '+' + r.to_jid.split('@')[0]),
@@ -1675,6 +1714,7 @@
           : r.price_category === 'service' && r.window_closes_at && ['draft', 'queued'].includes(r.status)
             ? h('div', { class: 'tag', style: `margin:4px 0;${new Date(r.window_closes_at) - Date.now() < 4 * 3600e3 ? 'background:var(--warn-soft);color:var(--ink)' : ''}` }, '⏳ Free until ', new Date(r.window_closes_at).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }), ' — after that it cannot be sent as text')
             : null,
+        dueTag(r),
         r.note ? h('p', { class: 'muted', style: 'margin:6px 0' }, 'Why: ', r.note) : null,
         r.payload.waTemplate ? h('p', { style: 'margin:6px 0' }, h('span', { class: 'tag' }, `Meta template: ${r.payload.waTemplate.name}`)) : null,
         r.preview_image ? h('a', { href: r.preview_image.startsWith('data:') ? undefined : r.preview_image, target: '_blank', rel: 'noopener', title: 'Image the person will receive' },
@@ -1682,18 +1722,25 @@
         r.payload.attachment ? h('p', { class: 'muted', style: 'margin:6px 0' }, '📎 ', r.payload.attachment.fileName || r.payload.attachment.url || 'file') : null,
         r.status === 'draft'
           ? h('div', {}, ta, h('div', { class: 'row', style: 'margin-top:8px' },
-              h('button', { class: 'btn primary small', onclick: guard(async () => { await api(`/api/outbox/${r.id}/approve`, { body: r.payload.waTemplate ? {} : { text: ta.value } }); toast('Approved — queued'); viewOutbox(); }) }, 'Approve & send'),
+              h('button', { class: 'btn primary small', onclick: guard(async () => {
+                const u = await api(`/api/outbox/${r.id}/approve`, { body: r.payload.waTemplate ? {} : { text: ta.value } });
+                const msg = later(u) ? `✅ Approved — goes out ${whenLong(u.scheduled_at)}` : '✅ Approved — sending soon';
+                toast(msg);
+                done(card, r, msg);
+              }) }, later(r) ? 'Approve (sends on its date)' : 'Approve & send'),
               h('button', { class: 'btn small danger', title: 'Reject — you can say why, so the AI does better next time', onclick: guard(async () => {
                 const reason = prompt('Reject this draft. Why? (optional — the AI reads this before drafting for this person again)', '');
                 if (reason === null) return;
                 await api(`/api/outbox/${r.id}/reject`, { body: { reason } });
-                viewOutbox();
-              }) }, 'Reject')))
+                done(card, r, '✖ Rejected');
+              }) }, 'Reject'),
+              saved))
           : h('div', {}, h('p', { style: 'white-space:pre-wrap;margin:6px 0' }, r.payload.text || r.payload.attachment?.caption || ''),
               errorBox(r.error, help),
-              r.status === 'queued' ? h('button', { class: 'btn small danger', onclick: guard(async () => { await api(`/api/outbox/${r.id}/reject`, { method: 'POST' }); viewOutbox(); }) }, 'Cancel') : null,
+              r.status === 'queued' ? h('button', { class: 'btn small danger', onclick: guard(async () => { await api(`/api/outbox/${r.id}/reject`, { method: 'POST' }); done(card, r, '✖ Cancelled'); }) }, 'Cancel') : null,
               r.sent_at ? h('p', { class: 'muted', style: 'margin:0' }, 'Sent ', new Date(r.sent_at).toLocaleString()) : null),
       );
+      return card;
     });
     const picked = () => rows.filter((r) => sel.has(r.id));
     const moveSel = h('select', { style: 'width:auto' }, h('option', { value: '' }, 'Send from…'), accountOptions(''));
@@ -1720,11 +1767,20 @@ ${nApproved ? `${nApproved} already approved: they go out from ${labelOf(moveSel
           if (!list.length) {
             return toast(sel.size ? 'Those are already approved: queued messages go out by themselves, one by one. Only drafts need approving.' : 'Tick the drafts you want to approve first');
           }
-          if (!confirm(`Approve and send ${list.length} selected drafts as they are?\n\n${paceText(list)}${costText(list)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit.`)) return;
+          await Promise.all(list.map((x) => x.saveNow?.()));
+          const nLater = list.filter(later).length;
+          if (!confirm(`Approve ${list.length} selected drafts?${nLater ? `\n\n${nLater} of them have a later date and wait until then.` : ''}\n\n${paceText(list)}${costText(list)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit.`)) return;
           const r = await api('/api/outbox/approve-selected', { body: { ids: list.map((x) => x.id) } });
           toast(`Approved ${r.approved} — queued`);
-          viewOutbox();
+          viewOutbox({ keepScroll: true });
         }) }, 'Approve selected') : null,
+        tab === 'draft' ? h('button', { class: 'btn small', title: 'Tell the AI what to change in the ticked drafts — it edits them and they come back here for your approval', onclick: guard(async () => {
+          if (!sel.size) return toast('Tick the drafts first');
+          const text = prompt(`Note for the AI about the ${sel.size} ticked drafts — what should it change?\n(e.g. "address them as Mr / Ms", "make it shorter", "mention the airport")`, '');
+          if (!text?.trim()) return;
+          const r = await api('/api/outbox/note-for-ai', { body: { ids: [...sel], text } });
+          toast(`Sent to the AI as task #${r.task.id} — it edits the ${r.drafts} drafts; they stay here for your approval`);
+        }) }, '📝 Note for AI') : null,
         h('button', { class: 'btn small danger', onclick: guard(async () => {
           if (!sel.size) return toast('Tick the messages first');
           const reason = prompt(`${tab === 'queued' ? 'Cancel' : 'Reject'} ${sel.size} selected messages? They will not be sent.
@@ -1732,7 +1788,7 @@ Why? (optional — the AI reads it)`, '');
           if (reason === null) return;
           const r = await api('/api/outbox/reject-selected', { body: { ids: [...sel], reason } });
           toast(`${tab === 'queued' ? 'Cancelled' : 'Rejected'} ${r.rejected}`);
-          viewOutbox();
+          viewOutbox({ keepScroll: true });
         }) }, tab === 'queued' ? 'Cancel selected' : 'Reject selected')),
       h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px' }, tab === 'queued'
         ? 'Queued messages are already approved and go out by themselves, one at a time. Tick some (or Select all, then untick a few) to move them to another number or cancel them.'
@@ -1741,10 +1797,12 @@ Why? (optional — the AI reads it)`, '');
     const approveAllBar = drafts.length > 1 ? h('div', { class: 'card row', style: 'max-width:820px;margin-bottom:16px;align-items:center' },
       h('span', { class: 'grow' }, `${drafts.length}${rows.length >= 200 ? '+' : ''} drafts${acc ? ' from ' + labelOf(acc) : ''}${state.outboxTask ? ` in task #${state.outboxTask}` : ''}`),
       h('button', { class: 'btn primary', onclick: guard(async () => {
-        if (!confirm(`Approve and send all ${drafts.length} drafts as they are?\n\n${paceText(drafts)}${costText(drafts)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit. Text you edited below but did not approve is not used.`)) return;
+        await Promise.all(drafts.map((x) => x.saveNow?.()));
+        const nLater = drafts.filter(later).length;
+        if (!confirm(`Approve and send all ${drafts.length} drafts?\n\n${paceText(drafts)}${costText(drafts)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit. Your edits are saved and used.${nLater ? `\n\n${nLater} have a later date (e.g. festival wishes) — they wait until then.` : ''}`)) return;
         const r = await api('/api/outbox/approve-all', { body: { account: acc || undefined, task: state.outboxTask || undefined } });
         toast(`Approved ${r.approved} — queued`);
-        viewOutbox();
+        viewOutbox({ keepScroll: true });
       }) }, `Approve all ${drafts.length}${rows.length >= 200 ? '+' : ''}`)) : null;
     const statuses = await api(`/api/outbox/status${acc ? '?account=' + encodeURIComponent(acc) : ''}`).catch(() => []);
     const when = (t) => (t ? new Date(t).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '');
@@ -1770,6 +1828,7 @@ Why? (optional — the AI reads it)`, '');
       bar,
       h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr))' }, items.length ? items : [h('p', { class: 'muted' }, 'Nothing here.')]),
     ]);
+    if (scrollY) requestAnimationFrame(() => { const m = document.querySelector('main'); if (m) m.scrollTop = scrollY; });
   }
 
   // ---------- settings ----------

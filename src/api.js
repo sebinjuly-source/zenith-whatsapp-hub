@@ -690,6 +690,17 @@ export function buildApp() {
     }
     res.json(r);
   }));
+  // Owner's note on several drafts → a card for the AI: { ids, text }
+  api.post('/outbox/note-for-ai', wrap(async (req, res) => {
+    const r = await outbox.draftsNoteForAi(idsOf(req), req.body?.text, { actor: 'you' });
+    await act(req, r.task.account_id, `Note for the AI on ${r.drafts} drafts (task #${r.task.id})`);
+    res.json(r);
+  }));
+  // Save a draft's edited wording (Drafts page, as you type): { text }
+  api.patch('/outbox/:id', wrap(async (req, res) => {
+    const r = await outbox.editDraft(req.params.id, req.body?.text);
+    res.json({ id: r.id, saved: true });
+  }));
   api.post('/outbox/:id/approve', wrap(async (req, res) => {
     const r = await outbox.approve(req.params.id, req.body || {});
     await act(req, r.account_id, `Approved draft #${r.id} to ${r.to_jid.split('@')[0]}${req.body?.text ? ' (edited)' : ''}`);

@@ -886,6 +886,19 @@ test('job roles: lists, tasks and log kept separate per role; earlier batches ne
   const [foRow] = await query('SELECT payload FROM outbox WHERE task_id = $1', [foId]);
   assert.equal(foRow.payload.attachment.url, 'https://example.com/poster.jpg', 'list sends can carry one image for everyone');
   assert.match(foRow.payload.text, /^Hi /, 'each person’s message stays as the caption');
+  // Drafts page: edits are saved without approving; the owner's note on ticked drafts becomes an AI card; the AI edits drafts
+  const [foDraft] = await query(`SELECT id FROM outbox WHERE task_id = $1 AND status = 'draft'`, [foId]);
+  assert.equal((await call('PATCH', `/api/outbox/${foDraft.id}`, { text: 'Hello Mr Test, edited' })).data.saved, true);
+  const [edited] = await query('SELECT status, payload FROM outbox WHERE id = $1', [foDraft.id]);
+  assert.equal(edited.status, 'draft', 'saving an edit does not approve it');
+  assert.equal(edited.payload.text, 'Hello Mr Test, edited');
+  assert.equal(edited.payload.attachment.url, 'https://example.com/poster.jpg', 'the picture stays');
+  const note = (await call('POST', '/api/outbox/note-for-ai', { ids: [foDraft.id], text: 'Address them as Mr / Ms' })).data;
+  assert.equal(note.drafts, 1);
+  assert.equal(note.task.assignee, 'ai');
+  assert.match(note.task.details, new RegExp(`draft #${foDraft.id} `));
+  assert.match(await mcp('edit_draft', { id: foDraft.id, text: 'Dear Mr Test, hello' }), /updated — still waiting/);
+  assert.equal((await query('SELECT payload FROM outbox WHERE id = $1', [foDraft.id]))[0].payload.text, 'Dear Mr Test, hello');
   const foTasks = await mcp('list_tasks', { account: 'hire5', role: 'Front office' });
   assert.match(foTasks, /Front office – Batch 1: message 1/);
   assert.ok(!/Chef/.test(foTasks));
@@ -1642,6 +1655,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   const d1 = await run('send_message', { account: 'mcpall', to: P, template: 'Toolbox ask', note: 'ask the day' });
   const d2 = await run('send_message', { account: 'mcpall', to: P, text: 'Kal 11 baje aaiye', schedule_at: '2026-12-09 10:00' });
   await run('list_outbox', { account: 'mcpall', status: 'draft' });
+  await run('edit_draft', { id: idOf(d1), text: 'Namaste Mr Ravi, kab aa sakte hain?' });
   await run('approve_draft', { id: idOf(d1) });
   await run('reject_draft', { id: idOf(d2), reason: 'too early' });
   await manager.create({ id: 'mcpall2', label: 'McpAll2' });
