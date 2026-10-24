@@ -70,7 +70,7 @@ and the open tabs are remembered on that device after a refresh. Less-used parts
 |---|---|
 | **Board** | The shared calendar of you and the AI. **🔥 Do now**: what is overdue, due today, or waiting on someone (must-dos first, in red; candidates waiting for a reply folded into one group the AI works through). **📅 Future**: everything later, one fold per day (the next two open). **⏳ Sending now** and **✅ Done** are folded. Filters: number, 👤 Mine / 🤖 AI, job role. Each card shows its title, who does it, when, and one action (Reply / Open chat / Approve / Messages) plus ✓ done; **More** holds the details, ⭐ priority, move, and **history & notes** (call notes go here). Cards the hub makes by itself: 💬 Reply needed, 🔁 Follow-up, 🎯 Interview, 🕒 Scheduled message, ⏰ Reminder, "Did X come?" / call tasks. New to-do and Bulk send are folded at the bottom. **Phone numbers** on a card (title, details, notes) are tap-to-call links, and cards for a person have a **📞 Call** button. After tapping it, **After the call:** ✅ Interested / 🗓 Interview date… / 📵 No answer / ⏰ Call back… / ❌ Not interested — one tap writes the note, sets the stage or interview date, closes the card and hands the next step to the AI (or a "Call again" card for you); called from another phone? More → 📞 Log a call result; card text can be selected and copied. **Several cards at once:** press **☑ Select** next to Do now (or long-press a card's empty space; pressing on text selects text), tap more cards or **☑ Select all** (Do now, or one Future day), then **📝 Note for the AI**; **Done** leaves selection — e.g. "didn't pick up my calls, follow up on WhatsApp". The note goes on each card, the AI gets a card "Owner: …" listing those people (due now), and the selected cards can be closed. |
 | **Inbox** | Chats per number (each tagged 🎯 with its campaign). Photos show in the chat; **⬇ Download** saves any file to the phone or PC. **👤＋** saves a new contact (number + name, and on linked phones also in the phone's contacts) and opens a chat with them; **💾 Save** on a shared contact card does the same; the Contact panel has a **Name** field (a saved name is kept even when WhatsApp reports another). On a phone the chat fills the screen: ← back, the name, ✓ Done, and ⋯ for Contact, Remind me, Reopen and older messages. The typing box is always visible: 📎 file, ⏰ send later, 📝 saved template, ➤ send. On the Meta number: the 24 h window and a **Meta template…** button when the window is closed. |
-| **Drafts** | **Long-press a card** (or ☑ Select) to start selecting, tap more cards, and act from the bar pinned to the bottom: ✅ Approve, 📝 Note for AI, 🕒 Reschedule, Move, ✖ Reject, Done. Every unsent card also has **🕒 Reschedule** (new day and time, quick picks, or as soon as possible; drafts stay drafts, the Board card follows). Your edits are **saved as you type** (✓ Saved) — approving another draft never loses them. Approve / Reject change only that card, so the list and your scroll place stay. Each card says when it goes out: **🕒 Goes out Fri 1 Jan 2027, 09:45** for a dated message (approving keeps that date — it never goes early) or **⚡ soon after you approve**. Tick drafts → **📝 Note for AI** gives the AI a card listing them; it changes them with edit_draft and they come back here for approval. On the Meta number a free-text draft shows **⏳ Free until …** (24 h after their last message) or **⛔ window closed** (only a paid template can go then). **Reject** asks why (optional). The reason is written on that person's Board card, so the AI follows it, and without a reason it won't draft the same again. Messages waiting for approval, queued, sent, failed (with **What to do** for Meta errors). Price on each card (Meta number), Move to another number, Approve all / selected, status box per number (what waits, why, until when). |
+| **Drafts** | **Long-press a card** (or ☑ Select) to start selecting, tap more cards, and act from the bar pinned to the bottom: ✅ Approve, ✖ Reject, 📝 Note for AI, 🕒 Reschedule, 📱 Send from (moves them at once), Done — tapping empty space ends selection. The number on a single card also changes as soon as you pick another. Every unsent card also has **🕒 Reschedule** (new day and time, quick picks, or as soon as possible; drafts stay drafts, the Board card follows). Your edits are **saved as you type** (✓ Saved) — approving another draft never loses them. Approve / Reject change only that card, so the list and your scroll place stay. Each card says when it goes out: **🕒 Goes out Fri 1 Jan 2027, 09:45** for a dated message (approving keeps that date — it never goes early) or **⚡ soon after you approve**. Tick drafts → **📝 Note for AI** gives the AI a card listing them; it changes them with edit_draft and they come back here for approval. On the Meta number a free-text draft shows **⏳ Free until …** (24 h after their last message) or **⛔ window closed** (only a paid template can go then). **Reject** asks why (optional). The reason is written on that person's Board card, so the AI follows it, and without a reason it won't draft the same again. Messages waiting for approval, queued, sent, failed (with **What to do** for Meta errors). Price on each card (Meta number), **Approve these N** (exactly the drafts shown), status box per number (what waits, why, until when). |
 | **📇 Contacts** | The hub's contact book, kept by **why** a person matters, in separate groups — "Chef hiring – Referrers", "Chef hiring – Referred", "Catering", "Placement agents", "Vendors & services", "Travel agents", "Corporate clients", "Guests". Each entry has the reason, notes, and who referred whom. Search by need ("chef", "caterer", "travel agent"). A contact card shared in a chat is filed automatically (referred person + referrer, under the sender's job role) with a priority Call card for you. Save from a chat (Contact → 📇 Save to Contacts), a shared card (💾 Save) or 👤＋ Add. The AI searches here first (find_contacts) whenever a need comes up and saves helpful people (save_contact). |
 | **Lists** | Candidate batches by role, status per person, stage, interview and follow-up dates. 🗑 removes a person who was never messaged (e.g. typed by mistake); **🗄 Archive** stops a list from ever sending (for lists imported only to check duplicates). Automation (pipeline and follow-ups) is folded. |
 | **Templates** | Your saved texts (pick "All numbers" so they appear in every chat's 📝 list; starter set: Location, Ask interview day, Confirm interview, Didn't pick up my call, Reminder before visit, Not a fit, Polite close), plus **Meta templates** (status, sync, submit new ones). |
@@ -204,7 +204,13 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
 - Failures are shown with a plain reason (WhatsApp/Meta error codes translated); Meta's actual delivery events are
   kept 14 days.
 - Alerts by WhatsApp when a number is logged out or offline 15+ minutes.
-- Tests: `npm test` (98 end-to-end tests, one of which calls every one of the 51 AI tools, including a fake Meta server).
+- Approvals are never broader than what you see: "Approve these N" sends the ids of the drafts on screen; the server
+  refuses an approval that names no drafts, number, task or campaign (on 24 Oct an unfiltered "approve all" approved every
+  number and campaign — the incident that led to this rule).
+- A campaign never leaks into another: the dashboard refuses actions outside the open campaign; the AI must name another
+  campaign on purpose (`campaign="…"` / `"all"`).
+- Tests: `npm test` (107 end-to-end tests, one of which calls every one of the 60 AI tools, including a fake Meta server;
+  one checks that the dashboard script parses — a syntax error there blanks the whole dashboard).
 
 ---
 
@@ -278,15 +284,30 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
   re-derives all of them every 10 min, tags cards with their campaign, and runs the safety net (`catchForgotten`).
 - `task_log` = each card's history and notes. "Owner note to act on" = the latest note/AI entry is the owner's.
 
-### 10.7 Campaigns (`campaign.js`)
-A campaign is a list's job role. `roleOf(acc, jid)` = role of the latest list the person is on (this number's
-lists first); `roleFilter` turns a picked campaign ("none" = on no list) into SQL. Stored on `outbox.role` and
-`tasks.role`; chats are filtered live.
+### 10.7 Campaigns (`campaign.js`, `scope.js`)
+- A campaign = a list's job role, or one created with **➕ New campaign** (table `campaigns`). `roleOf(acc, jid)` = role of
+  the latest list the person is on (this number's lists first); `roleFilter` turns a campaign ("none" = on no list) into
+  SQL. Stored on `outbox.role`, `tasks.role`, `events.role`, `templates.role`, `directory.role`; rules use
+  `conditions.role`. NULL on a template/contact/rule = shared by all campaigns.
+- The open campaign is **server-side**: config key `focus` (`scope.getFocus/setFocus`), set by the dashboard picker,
+  by `switch_campaign`, or by `PUT /api/focus`. The dashboard re-reads it on every page (another device or the AI may
+  have switched it) and the badge counts follow it.
+- Dashboard (cookie requests): `req.focus` is applied to every read (`roleQ`) and every action is checked
+  (`scope.assertDrafts / assertTask / assertList / assertPerson`, template/rule/contact owners). Scripts using the API key
+  are not tied to the picker.
+- AI (MCP): `callCampaign(tool, args, focus)` gives each call its campaign — the tool's own job role (import_list,
+  known_candidates, list_tasks), else `campaign` ("all" = none), else the open one — and `enforceScope` checks targets
+  against it. Handlers read it as `a._c`. So the campaign is a default filter: it keeps the AI's context small and
+  stops accidental changes elsewhere, but the AI can work anywhere by naming the campaign. A URL can pin one:
+  `/mcp/<key>/<campaign>` or `/mcp/<key>/all` (a claude.ai routine cannot change its connector's URL — its prompt says
+  campaign="all" instead).
+- A person is "in" a campaign when on one of its lists (`scope.personIn`, SQL `personInSql`); groups count as "none".
 
 ### 10.8 AI access (`mcp.js`) and REST (`api.js`)
 - MCP: `POST /mcp/<API_KEY>`, stateless — every call builds a fresh server with the playbook (from `config` key
   `playbook`) as its instructions. Every tool returns short text; errors come back as `Error: …` text.
-  Dates the AI gives without a timezone are India time (`localTime`).
+  Dates the AI gives without a timezone are India time (`localTime`). Every tool also takes `campaign` (see 10.7);
+  the instructions carry the main playbook plus the open campaign's playbook (INCLUDEs expanded).
 - REST: `/api/*` with `x-api-key` or the dashboard cookie; the dashboard (`public/app.js`) uses only these.
 - Public sales images: `public/sales/*.jpg` are served without a key at `<server>/sales/<file>` (Premium Room poster, festival greetings) so messages can attach them by URL. They are built from the Deluxe poster layout (dark + gold, crown logo, photo, round inset, icon row, address bar).
   `/webhook` is the old dental-bot format for Apps Script.
@@ -294,7 +315,7 @@ lists first); `roleFilter` turns a picked campaign ("none" = on no list) into SQ
 ### 10.9 Data model (main tables)
 `accounts` (numbers, settings, lease) · `wa_auth` (linked-number keys) · `chats`, `contacts`, `messages`, `lid_map`
 · `outbox` (every send) · `tasks` + `task_log` (Board) · `lists` + `list_members` (batches, status, stage, dates)
-· `templates`, `rules`, `directory` (Contacts book) · `config` (playbook, defaults, alerts, prices) · `events`
+· `templates`, `rules`, `directory` (Contacts book) · `campaigns` · `config` (playbook, playbook:<campaign>, focus, defaults, alerts, prices, digest) · `events`
 (activity log, pruned after 30/365 days) · `meta_events` (Meta webhooks, 14 days) · `wa_templates` · `jobs`.
 
 ### 10.9b Morning summary, call results, data growth
@@ -328,6 +349,15 @@ lists first); `roleFilter` turns a picked campaign ("none" = on no list) into SQ
 - Lists whose role is not a hiring role (Corporate sales, Win-back, …) start with the candidate pipeline OFF, so no
   Hinglish interview texts reach a corporate contact.
 
+### 10.9e Drafts page and sending controls (24 Oct)
+- Edits save as you type (`PATCH /api/outbox/:id` → `outbox.editDraft`); approve/reject change one card in place, the
+  scroll stays. Each card shows **🕒 Goes out …** (approving keeps a later date) or **⚡ soon after you approve**.
+- Selection like the Board: long-press or ☑ Select; bar pinned at the bottom: ✅ Approve · ✖ Reject · 📝 Note for AI
+  (`/outbox/note-for-ai` → an AI card listing the drafts; the AI uses `edit_draft`) · 🕒 Reschedule
+  (`/outbox/reschedule`, `outbox.reschedule`; past/empty = as soon as possible; sched cards follow) · 📱 Send from
+  (moves at once, `/outbox/move`) · Done. Tapping empty space (not a card or control) ends selection.
+- Pictures for everyone in a list send: `send_to_list(attachment_url)` — each person's message is the caption.
+
 ### 10.10 Debugging recipes
 | Symptom | Look at |
 |---|---|
@@ -340,4 +370,28 @@ lists first); `roleFilter` turns a picked campaign ("none" = on no list) into SQ
 | Follow-ups never go | number setting "Follow-ups not before", daily max, new outreach today, list follow-up on? |
 | "deadlock detected" | two servers overlapping in a deploy — statements are retried automatically now |
 | Wrong number drafted | `send_message` refuses numbers whose chat is elsewhere unless `other_number_ok` |
+| Dashboard says "out of scope" | the open campaign changed on another device or by the AI — any page change follows it; or pick All campaigns |
+| Dashboard is blank | a script error in `public/app.js` — browser console; the "dashboard script parses" test catches syntax errors |
+| A page asks for one campaign but shows another | `roleQ` refuses a `role` that differs from the open campaign — the page passed a stale role |
+| AI tool says "belongs to campaign X … out of scope" | intended: it must pass `campaign="X"` (or "all") to act on purpose |
+| `/mcp/<key>/<campaign>` returns HTML | the old server still answers during a deploy (~1–2 min) — retry |
 | Anything else | Render logs (pino JSON), then reproduce in a test: `npm test` runs the whole hub on PGlite with a fake WhatsApp and a fake Meta server |
+
+### 10.11 How to debug (method that worked here)
+1. **Evidence first, not guesses.** Read-only queries on the live database (`BEGIN READ ONLY`): problems in `events`
+   (grouped, last 3 days), failed outbox rows by error, rows stuck in `sending`, queued rows overdue, duplicate drafts,
+   reply cards whose person already got an answer, duplicate open cards per ref, drafts/cards with no campaign though the
+   person is on a list, pending jobs. Empty = healthy; anything else is a lead.
+2. **One hypothesis per lead**, check it against the data (e.g. "deadlock" happened before the retry fix shipped → fixed).
+3. **Static pass**: `node --check` every file, then ESLint core correctness rules (no-undef, unused vars, dupe keys,
+   unreachable code …) from a throw-away folder (no project dependency).
+4. **Smoke the live system**: every read-only MCP tool with real data (`campaign:"all"` and one campaign) and every
+   GET `/api/*` — any `Error:` or non-200 is a bug (this found the role-vs-"all" bug).
+5. **Reproduce in a test, fix, keep the test** (`test/server.test.js`), then `npm test`.
+6. **UI in a real browser**: a local preview on a throw-away database with sample data, phone and desktop widths;
+   click through the changed pages and read the console. A page reload is needed after code changes (changing only
+   the `#hash` does not reload).
+7. **Verify after deploy**: `/health` shows the new version; re-run the smoke checks.
+Pitfalls met: Express 5 `req.query` is read-only (assignments are lost); scripted text edits with
+`String.replace` turn `$$` into `$` (use a replacer function); shell heredocs break on quotes — write edit scripts
+to a file; Baileys "Disconnected (428/408/503) — reconnecting" warnings are normal churn.
