@@ -17,10 +17,22 @@ cost. Live at **https://zenith-whatsapp-hub.onrender.com** (dashboard, REST API,
 
 **Linked phone** = the hub is a "linked device" of a normal WhatsApp/WhatsApp Business app (like WhatsApp Web).
 Free, keeps the phone working, full history — but WhatsApp blocks numbers that message too many new people, so the
-hub holds them to **≤ 42 new numbers a day (hard max 45), 35 automated messages a day, random 45–120 s gaps**.
+hub holds them to **≤ 42 new numbers a day (hard max 45), 35 automated messages a day to people who never wrote to
+that number, random 45–120 s gaps**. Messages to people who have written before (interested candidates, interview
+follow-ups, guests who replied) don't use the 35 — they have their own ceiling of 150 a day.
+
+**Send order and "send by" times (25 Oct).** Each number sends, whatever the campaign, in this order: replies to people
+who wrote in the last 24 h → your own sends → messages with a **⌛ send by** time (soonest first: festival wishes,
+interview reminders) → people who have written to us before → first messages to new people → nudges to people who
+never replied. Same rank: the one due (or approved) first. A message still unsent at its "send by" time is dropped,
+never sent late. When the daily limit can't fit them in time, Drafts & outbox shows **⚠️ Not enough sending capacity**
+with three choices — 📱 send them from another number, ✖ skip them, ⬆ raise the limit (to the smallest value that fits;
+linked phones never above 45) — and the AI sees it in hub_overview. Each card also shows **≈ goes out about …**.
 
 **Meta API number** = Meta's official business API. No phone app; no ban risk from volume; Meta's own limit
-(250 new people/day now, more after verification and display-name approval). Rules Meta enforces:
+(250 new people/day now, more after verification and display-name approval). Meta's limit counts every person who
+gets a template outside the 24 h reply window — people who replied days ago included — so on the Meta number the
+hub's daily limit counts them all (by unique person). Rules Meta enforces:
 - A person who hasn't written in the last 24 h can only get an **approved template** (first messages, follow-ups).
 - Free text only within 24 h of their last message ("reply window").
 - Each delivered template is **charged** (Marketing ≈ ₹0.86, Utility ≈ ₹0.12 — editable in Settings). Replies
@@ -209,7 +221,7 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
   number and campaign — the incident that led to this rule).
 - A campaign never leaks into another: the dashboard refuses actions outside the open campaign; the AI must name another
   campaign on purpose (`campaign="…"` / `"all"`).
-- Tests: `npm test` (107 end-to-end tests, one of which calls every one of the 60 AI tools, including a fake Meta server;
+- Tests: `npm test` (108 end-to-end tests, one of which calls every one of the 60 AI tools, including a fake Meta server;
   one checks that the dashboard script parses — a syntax error there blanks the whole dashboard).
 
 ---
@@ -253,10 +265,23 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
    mode); rule = auto-replies (pre-approved). Each row stores its campaign in `outbox.role`.
 2. Drafts wait for **approve** (`approve`, `approveAll`, `approveTask`). Approving a free-text draft on a Meta
    number after the 24 h window closed is refused with the reason.
-3. The sender loop (`startWorker → tick`) claims ONE row atomically (`FOR UPDATE SKIP LOCKED`), in this order:
-   replies to people who wrote in 24 h, then priority, then age. It holds back automated rows outside sending hours,
-   over the daily cap, during the random gap, follow-ups on days with new outreach, and new numbers over the
-   new-number limit. `queueStatus` explains the current hold in words (hub_overview "sending: held — …").
+3. The sender loop (`startWorker → tick`) claims ONE row atomically (`FOR UPDATE SKIP LOCKED`) in `SEND_ORDER`:
+   rank (`SEND_RANK`: 1 reply in 24 h · 2 yours (priority ≥ 10) · 3 has `expires_at` · 4 warm (`IS_WARM`: they
+   have ever written to this number) or pipeline (priority 5) · 5 cold · 6 `note = 'follow-up'` nudge), then
+   `expires_at`, `scheduled_at`, id. Limits (`sent24h`, rolling 24 h): **cold** automated rows → `dailyCap`;
+   **warm** rows on linked phones → `warmDailyCap` (150; the claim stores `is_warm`); Meta numbers count every
+   non-reply row against `dailyCap`, by distinct person (Meta's own rule). It also holds rows outside sending hours,
+   during the random gap, follow-ups on days with new outreach, new numbers over the new-number limit, and never
+   claims a row past `expires_at`. `queueStatus` explains the current hold in words (hub_overview "sending: held — …").
+   - **Send by**: `expires_at` (enqueue/bulkSend/sendToList `expiresAt`, MCP `expires_at`, REST `expiresAt`,
+     reschedule can set/clear it). Visit reminders get the interview time automatically. `expireDue` (each worker,
+     once a minute, even when the number is offline) turns overdue drafts/queued rows into `rejected` "Expired: …"
+     and logs a warning. Approving an expired draft is refused; rescheduling past a deadline is refused.
+   - **Capacity forecast** (`capacityForecast`, `GET /api/outbox/capacity`): replays the unsent automated rows in
+     send order (drafts as if approved now) through the rolling windows (cold, warm, new numbers), sending hours,
+     WhatsApp's new-chat block and the average gap → an ETA per row, `atRisk` (ETA ≥ `expires_at`), and `raiseTo`
+     (smallest `dailyCap` that fits them; linked ≤ 45, Meta ≤ its tier). Every 10 min the worker logs a warning if
+     anything is at risk; hub_overview prints "⚠ NOT ENOUGH CAPACITY …".
 4. `session.send` sends; the row becomes `sent` (with `message_id`) or `failed` (with the reason).
    Meta: a delivery failure arrives later by webhook (`cloud.js onCloudStatus`) and turns `sent` into `failed`;
    codes marked retry in `graph.js META_HELP` (e.g. 131049) are queued again after 25 h (max 2), and dropped if the
@@ -356,6 +381,11 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
   (`/outbox/note-for-ai` → an AI card listing the drafts; the AI uses `edit_draft`) · 🕒 Reschedule
   (`/outbox/reschedule`, `outbox.reschedule`; past/empty = as soon as possible; sched cards follow) · 📱 Send from
   (moves at once, `/outbox/move`) · Done. Tapping empty space (not a card or control) ends selection.
+- **⌛ Send by** on cards (red when it won't fit), **≈ goes out about …** (forecast ETA when more than 30 min away), the
+  Reschedule dialog has an optional "Send by". **⚠️ Not enough sending capacity** cards above the list: 👀 Show them
+  (list filtered to those ids, already ticked), 📱 Send them from…, ✖ Skip them, ⬆ Raise limit to N (with the
+  block-risk warning on linked phones). In a campaign view the card counts that campaign's messages and says how many
+  more are in other campaigns.
 - Pictures for everyone in a list send: `send_to_list(attachment_url)` — each person's message is the caption.
 
 ### 10.10 Debugging recipes
@@ -371,6 +401,8 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
 | "deadlock detected" | two servers overlapping in a deploy — statements are retried automatically now |
 | Wrong number drafted | `send_message` refuses numbers whose chat is elsewhere unless `other_number_ok` |
 | Dashboard says "out of scope" | the open campaign changed on another device or by the AI — any page change follows it; or pick All campaigns |
+| A message waits although "only 10 sent today" | it is cold (never wrote to this number) and the cold limit counts the last 24 h, not the calendar day; or a higher-ranked message is ahead (send order) — Drafts shows ≈ when it goes |
+| A festival wish was "rejected — Expired" | it had a "send by" time and the number's limit could not fit it in time (a warning showed beforehand) |
 | Dashboard is blank | a script error in `public/app.js` — browser console; the "dashboard script parses" test catches syntax errors |
 | A page asks for one campaign but shows another | `roleQ` refuses a `role` that differs from the open campaign — the page passed a stale role |
 | AI tool says "belongs to campaign X … out of scope" | intended: it must pass `campaign="X"` (or "all") to act on purpose |

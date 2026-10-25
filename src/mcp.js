@@ -85,7 +85,11 @@ async function sendingLine(a) {
   try {
     const q = await outbox.queueStatus(a.id);
     const parts = [` | sending: ${q.state}${q.reason ? ' — ' + q.reason : ''}${q.until ? ' until ' + fmtTime(Math.floor(new Date(q.until).getTime() / 1000)) : ''}`,
-      `${q.queued} queued, ${q.drafts} drafts, automated ${q.automated24h}/${q.dailyCap} in 24 h`];
+      `${q.queued} queued, ${q.drafts} drafts, to people who never wrote ${q.automated24h}/${q.dailyCap} in 24 h${q.warmDailyCap != null ? `, to people who wrote before ${q.warm24h}/${q.warmDailyCap}` : ''}`];
+    const f = await outbox.capacityForecast(a.id).catch(() => null);
+    if (f?.atRisk.length) {
+      parts.push(`⚠ NOT ENOUGH CAPACITY: ${f.atRisk.length} message(s) with a "send by" time would miss it (#${f.atRisk.slice(0, 10).map((m) => m.id).join(', #')}) — tell the owner; options: move_messages to another number, reject them, or raise this number's daily limit${f.raiseTo ? ` to ${f.raiseTo}` : ''} (owner decides)`);
+    }
     if (a.provider === 'cloud') {
       const nc = q.newChats;
       const pr = await getPricing();
@@ -227,7 +231,7 @@ function buildServer(playbook = '', focus = '') {
 
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who have written to us before (interested candidates, interview follow-ups) → first messages to new people → nudges to non-repliers. Only messages to people who never wrote count toward a linked number's daily limit. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
   const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter for this call: a campaign name, "none" (hotel / no campaign) or "all". Default: ${focus ? `"${focus}" (the campaign the owner has open)` : 'all campaigns'}.`);
   const tool = (name, description, inputSchema, fn) => {
@@ -551,6 +555,7 @@ function buildServer(playbook = '', focus = '') {
       buttons: z.array(z.string()).max(3).optional().describe('Up to 3 tap-to-reply answers, e.g. ["Haan, aaunga","Nahi"] (≤20 chars). Meta numbers show buttons; linked numbers list them as "Reply: …"'),
       schedule_at: z.string().optional().describe('Send later: "YYYY-MM-DD HH:MM" (India time) or ISO. It shows on the Board as "Scheduled: …" until it goes out. In approve mode the owner still approves it first.'),
       other_number_ok: z.boolean().optional().describe('Only if the owner asked: start a chat on this number although the person already chats with another number'),
+      expires_at: z.string().optional().describe('"Send by": if it has not gone out by this time ("YYYY-MM-DD HH:MM" owner time or ISO) it is dropped — set it for anything tied to a day (festival / birthday wishes, offers ending, reminders before an interview). Such messages go out before other outreach; the hub warns the owner if the number\'s daily limit can\'t fit them in time.'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
@@ -564,6 +569,7 @@ function buildServer(playbook = '', focus = '') {
         }
       }
       const scheduledAt = localTime(a.schedule_at) || undefined;
+      const expiresAt = localTime(a.expires_at) || null;
       if (s.isCloud && !a.wa_template) {
         const w = await s.windowFor(jid);
         if (w.open && scheduledAt && w.closesAt && new Date(scheduledAt) > new Date(w.closesAt)) {
@@ -573,7 +579,7 @@ function buildServer(playbook = '', focus = '') {
       }
       if (a.wa_template) {
         const vars = await import('./templates.js').then((t) => t.contactFields(s.id, jid));
-        const row = await outbox.enqueue({ account: s.id, to: jid, payload: { waTemplate: outbox.fillWaTemplate(a.wa_template, vars) }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt, role: a._c && !scope.same(a._c, 'none') ? a._c : null });
+        const row = await outbox.enqueue({ account: s.id, to: jid, payload: { waTemplate: outbox.fillWaTemplate(a.wa_template, vars) }, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt, expiresAt, role: a._c && !scope.same(a._c, 'none') ? a._c : null });
         if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
         await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} Meta template "${a.wa_template.name}" #${row.id} to ${jid.split('@')[0]}${a.note ? ` — ${a.note}` : ''}`);
         return `${row.status === 'draft' ? 'Draft' : 'Queued'} #${row.id} (Meta template "${a.wa_template.name}"): "${trim(row.payload.text, 200)}"`;
@@ -587,7 +593,7 @@ function buildServer(playbook = '', focus = '') {
         attachment = attachment || r.payload.attachment;
       }
       const payload = { text, attachment, ...(a.reply_to_message_id ? { replyTo: a.reply_to_message_id } : {}), ...(a.buttons?.length && !attachment ? { buttons: a.buttons } : {}) };
-      const row = await outbox.enqueue({ account: s.id, to: jid, payload, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt, role: a._c && !scope.same(a._c, 'none') ? a._c : null });
+      const row = await outbox.enqueue({ account: s.id, to: jid, payload, source: 'mcp', note: a.note, taskId: a.task_id, idemKey: a.idempotency_key, scheduledAt, expiresAt, role: a._c && !scope.same(a._c, 'none') ? a._c : null });
       if (row.duplicate) return `Already handled earlier as #${row.id} (${row.status}) — not sent again.`;
       const later = scheduledAt ? ` for ${d(scheduledAt)}` : '';
       await ai(s.id, `${row.status === 'draft' ? 'Drafted' : 'Queued'} message #${row.id} to ${jid.split('@')[0]}${later}${a.note ? ` — ${a.note}` : ''}`);
@@ -634,7 +640,7 @@ function buildServer(playbook = '', focus = '') {
     const rows = await outbox.listOutbox({ account: a.account, status: a.status || 'draft,queued,failed', limit: a.limit || 20, role: a.campaign });
     const p = await priceRows(rows, manager);
     return rows.length
-      ? rows.map((r, i) => `#${r.id} | ${r.account_id} | ${r.status}${['draft', 'queued'].includes(r.status) && new Date(r.scheduled_at) > new Date(Date.now() + 60000) ? ` (for ${d(r.scheduled_at)})` : ''}${r.campaign ? ` | ${r.campaign}` : ''} | ${money(p.items[i].price, p.currency)} | ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${trim(r.payload.text || r.payload.attachment?.caption || '[file]', 100)}${r.error ? ` | error: ${r.error}${helpFor(r.error)}` : ''}`).join('\n')
+      ? rows.map((r, i) => `#${r.id} | ${r.account_id} | ${r.status}${['draft', 'queued'].includes(r.status) && new Date(r.scheduled_at) > new Date(Date.now() + 60000) ? ` (for ${d(r.scheduled_at)})` : ''}${r.expires_at && ['draft', 'queued'].includes(r.status) ? ` (send by ${d(r.expires_at)})` : ''}${r.campaign ? ` | ${r.campaign}` : ''} | ${money(p.items[i].price, p.currency)} | ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${trim(r.payload.text || r.payload.attachment?.caption || '[file]', 100)}${r.error ? ` | error: ${r.error}${helpFor(r.error)}` : ''}`).join('\n')
         + `\nTotal of these: ${money(p.total, p.currency)}`
       : 'Nothing.';
   });
@@ -660,11 +666,13 @@ function buildServer(playbook = '', focus = '') {
     return `#${a.id} rejected.`;
   });
 
-  tool('reschedule_messages', 'Give unsent messages (drafts or approved, ids from list_outbox) a new send time when the owner asks — e.g. "send these on Monday 10:00". Drafts stay drafts; approved ones wait until then. Sending hours, gaps and daily limits still apply.', {
+  tool('reschedule_messages', 'Give unsent messages (drafts or approved, ids from list_outbox) a new send time when the owner asks — e.g. "send these on Monday 10:00". Drafts stay drafts; approved ones wait until then. Sending hours, gaps and daily limits still apply. Can also set or clear the "send by" time (expires_at).', {
     ids: z.array(z.number().int()).min(1), at: z.string().describe('"YYYY-MM-DD HH:MM" (owner time zone) or ISO; "now" = as soon as possible'),
+    expires_at: z.string().optional().describe('New "send by" time (dropped if not sent by then); "none" removes it; leave out to keep each message\'s own'),
   }, async (a) => {
     await scope.assertDrafts(a._c, a.ids);
-    const r = await outbox.reschedule(a.ids, /^now$/i.test(a.at.trim()) ? null : localTime(a.at));
+    const opt = a.expires_at === undefined ? {} : { expiresAt: /^none$/i.test(a.expires_at.trim()) ? null : localTime(a.expires_at) };
+    const r = await outbox.reschedule(a.ids, /^now$/i.test(a.at.trim()) ? null : localTime(a.at), opt);
     for (const [acc, n] of Object.entries(r.perAccount)) await ai(acc, `Rescheduled ${n} message(s) to ${d(r.at)}`);
     return `${r.rescheduled} message(s) now go out ${d(r.at)}${r.skipped ? ` (${r.skipped} could not be moved — already sent, failed or rejected)` : ''}.`;
   });
@@ -999,11 +1007,12 @@ function buildServer(playbook = '', focus = '') {
     text: z.string().optional(), template: z.string().optional(), only_phones: z.array(z.string()).optional(),
     wa_template: waTemplateArg.describe('Meta Cloud API numbers: the approved Meta template for people who have not written in 24 h (all first messages)'),
     schedule_at: z.string().optional().describe('Start sending at this time ("YYYY-MM-DD HH:MM", owner time zone, or ISO); default now'),
+    expires_at: z.string().optional().describe('"Send by": if it has not gone out by this time ("YYYY-MM-DD HH:MM" owner time or ISO) it is dropped — set it for anything tied to a day (festival / birthday wishes, offers ending, reminders before an interview). Such messages go out before other outreach; the hub warns the owner if the number\'s daily limit can\'t fit them in time.'),
     attachment_url: z.string().optional().describe('Image/file sent with every message (each person’s message becomes its caption), e.g. a poster URL'),
     file_name: z.string().optional(),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, waTemplate: a.wa_template, onlyPhones: a.only_phones, attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : undefined, createdBy: 'ai', source: 'mcp', scheduledAt: localTime(a.schedule_at) || undefined });
+    const r = await lists.sendToList(l.id, { statuses: a.statuses, text: a.text, template: a.template, waTemplate: a.wa_template, onlyPhones: a.only_phones, attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : undefined, createdBy: 'ai', source: 'mcp', scheduledAt: localTime(a.schedule_at) || undefined, expiresAt: localTime(a.expires_at) || undefined });
     await ai(l.account_id, `List "${l.name}": ${r.queued} messages ${r.mode === 'approve' ? 'drafted' : 'queued'}`, l.role);
     const skipped = r.skipped.length ? ` Skipped: ${r.skipped.map((x) => x.to + ' (' + x.reason + ')').join('; ')}` : '';
     const cost = r.task ? await taskCostText(r.task.id) : '';
@@ -1358,9 +1367,10 @@ function buildServer(playbook = '', focus = '') {
       skip_if_contacted_days: z.number().int().min(0).optional().describe('Default 30; 0 = do not skip'),
       idempotency_key: z.string().optional().describe('Optional unique key, e.g. sheet name + date; repeating it never creates a second bulk send'),
       wa_template: waTemplateArg.describe('Required on Meta Cloud API numbers: the approved Meta template (params may use {name} etc.)'),
+      expires_at: z.string().optional().describe('"Send by": if it has not gone out by this time ("YYYY-MM-DD HH:MM" owner time or ISO) it is dropped — set it for anything tied to a day (festival / birthday wishes, offers ending, reminders before an interview). Such messages go out before other outreach; the hub warns the owner if the number\'s daily limit can\'t fit them in time.'),
     },
     async (a) => {
-      const r = await outbox.bulkSend({
+      const r = await outbox.bulkSend({ expiresAt: localTime(a.expires_at) || null,
         account: a.account, title: a.title, details: a.details, text: a.text, template: a.template, waTemplate: a.wa_template, recipients: a.recipients,
         attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : undefined,
         scheduledAt: localTime(a.schedule_at) || undefined, source: 'mcp', createdBy: 'ai',

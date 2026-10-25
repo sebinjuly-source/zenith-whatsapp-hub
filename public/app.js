@@ -1648,14 +1648,17 @@
     if (!state.accounts.length) await loadAccounts();
     const help = await metaHelpTable();
     const acc = state.outboxAccount || '';
-    const rows = await api(`/api/outbox?limit=200${tab === 'all' ? '' : `&status=${tab}`}${state.outboxTask ? `&task=${state.outboxTask}` : ''}${acc ? `&account=${encodeURIComponent(acc)}` : ''}${state.campaign ? `&role=${encodeURIComponent(state.campaign)}` : ''}`);
+    const only = state.outboxIds;
+    const rows = await api(`/api/outbox?limit=200${only ? `&ids=${only.join(',')}` : tab === 'all' ? '' : `&status=${tab}`}${state.outboxTask ? `&task=${state.outboxTask}` : ''}${acc ? `&account=${encodeURIComponent(acc)}` : ''}${state.campaign ? `&role=${encodeURIComponent(state.campaign)}` : ''}`);
+    // estimated send time of each message, and the ones that won't fit before their "send by" time
+    const capacity = await api(`/api/outbox/capacity${acc ? '?account=' + encodeURIComponent(acc) : ''}`).catch(() => []);
     const labelOf = (id) => state.accounts.find((a) => a.id === id)?.label || id;
     const numberPick = h('div', { class: 'seg', style: 'max-width:640px;margin-bottom:10px' },
       [['', 'All numbers'], ...state.accounts.map((a) => [a.id, `${a.label}${a.phone ? ' · +' + a.phone : ''}`])].map(([k, l]) =>
         h('button', { class: acc === k ? 'on' : '', onclick: () => { state.outboxAccount = k; viewOutbox(); } }, l)));
     const tabs = h('div', { class: 'seg', style: 'max-width:520px;margin-bottom:16px' },
       [['draft', 'Drafts'], ['queued', 'Queued'], ['sent', 'Sent'], ['failed,rejected', 'Failed / rejected'], ['all', 'All']].map(([k, l]) =>
-        h('button', { class: tab === k ? 'on' : '', onclick: () => { state.outboxTab = k; viewOutbox(); } }, l)));
+        h('button', { class: tab === k ? 'on' : '', onclick: () => { state.outboxTab = k; state.outboxIds = null; viewOutbox(); } }, l)));
     // Selection works like the Board: long-press a card (or tap ☑ Select) to start; then tap cards to tick them.
     // The bar with the actions stays at the bottom of the screen, so cards far down can be ticked and acted on.
     const movable = (r) => r.status === 'draft' || r.status === 'queued';
@@ -1718,6 +1721,22 @@
     };
     const later = (r) => r.scheduled_at && new Date(r.scheduled_at) - Date.now() > 60000;
     const whenLong = (t) => new Date(t).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', year: new Date(t).getFullYear() === new Date().getFullYear() ? undefined : 'numeric', hour: '2-digit', minute: '2-digit' });
+    const etas = {};
+    const risky = new Set();
+    for (const f of capacity) Object.assign(etas, f.etas || {});
+    for (const f of capacity) for (const m of f.atRisk) risky.add(m.id);
+    const sendBy = (r) => (r.expires_at && ['draft', 'queued'].includes(r.status)
+      ? h('div', { class: 'tag', style: `margin:4px 0;${risky.has(r.id) ? 'background:var(--bad);color:#fff' : ''}`, title: 'If it has not gone out by then, it is dropped (not sent late)' },
+          '⌛ Send by ', h('b', {}, whenLong(r.expires_at)), risky.has(r.id) ? ' — won’t fit the daily limit in time' : '')
+      : null);
+    const etaTag = (r) => {
+      const e = etas[r.id];
+      if (!['draft', 'queued'].includes(r.status) || !(r.id in etas)) return null;
+      if (!e) return h('div', { class: 'muted', style: 'font-size:12px;margin:2px 0' }, '≈ no free slot in the next 30 days with the current limits');
+      return new Date(e) - Date.now() > 30 * 60000
+        ? h('div', { class: 'muted', style: 'font-size:12px;margin:2px 0', title: 'Estimate from the send order and this number’s limits (drafts as if approved now)' }, `≈ goes out about ${whenLong(e)} (limits)`)
+        : null;
+    };
     const dueTag = (r) => (!['draft', 'queued'].includes(r.status) ? null
       : later(r)
         ? h('div', { class: 'tag', style: 'margin:4px 0;background:var(--accent-soft);color:var(--ink)', title: 'Approving does not send it early — it waits until this time' },
@@ -1731,7 +1750,11 @@
       const tomorrow10 = new Date(Date.now() + 86400000);
       tomorrow10.setHours(10, 0, 0, 0);
       const input = h('input', { type: 'datetime-local', name: 'at', required: true, value: localInput(first ? new Date(first.scheduled_at) : tomorrow10), min: localInput(new Date()) });
-      const finish = (v) => { back.remove(); resolve(v); };
+      const bys = [...new Set(list.map((r) => r.expires_at || ''))];
+      const byStart = bys.length === 1 && bys[0] ? localInput(new Date(bys[0])) : '';
+      const by = h('input', { type: 'datetime-local', name: 'by', value: byStart, min: localInput(new Date()) });
+      // only a changed "send by" is sent (several messages with different ones keep theirs)
+      const finish = (v) => { back.remove(); resolve(v && by.value !== byStart ? { at: v, expiresAt: by.value ? new Date(by.value).toISOString() : null } : v && { at: v }); };
       const quick = (label, d) => h('button', { class: 'btn small', type: 'button', onclick: () => { input.value = localInput(d); } }, label);
       const at = (days, hh, mm = 0) => { const d = new Date(Date.now() + days * 86400000); d.setHours(hh, mm, 0, 0); return d; };
       const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && finish(null) },
@@ -1743,6 +1766,8 @@
             list.length > 1 ? ' Several messages go out one after another from then, with the usual gap and daily limit.' : '',
             ' Outside the number’s sending days and hours (Settings) they wait for its next sending time.'),
           h('label', { class: 'field' }, h('span', {}, 'New day and time'), input),
+          h('label', { class: 'field' }, h('span', {}, '⌛ Send by (optional)'), by,
+            h('small', { class: 'muted' }, bys.length > 1 ? 'They have different "send by" times — leave empty to keep each one’s. ' : '', 'Festival wishes, offers, reminders: if not sent by then, they are dropped, and they go out before other outreach. The hub warns you when the daily limit can’t fit them.')),
           h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;margin:4px 0 10px' },
             quick('Tomorrow 10:00', at(1, 10)), quick('Tomorrow 18:00', at(1, 18)), quick('In 2 days 10:00', at(2, 10)), quick('Next week 10:00', at(7, 10))),
           h('div', { class: 'row', style: 'justify-content:space-between;flex-wrap:wrap;gap:6px' },
@@ -1758,7 +1783,9 @@
       await Promise.all(list.map((x) => x.saveNow?.()));
       const v = await askWhen(list);
       if (!v) return false;
-      const r = await api('/api/outbox/reschedule', { body: { ids: list.map((x) => x.id), at: v === 'now' ? null : v } });
+      const body = { ids: list.map((x) => x.id), at: v.at === 'now' ? null : v.at };
+      if ('expiresAt' in v) body.expiresAt = v.expiresAt;
+      const r = await api('/api/outbox/reschedule', { body });
       toast(`🕒 ${r.rescheduled} message${r.rescheduled > 1 ? 's' : ''} now go${r.rescheduled > 1 ? '' : 'es'} out ${later({ scheduled_at: r.at }) ? whenLong(r.at) : 'as soon as possible'}${r.skipped ? ` — ${r.skipped} could not be moved` : ''}`);
       return true;
     };
@@ -1825,7 +1852,9 @@
           : r.price_category === 'service' && r.window_closes_at && ['draft', 'queued'].includes(r.status)
             ? h('div', { class: 'tag', style: `margin:4px 0;${new Date(r.window_closes_at) - Date.now() < 4 * 3600e3 ? 'background:var(--warn-soft);color:var(--ink)' : ''}` }, '⏳ Free until ', new Date(r.window_closes_at).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }), ' — after that it cannot be sent as text')
             : null,
+        sendBy(r),
         dueTag(r),
+        etaTag(r),
         r.note ? h('p', { class: 'muted', style: 'margin:6px 0' }, 'Why: ', r.note) : null,
         r.payload.waTemplate ? h('p', { style: 'margin:6px 0' }, h('span', { class: 'tag' }, `Meta template: ${r.payload.waTemplate.name}`)) : null,
         r.preview_image ? h('a', { href: r.preview_image.startsWith('data:') ? undefined : r.preview_image, target: '_blank', rel: 'noopener', title: 'Image the person will receive' },
@@ -1944,6 +1973,39 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
         viewOutbox({ keepScroll: true });
       }) }, `Approve these ${drafts.length}`)) : null;
     const statuses = await api(`/api/outbox/status${acc ? '?account=' + encodeURIComponent(acc) : ''}`).catch(() => []);
+    // Not enough capacity for messages that must go out by a time: the owner decides — another number, skip, or a higher limit
+    const capacityCards = capacity.filter((f) => f.atRisk.length || f.otherCampaigns).map((f) => {
+      const ids = f.atRisk.map((m) => m.id);
+      const firstBy = f.atRisk.map((m) => m.expires_at).sort()[0];
+      const others = state.accounts.filter((a) => a.id !== f.account);
+      const pickTo = h('select', { 'aria-label': 'Send them from another number' }, h('option', { value: '' }, '📱 Send them from…'), ...others.map((a) => h('option', { value: a.id }, `${a.label}${a.phone ? ' · +' + a.phone : ''}`)));
+      pickTo.addEventListener('change', async () => {
+        if (!pickTo.value) return;
+        await moveTo(ids, pickTo.value);
+      });
+      return h('div', { class: 'card', style: 'max-width:820px;margin-bottom:10px;border-left:4px solid var(--bad)' },
+        h('b', {}, `⚠️ Not enough sending capacity on ${f.label}`),
+        f.atRisk.length ? h('p', { style: 'margin:6px 0' },
+          `${f.atRisk.length} message${f.atRisk.length > 1 ? 's' : ''} with a “send by” time won’t go out in time with the current daily limit (${f.dailyCap} a day to people who never wrote to this number)${firstBy ? ` — the first must go by ${whenLong(firstBy)}` : ''}: `,
+          f.atRisk.slice(0, 6).map((m) => m.name || '+' + m.to).join(', '), f.atRisk.length > 6 ? ` and ${f.atRisk.length - 6} more` : '', '.') : null,
+        f.otherCampaigns ? h('p', { class: 'muted', style: 'margin:4px 0;font-size:12px' }, `${f.otherCampaigns} more in other campaigns on this number — pick “All campaigns” to see them.`) : null,
+        f.atRisk.length ? h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;margin-top:6px' },
+          h('button', { class: 'btn small', onclick: () => { state.outboxIds = ids; state.outboxSelecting = true; state.outboxPicked = new Set(ids); viewOutbox(); } }, '👀 Show them'),
+          pickTo,
+          h('button', { class: 'btn small', onclick: async () => {
+            if (!confirm(`Skip these ${ids.length} messages? They are rejected and not sent.`)) return;
+            const r = await api('/api/outbox/reject-selected', { body: { ids } });
+            toast(`Skipped ${r.rejected}`);
+            viewOutbox({ keepScroll: true });
+          } }, '✖ Skip them'),
+          f.raiseTo ? h('button', { class: 'btn small', onclick: async () => {
+            if (!confirm(`Raise ${f.label}'s daily limit from ${f.dailyCap} to ${f.raiseTo}?${f.cloud ? '' : `\n\nThis is a linked phone: more first messages a day means more risk of a WhatsApp block (a number was blocked after 48 new numbers in a day; the hub never goes above ${f.maxSafe}). You can lower it again afterwards.`}`)) return;
+            await api(`/api/accounts/${encodeURIComponent(f.account)}`, { method: 'PATCH', body: { settings: { dailyCap: f.raiseTo, ...(f.cloud ? {} : { newChatsPer24h: Math.max(state.accounts.find((a) => a.id === f.account)?.settings?.newChatsPer24h || 0, Math.min(f.raiseTo, f.maxSafe)) }) } } });
+            await loadAccounts(true);
+            toast(`${f.label}: daily limit now ${f.raiseTo}`);
+            viewOutbox({ keepScroll: true });
+          } }, `⬆ Raise limit to ${f.raiseTo}`) : h('span', { class: 'muted', style: 'font-size:12px;align-self:center' }, f.cloud ? 'Meta’s own daily limit is reached — use another number or skip.' : `Even ${f.maxSafe} a day (the safe maximum) isn’t enough — use another number or skip.`)) : null);
+    });
     const when = (t) => (t ? new Date(t).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '');
     const statusCards = statuses.filter((q) => q.queued || q.drafts).map((q) => h('div', { class: 'card', style: `max-width:820px;margin-bottom:10px;border-left:4px solid ${q.state === 'held' ? 'var(--bad)' : 'var(--accent)'}` },
       h('div', { class: 'row', style: 'align-items:center;flex-wrap:wrap;gap:6px' },
@@ -1955,12 +2017,14 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
         q.state === 'held' ? q.reason : (q.reason ? `${q.reason} (next about ${when(q.until)}). ` : 'next message any moment. '),
         q.state === 'held' && q.until ? ` — continues about ${when(q.until)}.` : '') : null,
       q.queued ? h('p', { class: 'muted', style: 'margin:4px 0 0;font-size:12px' },
-        `One every ${q.gapSec[0]}–${q.gapSec[1]} s · automated ${q.automated24h}/${q.dailyCap} and new numbers ${q.newChats.count}/${q.newChats.limit} in the last 24 h · at most ${q.perDay} a day → about ${q.days} day${q.days === 1 ? '' : 's'} for these ${q.queued}.`) : null));
+        `One every ${q.gapSec[0]}–${q.gapSec[1]} s · last 24 h: to people who never wrote ${q.automated24h}/${q.dailyCap}${q.warmDailyCap != null ? `, to people who wrote before ${q.warm24h}/${q.warmDailyCap}` : ''}, new numbers ${q.newChats.count}/${q.newChats.limit}${q.queuedCold ? ` · ${q.queuedCold} of these wait for the daily limit (${q.perDay} a day → about ${q.days} day${q.days === 1 ? '' : 's'})` : ' · none of these use the daily limit'}.`) : null));
     shell([
       h('h1', {}, 'Drafts & outbox'),
       state.outboxTask ? h('p', {}, `Showing messages of task #${state.outboxTask} · `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); state.outboxTask = null; viewOutbox(); } }, 'show all')) : null,
       h('p', { class: 'sub' }, 'Messages written by AI or campaigns wait here when a number is in approval mode. Edit, approve, reject, or move them to another number.'),
       numberPick,
+      capacityCards,
+      only ? h('p', {}, `Showing the ${only.length} messages that won’t fit in time · `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); state.outboxIds = null; viewOutbox(); } }, 'show all')) : null,
       statusCards,
       tabs,
       approveAllBar,
@@ -1979,7 +2043,7 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
 
   // ---------- settings ----------
   // "All numbers" = the defaults every number follows, except settings a number has changed itself (marked "own").
-  const SETTING_LABEL = { aiMode: 'Approval', delayMinSec: 'Delay from', delayMaxSec: 'Delay to', typing: 'Typing', anytime: 'Any time', dailyCap: 'Automated per 24 h',
+  const SETTING_LABEL = { aiMode: 'Approval', delayMinSec: 'Delay from', delayMaxSec: 'Delay to', typing: 'Typing', anytime: 'Any time', dailyCap: 'To new / never-replied per 24 h', warmDailyCap: 'To people who wrote per 24 h',
     newChatsPer24h: 'New numbers per 24 h', sendStart: 'Send from', sendEnd: 'Send until', sendDays: 'Days', followupStart: 'Follow-ups from', followupDailyMax: 'Follow-ups per day',
     storeGroups: 'Store groups', autosaveImages: 'Save images', autosaveDocuments: 'Save documents', autosaveKnownOnly: 'Only known people', autosaveMaxMb: 'Max file size',
     optOutWords: 'Opt-out words', webhookUrl: 'Notify URL' };
@@ -2011,6 +2075,7 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
       typing: fd.typing.checked,
       anytime: fd.anytime.checked,
       dailyCap: +fd.dailyCap.value,
+      ...(fd.warmDailyCap ? { warmDailyCap: +fd.warmDailyCap.value } : {}),
       newChatsPer24h: +fd.newChatsPer24h.value,
       followupStart: fd.followupStart.value,
       followupDailyMax: +fd.followupDailyMax.value,
@@ -2062,7 +2127,10 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
           cloud
             ? f('newChatsPer24h', 'New numbers per 24 hours', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 1000, value: s.newChatsPer24h }), 'Meta number: Meta allows 250 new people a day now (more after verification).')
             : f('newChatsPer24h', 'New numbers per 24 hours (safety limit)', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 45, value: s.newChatsPer24h }), 'Hard maximum 45 for linked phones (a number was blocked by WhatsApp after 48 in one day).'),
-          f('dailyCap', 'Automated messages per 24 hours', h('input', { type: 'number', name: 'dailyCap', min: 0, value: s.dailyCap }), '0 pauses all automated sending. Your own sends are not counted.'),
+          f('dailyCap', 'Daily limit: AI/campaign messages to people who never wrote to this number (per 24 hours)', h('input', { type: 'number', name: 'dailyCap', min: 0, value: s.dailyCap }), cloud
+            ? 'Meta number: every message outside the 24 h reply window counts here (Meta counts them all). 0 pauses automated sending. Your own sends are not counted.'
+            : 'Cold outreach only — follow-ups to people who have written to you use the limit below. 0 pauses it. Your own sends are not counted.'),
+          cloud ? null : f('warmDailyCap', 'AI/campaign messages to people who have written to this number (per 24 hours)', h('input', { type: 'number', name: 'warmDailyCap', min: 0, max: 1000, value: s.warmDailyCap ?? 150 }), 'Interested candidates, interview follow-ups, guests who replied. A safety ceiling — rarely reached.'),
           sw('anytime', 'Send at any time', 'Day and night, every day. Turn off to use the hours below.'),
           h('details', { class: 'fold' }, h('summary', {}, 'Delay, hours, days, follow-ups'),
             h('div', { class: 'row', style: 'margin-top:8px' },

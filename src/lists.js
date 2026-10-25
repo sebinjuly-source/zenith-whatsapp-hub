@@ -452,7 +452,7 @@ export async function runPipeline() {
     try {
       const woke = new Set();
       // true = queued, false = number offline (try again later), 'manual' = can't message now (Meta 24 h rule) → task for you
-      const send = async (m, text, note, waTemplate) => {
+      const send = async (m, text, note, waTemplate, expiresAt = null) => {
         const acc = await chatAccountFor(list, m.jid);
         const session = manager.sessions.get(acc);
         if (session?.status !== 'open') return false;
@@ -465,8 +465,8 @@ export async function runPipeline() {
           return 'manual';
         }
         await query(
-          `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, list_id) VALUES ($1,$2,$3,'campaign',$4,5,$5,$6)`,
-          [acc, m.jid, JSON.stringify(r.payload), approve ? 'draft' : 'queued', note, list.id],
+          `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, list_id, expires_at) VALUES ($1,$2,$3,'campaign',$4,5,$5,$6,$7)`,
+          [acc, m.jid, JSON.stringify(r.payload), approve ? 'draft' : 'queued', note, list.id, expiresAt],
         );
         woke.add(acc);
         return true;
@@ -510,7 +510,8 @@ export async function runPipeline() {
         }
         const note = sameDay ? 'visit-reminder-today' : 'visit-reminder';
         const text = sameDay ? (p.sameDayReminderText || p.reminderText) : p.reminderText;
-        if (!(await send(m, text, note, p.reminderWaTemplate))) continue;
+        // a reminder is useless once the interview time has come: it must go out before it
+        if (!(await send(m, text, note, p.reminderWaTemplate, m.visit_at))) continue;
         reminded++;
         // an evening reminder makes the same-day one due only on the day; once on the day, both count as done
         await query(`UPDATE list_members SET ${which} = now()${sameDay ? ', reminded_at = COALESCE(reminded_at, now())' : ''} WHERE list_id = $1 AND jid = $2`, [list.id, m.jid]);
@@ -577,9 +578,11 @@ export async function setFollowup(listId, settings) {
  * Message the members with the given statuses (default: new + failed). Each gets their own prepared message
  * from the list (column "message") unless a text/template is given. One board task per call.
  */
-export async function sendToList(listId, { statuses = ['new', 'failed'], text, template, waTemplate, onlyPhones, attachment, createdBy = 'you', source = 'campaign', scheduledAt } = {}) {
+export async function sendToList(listId, { statuses = ['new', 'failed'], text, template, waTemplate, onlyPhones, attachment, createdBy = 'you', source = 'campaign', scheduledAt, expiresAt } = {}) {
   const at = scheduledAt ? new Date(scheduledAt) : null;
   if (at && isNaN(at)) throw new Error('scheduledAt is not a valid date/time');
+  const until = expiresAt ? new Date(expiresAt) : null;
+  if (until && (isNaN(until) || until <= (at || new Date()))) throw new Error('expiresAt ("send by") must be a valid time after the send time');
   const list = await getList(listId);
   if (list.archived) throw new Error(`List "${list.name}" is archived (${list.archived}) — it can't send. Unarchive it first if that is really intended.`);
   await refreshList(list.id);
@@ -621,8 +624,8 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
   }
   const task = await createTask({ account: list.account_id, title: `${list.name}: message ${plan.length}`, details: `Statuses: ${statuses.join(', ')}`, kind: 'bulk', createdBy, role: list.role });
   const approve = ['mcp', 'campaign'].includes(source) && session.settings.aiMode === 'approve';
-  await insertMany('outbox', ['account_id', 'to_jid', 'payload', 'source', 'status', 'priority', 'note', 'task_id', 'list_id', 'scheduled_at'],
-    plan.map((x) => [list.account_id, x.m.jid, JSON.stringify(x.payload), source, approve ? 'draft' : 'queued', 0, list.name, task.id, list.id, (at || new Date()).toISOString()]));
+  await insertMany('outbox', ['account_id', 'to_jid', 'payload', 'source', 'status', 'priority', 'note', 'task_id', 'list_id', 'scheduled_at', 'expires_at'],
+    plan.map((x) => [list.account_id, x.m.jid, JSON.stringify(x.payload), source, approve ? 'draft' : 'queued', 0, list.name, task.id, list.id, (at || new Date()).toISOString(), until ? until.toISOString() : null]));
   if (at) await query(`UPDATE tasks SET due_at = $2 WHERE id = $1`, [task.id, at.toISOString()]);
   await refreshTask(task.id);
   await refreshList(list.id);

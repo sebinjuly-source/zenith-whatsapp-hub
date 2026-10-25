@@ -558,7 +558,7 @@ export function buildApp() {
     }
     if (waTemplate) {
       // Meta template (Cloud API numbers): { name, language?, params: [...] }
-      const row = await outbox.enqueue({ account, to, payload: { waTemplate }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt, role: sendRole });
+      const row = await outbox.enqueue({ account, to, payload: { waTemplate }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt, role: sendRole, expiresAt: req.body?.expiresAt || null });
       if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent Meta template "${waTemplate.name}" to ${row.to_jid.split('@')[0]}`);
       if (!wait) return res.json(row);
       const result = await outbox.waitFor(row.id);
@@ -572,7 +572,7 @@ export function buildApp() {
       attachment = attachment || r.payload.attachment;
     }
     const buttons = Array.isArray(req.body?.buttons) ? req.body.buttons.filter(Boolean).slice(0, 3) : undefined;
-    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}), ...(buttons?.length ? { buttons } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt, role: sendRole });
+    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}), ...(buttons?.length ? { buttons } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt, role: sendRole, expiresAt: req.body?.expiresAt || null });
     if (row.duplicate && ['sent', 'failed', 'rejected'].includes(row.status)) return res.status(row.status === 'sent' ? 200 : 502).json(row);
     if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent a message from the dashboard to ${row.to_jid.split('@')[0]}`);
     if (!wait) return res.json(row);
@@ -584,6 +584,7 @@ export function buildApp() {
   api.get('/outbox', wrap(async (req, res) => {
     const rows = await outbox.listOutbox({
       account: req.query.account, status: req.query.status, taskId: req.query.task, limit: parseInt(req.query.limit, 10) || 50, role: roleQ(req),
+      ids: req.query.ids ? String(req.query.ids).split(',') : undefined,
     });
     // Each message's price (Meta numbers; linked phones are free), shown on the draft cards and summed in approvals
     const p = await priceRows(rows, manager);
@@ -750,6 +751,22 @@ export function buildApp() {
     if (r.task) await act(req, r.task.account_id || b.account, `Created bulk send "${b.title}": ${r.queued} recipients, ${r.skipped.length} skipped`);
     res.json(r);
   }));
+  // Per number: will messages with a "send by" time go out in time? Estimated send time of every unsent automated
+  // message, the ones that would miss their deadline (this campaign's, plus how many of other campaigns) and the
+  // daily limit that would fit them (?account= for one number)
+  api.get('/outbox/capacity', wrap(async (req, res) => {
+    await manager.refresh();
+    const ids = req.query.account ? [(await manager.resolve(req.query.account)).id] : manager.list().map((a) => a.id);
+    const out = await Promise.all(ids.map((id) => outbox.capacityForecast(id)));
+    const role = roleQ(req);
+    if (role) {
+      for (const f of out) {
+        const mine = f.atRisk.filter((m) => (role === 'none' ? !m.role : m.role === role));
+        Object.assign(f, { otherCampaigns: f.atRisk.length - mine.length, atRisk: mine });
+      }
+    }
+    res.json(out);
+  }));
   // Per number: what is waiting, why, and until when (?account= for one number)
   api.get('/outbox/status', wrap(async (req, res) => {
     await manager.refresh();
@@ -806,9 +823,10 @@ export function buildApp() {
     }
     res.json(r);
   }));
-  // New send time for unsent messages: { ids, at } (ISO; past or empty = as soon as possible)
+  // New send time for unsent messages: { ids, at, expiresAt? } (ISO; past or empty = as soon as possible;
+  // expiresAt = new "send by" time, null = none, left out = keep)
   api.post('/outbox/reschedule', wrap(async (req, res) => {
-    const r = await outbox.reschedule(await draftsQ(req), req.body?.at);
+    const r = await outbox.reschedule(await draftsQ(req), req.body?.at, 'expiresAt' in (req.body || {}) ? { expiresAt: req.body.expiresAt } : {});
     const t = new Date(r.at).toLocaleString('en-GB', { timeZone: config.tz, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
     for (const [acc, n] of Object.entries(r.perAccount)) await act(req, acc, `Rescheduled ${n} message${n > 1 ? 's' : ''} to ${t}`);
     res.json(r);

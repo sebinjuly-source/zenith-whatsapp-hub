@@ -314,6 +314,10 @@ UPDATE outbox o SET role = l.role FROM lists l WHERE o.list_id = l.id AND o.role
 
 -- Sent as a reply to someone who wrote in the last 24 h: goes out at once and isn't counted in the automated cap
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_reply BOOLEAN NOT NULL DEFAULT FALSE;
+-- warm = the person had written to this number before (not cold outreach: counts toward its own, higher 24 h limit)
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS is_warm BOOLEAN NOT NULL DEFAULT FALSE;
+-- "send by": a message still unsent at this time is dropped (festival wishes, a reminder before an interview)
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 
 -- Meta WhatsApp Cloud API numbers (provider = 'cloud'): { phoneNumberId, wabaId } + last known number health
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cloud JSONB NOT NULL DEFAULT '{}';

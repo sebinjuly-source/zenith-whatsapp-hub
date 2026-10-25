@@ -1076,7 +1076,7 @@ test('queue status explains what waits, why and until when; drafts show the list
   [st] = (await call('GET', '/api/outbox/status?account=qs')).data;
   assert.equal(st.queued, 2);
   assert.equal(st.state, 'held');
-  assert.match(st.reason, /Automated limit reached: 0 of 0/);
+  assert.match(st.reason, /Daily limit for people who never wrote to us reached: 0 of 0/);
   await manager.update('qs', { settings: { dailyCap: 35 } });
   manager.get('qs').status = 'stopped';
   [st] = (await call('GET', '/api/outbox/status?account=qs')).data;
@@ -1624,6 +1624,78 @@ test('pipeline: no generic "which day?" when we already wrote to them after they
   await mcp('send_message', { account: 'dbg3', to: '9733200003', text: 'Kab aa sakti hain interview ke liye?', other_number_ok: true });
   await listsMod.runPipeline();
   assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE list_id = $1 AND note = 'ask-date'`, [l2.id]))[0].n, 0);
+});
+
+test('send order and limits (25 Oct): "send by" first, then people who wrote before, then new people; only cold messages use the daily limit; late messages are dropped; a warning when they won\'t fit', async () => {
+  await manager.create({ id: 'pr', label: 'Priority' });
+  await manager.update('pr', { settings: { aiMode: 'auto', dailyCap: 2, delayMinSec: 5, delayMaxSec: 5, typing: false, anytime: true } });
+  const now = Math.floor(Date.now() / 1000);
+  // a candidate who replied three days ago (warm); everyone else has never written to this number
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('pr','919811100003@s.whatsapp.net','W1',true,$1,'text','invite'), ('pr','919811100003@s.whatsapp.net','W2',false,$2,'text','interested')`, [now - 4 * 86400, now - 3 * 86400]);
+  const inHour = new Date(Date.now() + 3600e3).toISOString();
+  const ses = fake('pr');
+  ses.status = 'connecting'; // hold sending until every message is in
+  const cold = await outbox.enqueue({ account: 'pr', to: '919811100001', payload: { text: 'new person' }, source: 'campaign' });
+  const warm = await outbox.enqueue({ account: 'pr', to: '919811100003', payload: { text: 'interview follow-up' }, source: 'campaign' });
+  const dated = await outbox.enqueue({ account: 'pr', to: '919811100004', payload: { text: 'Happy Diwali' }, source: 'campaign', expiresAt: inHour });
+  const waits = await outbox.enqueue({ account: 'pr', to: '919811100005', payload: { text: 'second new person' }, source: 'campaign' });
+  assert.ok(dated.expires_at, 'the "send by" time is stored');
+  await assert.rejects(outbox.enqueue({ account: 'pr', to: '919811100006', payload: { text: 'x' }, source: 'campaign', expiresAt: new Date(Date.now() - 1000).toISOString() }), /already passed/);
+  ses.status = 'open';
+  outbox.wakeAccount('pr');
+  await until(async () => (await query(`SELECT count(*)::int n FROM outbox WHERE account_id = 'pr' AND status = 'sent'`))[0].n === 3, 8000);
+  const order = sent.filter((x) => x.account === 'pr').map((x) => x.jid.slice(0, 12));
+  assert.deepEqual(order, ['919811100004', '919811100003', '919811100001'], '"send by" first, then the person who wrote before, then the new person');
+  await sleep(200);
+  assert.equal((await query(`SELECT status FROM outbox WHERE id = $1`, [waits.id]))[0].status, 'queued', 'cold limit (2) reached: the next new person waits');
+  const [w] = await query(`SELECT is_warm FROM outbox WHERE id = $1`, [warm.id]);
+  assert.equal(w.is_warm, true);
+  const st = await outbox.queueStatus('pr');
+  assert.equal(st.automated24h, 2, 'only the two cold messages count toward the daily limit');
+  assert.equal(st.warm24h, 1);
+  // a festival wish that can't fit before its deadline → warning with the limit that would fit it
+  const late = await outbox.enqueue({ account: 'pr', to: '919811100007', payload: { text: 'Happy Bhai Dooj' }, source: 'campaign', expiresAt: inHour });
+  const f = await outbox.capacityForecast('pr');
+  assert.deepEqual(f.atRisk.map((m) => m.id), [late.id]);
+  assert.equal(f.raiseTo, 3, 'one more slot is enough: the dated one goes before the waiting new person');
+  assert.ok(f.etas[waits.id], 'every waiting message has an estimated send time');
+  const cap = await call('GET', '/api/outbox/capacity?account=pr');
+  assert.equal(cap.data[0].atRisk[0].id, late.id);
+  assert.match(await mcp('hub_overview', {}), /NOT ENOUGH CAPACITY: 1 message/);
+  // rescheduling past its deadline is refused; a new "send by" can be given at the same time
+  await assert.rejects(outbox.reschedule([late.id], new Date(Date.now() + 2 * 86400e3).toISOString()), /must go out by/);
+  await outbox.reschedule([late.id], new Date(Date.now() + 2 * 86400e3).toISOString(), { expiresAt: new Date(Date.now() + 3 * 86400e3).toISOString() });
+  assert.equal((await outbox.capacityForecast('pr')).atRisk.length, 0, 'fits now');
+  // past its "send by" time: dropped, never sent late
+  await query(`UPDATE outbox SET expires_at = now() - interval '1 minute' WHERE id = $1`, [late.id]);
+  assert.equal(await outbox.expireDue('pr'), 1);
+  const [x] = await query(`SELECT status, error FROM outbox WHERE id = $1`, [late.id]);
+  assert.equal(x.status, 'rejected');
+  assert.match(x.error, /Expired/);
+  // the AI gives a "send by" time with expires_at
+  const r = await mcp('send_message', { account: 'pr', to: '919811100008', text: 'Happy Chhath', expires_at: '2099-01-01 20:00', other_number_ok: true });
+  assert.match(r, /#(\d+)/);
+  const [y] = await query(`SELECT expires_at FROM outbox WHERE id = $1`, [Number(r.match(/#(\d+)/)[1])]);
+  assert.ok(y.expires_at);
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'pr' AND status IN ('draft','queued')`);
+  await manager.remove('pr');
+  // a wish due in an hour keeps its slot: the outreach that is ready now waits (limit 1 a day)
+  await manager.create({ id: 'pr2', label: 'Reserve' });
+  await manager.update('pr2', { settings: { aiMode: 'auto', dailyCap: 1, delayMinSec: 5, delayMaxSec: 5, typing: false } });
+  const s2 = fake('pr2');
+  s2.status = 'connecting';
+  const wish = await outbox.enqueue({ account: 'pr2', to: '919811100011', payload: { text: 'Happy Diwali' }, source: 'campaign',
+    scheduledAt: new Date(Date.now() + 3600e3).toISOString(), expiresAt: new Date(Date.now() + 5 * 3600e3).toISOString() });
+  const outreach = await outbox.enqueue({ account: 'pr2', to: '919811100012', payload: { text: 'hello' }, source: 'campaign' });
+  s2.status = 'open';
+  outbox.wakeAccount('pr2');
+  await sleep(500);
+  assert.equal((await query(`SELECT status FROM outbox WHERE id = $1`, [outreach.id]))[0].status, 'queued', 'outreach waits: the slot is held for the wish');
+  const f2 = await outbox.capacityForecast('pr2');
+  assert.equal(f2.atRisk.length, 0, 'the wish fits');
+  assert.ok(new Date(f2.etas[outreach.id]) > new Date(f2.etas[wish.id]), 'the forecast shows the outreach after the wish');
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'pr2' AND status IN ('draft','queued')`);
+  await manager.remove('pr2');
 });
 
 test('MCP: every tool answers without an error (whole AI toolbox, in the order a session would use it)', async () => {

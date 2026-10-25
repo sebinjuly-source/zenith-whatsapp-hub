@@ -25,8 +25,14 @@ export const DEFAULT_SETTINGS = {
   delayMaxSec: 120,
   // Show "typing…" for a few seconds before each automated message.
   typing: true,
-  // Max automated messages (campaign + AI) per day. API/dashboard sends you make yourself are not capped.
+  // Max automated messages (campaign + AI) per rolling 24 h to people who have never written to this number (cold
+  // outreach). On a linked phone, messages to people who have written before don't use it (they have warmDailyCap);
+  // on a Meta number everything outside the 24 h reply window counts (Meta's own limit counts them all).
+  // Your own dashboard/API sends are not capped.
   dailyCap: 35,
+  // Linked phones: automated messages per rolling 24 h to people who have written to this number before (interested
+  // candidates, interview follow-ups, guests who replied). Separate from dailyCap; a safety ceiling, rarely reached.
+  warmDailyCap: 150,
   // First messages to NEW numbers (never chatted before) in any rolling 24 h, from every source — including you,
   // scripts and the phone itself. Never above NEW_CHATS_HARD_MAX.
   newChatsPer24h: NEW_CHATS_DEFAULT,
@@ -70,6 +76,7 @@ export function normalizeSettings(input = {}) {
     typing: !!s.typing,
     anytime: s.anytime !== false,
     dailyCap: clampInt(s.dailyCap, 0, 1000, DEFAULT_SETTINGS.dailyCap),
+    warmDailyCap: clampInt(s.warmDailyCap, 0, 1000, DEFAULT_SETTINGS.warmDailyCap),
     // Stored up to Meta's own tiers; linked phones are still held to NEW_CHATS_HARD_MAX where it's applied (outbox).
     newChatsPer24h: clampInt(s.newChatsPer24h, 0, CLOUD_NEW_CHATS_MAX, NEW_CHATS_DEFAULT),
     sendStart: isTime(s.sendStart) ? s.sendStart : DEFAULT_SETTINGS.sendStart,
@@ -136,4 +143,13 @@ export function insideSendingWindow(settings, now = new Date()) {
   const { day, minutes } = localNow(now);
   if (!settings.sendDays.includes(day)) return false;
   return minutes >= toMin(settings.sendStart) && minutes < toMin(settings.sendEnd);
+}
+
+/** The first moment at or after `t` inside the sending window (15-minute steps; `t` itself when sending any time). */
+export function nextSendingTime(settings, t = new Date()) {
+  let d = new Date(t);
+  for (let i = 0; i < 8 * 96 && !insideSendingWindow(settings, d); i++) {
+    d = new Date(Math.ceil((d.getTime() + 1) / 900e3) * 900e3);
+  }
+  return d;
 }

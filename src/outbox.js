@@ -12,7 +12,7 @@ import logger from './logger.js';
 import { manager } from './wa/manager.js';
 import { loadOutgoing } from './media.js';
 import { toJid } from './store.js';
-import { MIN_DELAY_SEC, NEW_CHATS_HARD_MAX, CLOUD_NEW_CHATS_MAX, randomDelayMs, insideSendingWindow, afterTime } from './settings.js';
+import { MIN_DELAY_SEC, NEW_CHATS_HARD_MAX, CLOUD_NEW_CHATS_MAX, randomDelayMs, insideSendingWindow, afterTime, nextSendingTime } from './settings.js';
 import { createTask, refreshTask, fillTemplate, planRecipients } from './tasks.js';
 import { hasAuthState } from './wa/auth-state.js';
 import { getTemplate, contactFields, fieldsIn } from './templates.js';
@@ -53,10 +53,21 @@ async function assertCloudWindow(session, jid, payload) {
   }
 }
 
-export async function enqueue({ account, to, payload, source, note, scheduledAt, taskId = null, idemKey = null, role = null }) {
+/** Check a "send by" time: readable, in the future and after the send time. Returns an ISO string or null. */
+function deadline(expiresAt, scheduledAt) {
+  if (expiresAt == null || expiresAt === '') return null;
+  const d = new Date(expiresAt);
+  if (isNaN(d)) throw new Error('Could not read the "send by" time (expires_at)');
+  if (d <= new Date()) throw new Error('The "send by" time (expires_at) has already passed');
+  if (scheduledAt && d <= new Date(scheduledAt)) throw new Error('The "send by" time (expires_at) must be after the send time');
+  return d.toISOString();
+}
+
+export async function enqueue({ account, to, payload, source, note, scheduledAt, taskId = null, idemKey = null, role = null, expiresAt = null }) {
   const session = await manager.resolve(account);
   if (!payload?.text && !payload?.attachment && !payload?.waTemplate) throw new Error('Nothing to send: give text and/or attachment');
   const jid = toJid(to);
+  const expires = deadline(expiresAt, scheduledAt);
   // Scheduled/automated sends may use a template still in review (they wait); your own direct sends need it approved.
   if (payload.waTemplate) payload = await withTemplatePreview(session, payload, { allowPending: AUTOMATED.includes(source) });
   if (idemKey) {
@@ -72,10 +83,10 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
   }
   const status = NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued';
   const [row] = await query(
-    `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id, idem_key)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz, now()),$9,$10)
+    `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id, idem_key, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz, now()),$9,$10,$11)
      ON CONFLICT (account_id, idem_key) WHERE idem_key IS NOT NULL DO NOTHING RETURNING *`,
-    [session.id, jid, JSON.stringify(payload), source, status, automated ? 0 : PRIORITY_YOU, note || null, scheduledAt || null, taskId, idemKey ? String(idemKey) : null],
+    [session.id, jid, JSON.stringify(payload), source, status, automated ? 0 : PRIORITY_YOU, note || null, scheduledAt || null, taskId, idemKey ? String(idemKey) : null, expires],
   );
   if (!row) {
     // a concurrent identical request won the race
@@ -99,7 +110,7 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
  * recipients: [{ to, name?, ...extra fields usable as {field} }] or plain numbers.
  */
 export async function bulkSend({ account, title, details, recipients, text, attachment, template, waTemplate, scheduledAt, source = 'campaign',
-  createdBy = 'you', skipIfContactedDays = 30, allowRepeat = false, taskId, idemKey = null }) {
+  createdBy = 'you', skipIfContactedDays = 30, allowRepeat = false, taskId, idemKey = null, expiresAt = null }) {
   const session = await manager.resolve(account);
   if (session.isCloud && !waTemplate) {
     throw new Error(`"${session.account.label}" is a Meta Cloud API number: messages to many people must use an approved Meta template (waTemplate) — free text only works within 24 h of their last message`);
@@ -112,6 +123,7 @@ export async function bulkSend({ account, title, details, recipients, text, atta
     attachment = attachment || t.attachment || undefined;
   }
   if (!text && !attachment && !waTemplate) throw new Error('Give the message text (can use {name}) and/or an attachment');
+  const expires = deadline(expiresAt, scheduledAt);
   if (idemKey) {
     const [t] = await query('SELECT * FROM tasks WHERE account_id = $1 AND idem_key = $2', [session.id, String(idemKey)]);
     if (t) return { task: t, queued: 0, skipped: [], mode: session.settings.aiMode, duplicate: true };
@@ -135,11 +147,11 @@ export async function bulkSend({ account, title, details, recipients, text, atta
       payload = { text: body, attachment: att };
     }
     await query(
-      `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id)
-       VALUES ($1,$2,$3,$4,$5,0,$6,COALESCE($7::timestamptz, now()),$8)`,
+      `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id, expires_at)
+       VALUES ($1,$2,$3,$4,$5,0,$6,COALESCE($7::timestamptz, now()),$8,$9)`,
       [session.id, r.jid, JSON.stringify(payload), source,
         NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued',
-        title || null, scheduledAt || null, task.id],
+        title || null, scheduledAt || null, task.id, expires],
     );
     n++;
   }
@@ -177,6 +189,7 @@ export async function approve(id, { text } = {}) {
   const [row] = await query(`SELECT * FROM outbox WHERE id = $1`, [id]);
   if (!row) throw new Error('Draft not found');
   if (row.status !== 'draft') throw new Error(`Item is ${row.status}, not a draft`);
+  if (row.expires_at && new Date(row.expires_at) <= new Date()) throw new Error('Too late: this message had to go out by ' + fmtLocal(row.expires_at) + ' — it is dropped');
   const payload = { ...row.payload };
   if (typeof text === 'string' && text.trim() && payload.waTemplate && text.trim() !== (payload.text || '').trim()) {
     throw new Error('This is a Meta template message — its wording is fixed by Meta. Reject it and send another template, or reply freely once they write back');
@@ -208,7 +221,7 @@ export async function approve(id, { text } = {}) {
 export async function approveTask(taskId) {
   const rows = await query(
     `UPDATE outbox SET status = 'queued', scheduled_at = GREATEST(scheduled_at, now())
-     WHERE task_id = $1 AND status = 'draft' RETURNING account_id`,
+     WHERE task_id = $1 AND status = 'draft' AND (expires_at IS NULL OR expires_at > now()) RETURNING account_id`,
     [taskId],
   );
   await refreshTask(taskId);
@@ -224,7 +237,7 @@ export async function approveAll({ account, taskId, ids, role } = {}) {
   if (Array.isArray(ids) && !idList.length) throw new Error('Select at least one draft');
   if (!idList && !account && !taskId && !role) throw new Error('Say which drafts to approve: tick them, or choose a number, a task or a campaign first');
   const p = [];
-  const where = [`o.status = 'draft'`];
+  const where = [`o.status = 'draft'`, '(o.expires_at IS NULL OR o.expires_at > now())'];
   if (idList) { p.push(idList); where.push(`o.id = ANY($${p.length}::bigint[])`); }
   if (account) { p.push(account); where.push(`o.account_id = $${p.length}`); }
   if (taskId) { p.push(taskId); where.push(`o.task_id = $${p.length}`); }
@@ -246,15 +259,23 @@ export async function approveAll({ account, taskId, ids, role } = {}) {
  * approved); approved ones wait until then. A time in the past = as soon as possible. Sending hours, the gap between
  * messages and the daily limits still apply, so many messages set to one time go out one after another from then.
  */
-export async function reschedule(ids, at) {
+export async function reschedule(ids, at, { expiresAt } = {}) {
   const list = [...new Set((ids || []).map(Number).filter(Boolean))];
   if (!list.length) throw new Error('Select at least one message');
   const when = at ? new Date(at) : new Date();
   if (isNaN(when)) throw new Error('Could not read the new date and time');
+  // expiresAt: undefined = keep each message's "send by"; null/'' = none; a time = the new "send by"
+  const keep = expiresAt === undefined;
+  const expires = keep ? null : deadline(expiresAt, when > new Date() ? when : null);
+  if (keep) {
+    const [late] = await query(`SELECT count(*)::int AS n, min(expires_at) AS first FROM outbox WHERE id = ANY($1::bigint[]) AND status IN ('draft','queued') AND expires_at <= $2`, [list, when.toISOString()]);
+    if (late.n) throw new Error(`${late.n} of these must go out by ${fmtLocal(late.first)} — pick an earlier time, or change their "send by" time too`);
+  }
   const rows = await query(
-    `UPDATE outbox SET scheduled_at = GREATEST($2::timestamptz, now()) WHERE id = ANY($1::bigint[]) AND status IN ('draft','queued')
+    `UPDATE outbox SET scheduled_at = GREATEST($2::timestamptz, now()), expires_at = CASE WHEN $3::boolean THEN expires_at ELSE $4::timestamptz END
+     WHERE id = ANY($1::bigint[]) AND status IN ('draft','queued')
      RETURNING id, account_id, task_id, status, scheduled_at`,
-    [list, when.toISOString()],
+    [list, when.toISOString(), keep, expires],
   );
   if (!rows.length) throw new Error('None of these can be rescheduled any more (already sent, failed or rejected)');
   for (const t of new Set(rows.map((r) => r.task_id).filter(Boolean))) await refreshTask(t);
@@ -414,9 +435,13 @@ export async function reject(id, { reason = '', actor = 'you' } = {}) {
   return row;
 }
 
-export async function listOutbox({ account, status, taskId, limit = 50, role } = {}) {
+export async function listOutbox({ account, status, taskId, limit = 50, role, ids } = {}) {
   const p = [];
   const where = [];
+  if (ids?.length) {
+    p.push(ids.map(Number).filter(Boolean));
+    where.push(`o.id = ANY($${p.length}::bigint[])`);
+  }
   if (role) {
     p.push(role);
     where.push(roleFilter(`COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')})`, p.length));
@@ -480,16 +505,22 @@ export async function followupsToday(accountId) {
 }
 
 /**
- * Automated messages sent in the last 24 hours (rolling — a midnight reset let 48 new numbers through in 24 h).
- * Replies to people who wrote in the last 24 h don't count: they aren't outreach and go out at once.
+ * Automated messages sent in the last 24 hours (rolling — a midnight reset let 48 new numbers through in 24 h):
+ *  - cold: to people who had never written to this number → the daily cap (dailyCap). On a Meta number every
+ *    message outside the reply window counts, by unique person (that is how Meta counts its own limit);
+ *  - warm (linked phones): to people who had written before → warmDailyCap.
+ * Replies to people who wrote in the last 24 h count for neither: they aren't outreach and go out at once.
  */
-async function automatedSentToday(accountId) {
+async function sent24h(accountId) {
+  const cloud = !!manager.sessions.get(accountId)?.isCloud;
   const [r] = await query(
-    `SELECT count(*)::int AS n FROM outbox
-     WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND NOT is_reply AND sent_at > now() - interval '24 hours'`,
-    [accountId, AUTOMATED],
+    `SELECT ${cloud ? 'count(DISTINCT to_jid)' : 'count(*) FILTER (WHERE NOT is_warm)'}::int AS cold,
+            min(sent_at) FILTER (WHERE $3::boolean OR NOT is_warm) AS cold_oldest,
+            count(*) FILTER (WHERE is_warm AND NOT $3::boolean)::int AS warm
+     FROM outbox WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND NOT is_reply AND sent_at > now() - interval '24 hours'`,
+    [accountId, AUTOMATED, cloud],
   );
-  return r.n;
+  return r;
 }
 
 // A chat with no message at all in it yet = a NEW number for this WhatsApp account.
@@ -498,6 +529,30 @@ const IS_NEW_CHAT = (acc, jid) => `NOT EXISTS (SELECT 1 FROM messages x WHERE x.
 // automated daily cap and the random gap, and go before queued bulk messages. The new-number limit is unaffected.
 const IS_REPLY = (acc, jid) => `EXISTS (SELECT 1 FROM messages y WHERE y.account_id = ${acc} AND y.chat_jid = ${jid} AND NOT y.from_me
   AND y.ts > extract(epoch FROM now())::bigint - 86400)`;
+// They have written to this number at some time: a conversation exists, so our message is not cold outreach.
+const IS_WARM = (acc, jid) => `EXISTS (SELECT 1 FROM messages w WHERE w.account_id = ${acc} AND w.chat_jid = ${jid} AND NOT w.from_me)`;
+/**
+ * Send order on one number, whatever the campaign — the message most likely to pay off goes first:
+ *  1 replies to people who wrote in the last 24 h · 2 your own sends · 3 messages with a "send by" time (soonest
+ *  first: festival wishes, interview reminders) · 4 people who have written to us before (interested candidates,
+ *  interview follow-ups, guests who replied) and pipeline messages · 5 first messages to new people (can wait) ·
+ *  6 nudges to people who never replied. Same rank: the one due (or approved) first.
+ */
+const SEND_RANK = (acc, o) => `CASE WHEN ${IS_REPLY(acc, `${o}.to_jid`)} THEN 1 WHEN ${o}.priority >= ${PRIORITY_YOU} THEN 2
+  WHEN ${o}.expires_at IS NOT NULL THEN 3 WHEN ${o}.note = 'follow-up' THEN 6
+  WHEN ${o}.priority > 0 OR ${IS_WARM(acc, `${o}.to_jid`)} THEN 4 ELSE 5 END`;
+/**
+ * Slots held back from a cold message: approved cold messages with an EARLIER "send by" time (or any "send by" time,
+ * for a message without one) that become due within 24 h. So a festival wish at 18:00 never loses its place to the
+ * morning's outreach, nor to a wish with a later deadline that happened to be due a little earlier.
+ */
+const RESERVED = (acc, o, automated, cloud) => `(SELECT count(*) FROM outbox r WHERE r.account_id = ${acc} AND r.status = 'queued'
+  AND r.id <> ${o}.id AND r.source = ANY(${automated}) AND r.expires_at IS NOT NULL
+  AND r.scheduled_at > now() AND r.scheduled_at <= now() + interval '24 hours'
+  AND (${o}.expires_at IS NULL OR r.expires_at < ${o}.expires_at)
+  AND NOT ${IS_REPLY(acc, 'r.to_jid')} AND (${cloud}::boolean OR NOT ${IS_WARM(acc, 'r.to_jid')}))`;
+const SEND_ORDER = (acc, o) => `${SEND_RANK(acc, o)}, ${o}.expires_at NULLS LAST, ${o}.scheduled_at, ${o}.id`;
+const fmtLocal = (t) => new Date(t).toLocaleString('en-IN', { timeZone: config.tz, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
 /**
  * New numbers this account started a chat with in the last 24 hours (rolling), from any source — the hub, the
@@ -619,15 +674,13 @@ export async function queueStatus(accountId) {
     `SELECT count(*) FILTER (WHERE status = 'queued')::int AS queued,
             count(*) FILTER (WHERE status = 'draft')::int AS drafts,
             count(*) FILTER (WHERE status = 'queued' AND source = ANY($2) AND NOT ${IS_REPLY('$1', 'o.to_jid')})::int AS queued_automated,
+            count(*) FILTER (WHERE status = 'queued' AND source = ANY($2) AND NOT ${IS_REPLY('$1', 'o.to_jid')} AND ($3::boolean OR NOT ${IS_WARM('$1', 'o.to_jid')}))::int AS queued_cold,
             count(*) FILTER (WHERE status = 'queued' AND to_jid NOT LIKE '%@g.us' AND ${IS_NEW_CHAT('$1', 'o.to_jid')})::int AS queued_new
      FROM outbox o WHERE account_id = $1 AND status IN ('queued','draft')`,
-    [accountId, AUTOMATED],
+    [accountId, AUTOMATED, !!session.isCloud],
   );
-  const [a] = await query(
-    `SELECT count(*)::int AS n, min(sent_at) AS oldest FROM outbox
-     WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND NOT is_reply AND sent_at > now() - interval '24 hours'`,
-    [accountId, AUTOMATED],
-  );
+  const sent = await sent24h(accountId);
+  const a = { n: sent.cold, oldest: sent.cold_oldest };
   const nc = await newChatsStatus(accountId, s);
   const blocked = whatsappBlocksNewChats(session);
   const capFreeAt = a.n >= s.dailyCap && a.oldest ? new Date(new Date(a.oldest).getTime() + 24 * 3600e3) : null;
@@ -639,29 +692,157 @@ export async function queueStatus(accountId) {
   else if (!session.account.enabled) { state = 'held'; reason = 'Number is paused (Settings)'; }
   else if (session.status !== 'open') { state = 'held'; reason = `Number is not connected (${session.status}) — messages go out once it is`; }
   else if (q.queued_automated && !insideSendingWindow(s)) { state = 'held'; reason = `Outside sending hours (${s.sendStart}–${s.sendEnd})`; }
-  else if (q.queued_automated && a.n >= s.dailyCap) { state = 'held'; reason = `Automated limit reached: ${a.n} of ${s.dailyCap} in the last 24 hours`; until = capFreeAt; }
+  else if (q.queued_cold && q.queued_cold === q.queued && a.n >= s.dailyCap) { state = 'held'; reason = `Daily limit for people who never wrote to us reached: ${a.n} of ${s.dailyCap} in the last 24 hours`; until = capFreeAt; }
   else if (q.queued_new && blocked) { state = 'held'; reason = 'WhatsApp blocks messages to new numbers for now'; until = session.reachout.timeEnforcementEnds ? new Date(session.reachout.timeEnforcementEnds) : null; }
   else if (q.queued_new && q.queued_new === q.queued && nc.count >= nc.limit) { state = 'held'; reason = `New-number limit reached: ${nc.count} of ${nc.limit} in the last 24 hours`; until = nc.nextFreeAt; }
   else if (nextAt > Date.now()) { reason = 'Waiting the random gap between messages'; until = new Date(nextAt); }
-  // Rough finish time: what each rolling 24 h allows, from here on.
+  // Rough finish time for the cold messages (the ones the daily cap holds back): what each rolling 24 h allows.
   const perDay = Math.max(1, Math.min(s.dailyCap, q.queued_new ? nc.limit : Infinity));
-  const days = q.queued ? Math.ceil(q.queued / perDay) : 0;
+  const days = q.queued_cold ? Math.ceil(q.queued_cold / perDay) : q.queued ? 1 : 0;
   return {
     account: accountId, label: session.account.label, connection: session.status, state, reason, until,
-    queued: q.queued, drafts: q.drafts, queuedNew: q.queued_new,
-    automated24h: a.n, dailyCap: s.dailyCap, newChats: nc, perDay, days,
+    queued: q.queued, drafts: q.drafts, queuedNew: q.queued_new, queuedCold: q.queued_cold, queuedWarm: q.queued_automated - q.queued_cold,
+    automated24h: a.n, dailyCap: s.dailyCap, warm24h: sent.warm, warmDailyCap: session.isCloud ? null : s.warmDailyCap, newChats: nc, perDay, days,
     gapSec: [s.delayMinSec, s.delayMaxSec],
   };
+}
+
+/** Drop unsent messages (drafts or approved) whose "send by" time has passed — a festival wish a day late is worse than none. */
+export async function expireDue(accountId) {
+  const rows = await query(
+    `UPDATE outbox SET status = 'rejected', error = 'Expired: not sent by its "send by" time'
+     WHERE account_id = $1 AND status IN ('draft','queued') AND expires_at <= now() RETURNING id, account_id, task_id, list_id, status`,
+    [accountId],
+  );
+  if (!rows.length) return 0;
+  await logEvent(accountId, 'warn', `${rows.length} message${rows.length > 1 ? 's' : ''} passed ${rows.length > 1 ? 'their' : 'its'} "send by" time without being sent and ${rows.length > 1 ? 'were' : 'was'} dropped (#${rows.map((r) => r.id).join(', #')})`);
+  await afterBatchChange(rows);
+  return rows.length;
+}
+
+/**
+ * Will every message with a "send by" time go out in time? Plays this number's unsent messages forward in send
+ * order (drafts as if approved now) through its limits — the rolling 24 h windows (cold, warm, new numbers),
+ * sending hours and the average gap — and returns an estimated send time for each, the ones that would miss their
+ * deadline, and the daily limit that would fit them (linked phones: never above the 45 new numbers that got a
+ * number blocked; Meta numbers: Meta's tier). `settings` overrides the number's settings (to try a higher limit).
+ */
+export async function capacityForecast(accountId, { settings } = {}) {
+  const session = manager.get(accountId);
+  const s = { ...session.settings, ...(settings || {}) };
+  const cloud = !!session.isCloud;
+  const DAY = 864e5;
+  const now = Date.now();
+  const rows = await query(
+    `SELECT o.id, o.status, o.to_jid, o.scheduled_at, o.expires_at, o.note, o.role, o.task_id,
+            COALESCE(NULLIF(ct.name, ''), NULLIF(ch.name, '')) AS to_name, t.title AS task_title,
+            ${SEND_RANK('$1', 'o')} AS rank, ${IS_REPLY('$1', 'o.to_jid')} AS reply, ${IS_WARM('$1', 'o.to_jid')} AS warm,
+            (o.to_jid NOT LIKE '%@g.us' AND ${IS_NEW_CHAT('$1', 'o.to_jid')}) AS is_new
+     FROM outbox o
+     LEFT JOIN contacts ct ON ct.account_id = o.account_id AND ct.jid = o.to_jid
+     LEFT JOIN chats ch ON ch.account_id = o.account_id AND ch.jid = o.to_jid
+     LEFT JOIN tasks t ON t.id = o.task_id
+     WHERE o.account_id = $1 AND o.status IN ('draft','queued') AND o.source = ANY($2) AND (o.expires_at IS NULL OR o.expires_at > now())
+     ORDER BY ${SEND_ORDER('$1', 'o')}`,
+    [accountId, AUTOMATED],
+  );
+  const past = await query(
+    `SELECT sent_at, is_warm FROM outbox WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND NOT is_reply
+       AND sent_at > now() - interval '24 hours'`,
+    [accountId, AUTOMATED],
+  );
+  const firsts = await query(
+    `SELECT min(ts)::bigint AS f FROM messages m WHERE account_id = $1 AND from_me AND ts > $2 AND chat_jid NOT LIKE '%@g.us'
+       AND chat_jid NOT LIKE '%broadcast%' AND chat_jid NOT LIKE '%@newsletter'
+       AND NOT EXISTS (SELECT 1 FROM messages x WHERE x.account_id = $1 AND x.chat_jid = m.chat_jid AND x.ts <= $2)
+     GROUP BY chat_jid`,
+    [accountId, Math.floor(now / 1000) - 86400],
+  );
+  const cold = past.filter((p) => cloud || !p.is_warm).map((p) => new Date(p.sent_at).getTime());
+  const warm = past.filter((p) => !cloud && p.is_warm).map((p) => new Date(p.sent_at).getTime());
+  const fresh = firsts.map((r) => Number(r.f) * 1000);
+  const ncLimit = Math.min(cloud ? CLOUD_NEW_CHATS_MAX : NEW_CHATS_HARD_MAX, s.newChatsPer24h ?? NEW_CHATS_HARD_MAX);
+  const blockedUntil = whatsappBlocksNewChats(session)
+    ? (session.reachout.timeEnforcementEnds ? new Date(session.reachout.timeEnforcementEnds).getTime() : Infinity) : 0;
+  const gap = cloud ? 250 : ((s.delayMinSec + s.delayMaxSec) / 2) * 1000;
+  // the limits one message uses: [timestamps in the window, cap]
+  // reserved = slots held for cold messages with an earlier "send by" time that become due within 24 h (see RESERVED)
+  const limitsOf = (m, reserved = 0) => {
+    if (m.reply) return [];
+    const l = cloud || !m.warm ? [[cold, s.dailyCap - reserved]] : [[warm, s.warmDailyCap]];
+    if (m.is_new) l.push([fresh, ncLimit]);
+    return l;
+  };
+  const inWindow = (arr, t) => arr.filter((x) => x > t - DAY && x <= t).sort((a, b) => a - b);
+  const freeAt = (t, lims) => {
+    let at = t;
+    for (const [arr, cap] of lims) {
+      if (cap <= 0) return Infinity;
+      const w = inWindow(arr, t);
+      if (w.length >= cap) at = Math.max(at, w[w.length - cap] + DAY);
+    }
+    return at;
+  };
+  const pending = rows.map((m) => ({ ...m, ready: Math.max(now, new Date(m.scheduled_at).getTime(), m.is_new ? blockedUntil : 0) }));
+  const eta = new Map();
+  let T = Math.max(now, workers.get(accountId)?.nextAt?.() || 0);
+  for (let guard = 0; pending.length && guard < 20000 && T < now + 30 * DAY; guard++) {
+    T = nextSendingTime(s, new Date(T)).getTime();
+    let pick = -1;
+    let soonest = Infinity;
+    const due = pending.filter((p) => p.expires_at && !p.reply && (cloud || !p.warm) && p.ready > T && p.ready <= T + DAY);
+    for (let i = 0; i < pending.length; i++) {
+      const m = pending[i];
+      if (m.ready > T) { soonest = Math.min(soonest, m.ready); continue; }
+      const reserved = due.filter((p) => !m.expires_at || new Date(p.expires_at) < new Date(m.expires_at)).length;
+      const at = freeAt(T, limitsOf(m, reserved));
+      if (at <= T) { pick = i; break; }
+      soonest = Math.min(soonest, at);
+    }
+    if (pick < 0) {
+      if (!Number.isFinite(soonest)) break;
+      T = soonest;
+      continue;
+    }
+    const [m] = pending.splice(pick, 1);
+    eta.set(m.id, T);
+    for (const [arr] of limitsOf(m)) arr.push(T);
+    if (!m.reply) T += gap;
+  }
+  const out = rows.map((m) => ({ ...m, eta: eta.has(m.id) ? new Date(eta.get(m.id)).toISOString() : null }));
+  const atRisk = out.filter((m) => m.expires_at && (!m.eta || new Date(m.eta) >= new Date(m.expires_at)))
+    .map((m) => ({ id: m.id, status: m.status, to: m.to_jid.split('@')[0], name: m.to_name, role: m.role, task: m.task_title, expires_at: m.expires_at, eta: m.eta }));
+  let raiseTo = null;
+  if (atRisk.length && !settings) {
+    // the smallest daily limit that fits them all, within what is safe for this number
+    const max = cloud ? Math.max(s.dailyCap, Number(String(session.account.cloud?.tier || '').match(/\d+/)?.[0]) || s.dailyCap) : NEW_CHATS_HARD_MAX;
+    for (let cap = s.dailyCap + 1; cap <= max; cap += cap < 60 ? 1 : 10) {
+      if (!(await capacityForecast(accountId, { settings: { dailyCap: cap, newChatsPer24h: Math.max(s.newChatsPer24h, Math.min(cap, max)) } })).atRisk.length) { raiseTo = cap; break; }
+    }
+  }
+  return {
+    account: accountId, label: session.account.label, cloud, dailyCap: s.dailyCap, warmDailyCap: cloud ? null : s.warmDailyCap,
+    atRisk, raiseTo, maxSafe: cloud ? null : NEW_CHATS_HARD_MAX,
+    etas: Object.fromEntries(out.map((m) => [m.id, m.eta])),
+  };
+}
+
+/** Activity warning (at most hourly while it lasts) when messages with a "send by" time won't fit this number's limits. */
+async function noteCapacity(accountId) {
+  const f = await capacityForecast(accountId);
+  if (!f.atRisk.length) return;
+  const first = f.atRisk.map((m) => m.expires_at).sort()[0];
+  await noteOnce(accountId, `capacity:${f.atRisk.length}`, `Not enough sending capacity on "${f.label}": ${f.atRisk.length} message${f.atRisk.length > 1 ? 's' : ''} with a "send by" time would miss it (first by ${fmtLocal(first)}). Drafts & outbox: send them from another number, skip them, or raise the daily limit${f.raiseTo ? ` to ${f.raiseTo}` : ''}.`, 'warn');
 }
 
 const holdNoted = new Map(); // accountId -> until (ms): log "limit reached" once per hold
 const notedOnce = new Map();
 /** Activity entry at most once an hour per key (e.g. "waiting for template approval"). */
-async function noteOnce(accountId, key, text) {
+async function noteOnce(accountId, key, text, level = 'info') {
   const k = `${accountId}|${key}`;
   if (Date.now() - (notedOnce.get(k) || 0) < 3600e3) return;
   notedOnce.set(k, Date.now());
-  await logEvent(accountId, 'info', text);
+  await logEvent(accountId, level, text);
 }
 
 /** Activity entry (once per hold) explaining why messages to new numbers are waiting. */
@@ -680,6 +861,8 @@ async function noteNewChatHold(accountId, reachout, nc) {
 function startWorker(accountId) {
   let wakeUp = () => {};
   let nextAutomatedAt = 0; // random gap applies between automated messages only
+  let lastExpiryCheck = 0;
+  let lastForecast = 0;
   workers.set(accountId, { wake: () => wakeUp(), nextAt: () => nextAutomatedAt });
   const nap = (ms) =>
     new Promise((resolve) => {
@@ -709,14 +892,28 @@ function startWorker(accountId) {
       workers.delete(accountId);
       return 'stop'; // account removed
     }
+    // Messages past their "send by" time are dropped (also while the number is offline); the capacity check warns
+    // ahead of that. Both at most once a minute / every 10 minutes.
+    if (Date.now() - lastExpiryCheck > 60e3) {
+      lastExpiryCheck = Date.now();
+      await expireDue(accountId).catch(() => {});
+    }
     if (session.status !== 'open') {
       await nap(15000);
       return;
     }
+    if (Date.now() - lastForecast > 600e3) {
+      lastForecast = Date.now();
+      await noteCapacity(accountId).catch(() => {});
+    }
     await runJobs(session);
     const s = session.settings;
     const gapOver = Date.now() >= nextAutomatedAt;
-    const automatedAllowed = gapOver && insideSendingWindow(s) && (await automatedSentToday(accountId)) < s.dailyCap;
+    const cloud = !!session.isCloud;
+    const used = await sent24h(accountId);
+    // cold = people who never wrote to this number (the daily cap); warm = they did (linked phones: warmDailyCap)
+    const automatedAllowed = gapOver && insideSendingWindow(s) && used.cold < s.dailyCap;
+    const warmAllowed = cloud ? automatedAllowed : gapOver && insideSendingWindow(s) && used.warm < s.warmDailyCap;
     // Follow-ups only go out on days with no new outreach (new candidates get the limited capacity first).
     const followupsAllowed = automatedAllowed && afterTime(s.followupStart) && !(await newOutreachToday(accountId))
       && (await followupsToday(accountId)) < s.followupDailyMax;
@@ -727,14 +924,18 @@ function startWorker(accountId) {
     if (!newChatsAllowed) await noteNewChatHold(accountId, blocked ? session.reachout : null, nc);
     // Claim one row atomically, so two servers can never pick the same message.
     const [row] = await query(
-      `UPDATE outbox SET status = 'sending', sent_at = now(), is_reply = ${IS_REPLY('outbox.account_id', 'outbox.to_jid')} WHERE id = (
+      `UPDATE outbox SET status = 'sending', sent_at = now(), is_reply = ${IS_REPLY('outbox.account_id', 'outbox.to_jid')},
+         is_warm = NOT $6::boolean AND ${IS_WARM('outbox.account_id', 'outbox.to_jid')} WHERE id = (
          SELECT id FROM outbox WHERE account_id = $1 AND status = 'queued' AND scheduled_at <= now()
-           AND ($2 OR source <> ALL($3) OR ${IS_REPLY('$1', 'outbox.to_jid')})
+           AND (expires_at IS NULL OR expires_at > now())
+           AND (source <> ALL($3) OR ${IS_REPLY('$1', 'outbox.to_jid')}
+                OR CASE WHEN NOT $6::boolean AND ${IS_WARM('$1', 'outbox.to_jid')} THEN $7::boolean
+                        ELSE $2::boolean AND $8::int + ${RESERVED('$1', 'outbox', '$3', '$6')} < $9::int END)
            AND (note IS DISTINCT FROM 'follow-up' OR $4)
            AND ($5 OR to_jid LIKE '%@g.us' OR NOT ${IS_NEW_CHAT('$1', 'outbox.to_jid')})
-         ORDER BY ${IS_REPLY('$1', 'outbox.to_jid')} DESC, priority DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED)
+         ORDER BY ${SEND_ORDER('$1', 'outbox')} LIMIT 1 FOR UPDATE SKIP LOCKED)
        RETURNING *`,
-      [accountId, automatedAllowed, AUTOMATED, followupsAllowed, newChatsAllowed],
+      [accountId, automatedAllowed, AUTOMATED, followupsAllowed, newChatsAllowed, cloud, warmAllowed, used.cold, s.dailyCap],
     );
     if (!row) {
       // Wait for new work, or until the random gap ends, whichever is first.
