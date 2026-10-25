@@ -2408,3 +2408,13 @@ test('queue status says why follow-ups to non-repliers wait (they showed "sendin
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'fuq'`);
   await manager.remove('fuq');
 });
+
+test('Board notes: the same note sent twice at once (blur + Save note, double tap) is saved once (25 Oct)', async () => {
+  const t = (await call('POST', '/api/tasks', { account: 'hotel', title: 'Note twice test' })).data;
+  await Promise.all([call('POST', `/api/tasks/${t.id}/notes`, { text: 'Call busy. Follow up on whatsapp.' }), call('POST', `/api/tasks/${t.id}/notes`, { text: 'Call busy. Follow up on whatsapp.' })]);
+  const log = (await call('GET', `/api/tasks/${t.id}/log`)).data.filter((l) => l.kind === 'note');
+  assert.equal(log.length, 1, 'one note');
+  await call('POST', `/api/tasks/${t.id}/notes`, { text: 'A different note' });
+  assert.equal((await call('GET', `/api/tasks/${t.id}/log`)).data.filter((l) => l.kind === 'note').length, 2, 'a different note is kept');
+  await call('POST', `/api/tasks/${t.id}/cancel`);
+});

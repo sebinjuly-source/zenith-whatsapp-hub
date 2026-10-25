@@ -138,11 +138,24 @@
     });
   }
   const nice = (n) => (n == null ? '–' : Number(n).toLocaleString());
+  // Every action: errors become a toast, and the control that started it is locked (and its button greyed) until the
+  // action finishes — a double tap, or a blur + click arriving together, never runs it twice (double Board notes,
+  // 25 Oct). The lock is per element, so other buttons sharing one handler still work.
+  const busyEls = new WeakSet();
   const guard = (fn) => async (...a) => {
+    const ev = a[0] && typeof a[0] === 'object' && 'currentTarget' in a[0] ? a[0] : null;
+    const el = ev?.currentTarget || null;
+    const btn = el?.tagName === 'FORM' ? el.querySelector('[type=submit]') : el?.tagName === 'BUTTON' ? el : null;
+    if (el && busyEls.has(el)) return;
+    if (el) busyEls.add(el);
+    if (btn) btn.disabled = true;
     try {
       await fn(...a);
     } catch (e) {
       toast(e.message);
+    } finally {
+      if (el) busyEls.delete(el);
+      if (btn) btn.disabled = false;
     }
   };
 
@@ -1037,6 +1050,12 @@
   // plus running bulk sends and finished cards, collapsed. Each card shows its title line; details, history & notes
   // and the move/flag controls open on demand.
   async function viewBoard() {
+    // redrawing after an action (Done, Move, a call result …) keeps your place: scroll, open "More" and open folds
+    const mainEl = document.querySelector('main');
+    const wasBoard = !!mainEl?.querySelector('.board-root');
+    const keepY = wasBoard ? mainEl.scrollTop : 0;
+    const openFolds = wasBoard ? new Set([...mainEl.querySelectorAll('details[data-key]')].filter((d) => d.open).map((d) => d.dataset.key)) : null;
+    const shutFolds = wasBoard ? new Set([...mainEl.querySelectorAll('details[data-key]')].filter((d) => !d.open).map((d) => d.dataset.key)) : null;
     await loadAccounts();
     const accs = state.accounts;
     if (!accs.length) return shell([h('h1', {}, 'Board'), h('p', { class: 'sub' }, 'Add and link a number first.')]);
@@ -1111,13 +1130,28 @@
           : t.total ? h('button', { class: 'btn small', onclick: () => { state.outboxTask = t.id; state.outboxTab = 'all'; location.hash = 'outbox'; } }, '✉️ Messages') : null;
       const closed = ['done', 'cancelled'].includes(t.status);
       // a note typed in the box is never lost: it is saved before the card is closed, moved or flagged
-      const flushNote = async () => {
+      // ONE way to save a note, whatever starts it (leaving the box, "Save note", Done, Move …): a save already running
+      // is reused, so leaving the box by tapping "Save note" can't save it twice (it did: blur + click, 25 Oct).
+      let noteSaving = null;
+      const flushNote = () => {
+        if (noteSaving) return noteSaving;
         const text = noteIn?.value.trim();
-        if (!text || noteIn.dataset.saved === text) return;
-        await api(`/api/tasks/${t.id}/notes`, { body: { text } });
-        noteIn.dataset.saved = text;
-        noteIn.value = '';
-        toast('Note saved');
+        if (!text) return Promise.resolve(false);
+        noteSaving = (async () => {
+          try {
+            await api(`/api/tasks/${t.id}/notes`, { body: { text } });
+            if (noteIn.value.trim() === text) noteIn.value = ''; // keep anything typed meanwhile
+            toast('Note saved');
+            t.notes = (t.notes || 0) + 1;
+            const sum = more?.querySelector('summary');
+            if (sum) sum.textContent = `More · 📝 ${t.notes}`;
+            await loadLog();
+            return true;
+          } finally {
+            noteSaving = null;
+          }
+        })();
+        return noteSaving;
       };
       // One-tap call result: shown after tapping 📞 Call (or "Log a call result" under More). The hub writes the note,
       // sets the stage / interview date, and hands the next step to the AI or to a "call again" card.
@@ -1154,7 +1188,7 @@
       // More: details, latest note, history & notes, flag, move
       const logBox = h('div', { style: 'font-size:12px;margin-top:6px' });
       const noteIn = h('textarea', { rows: 2, placeholder: 'Add a note (e.g. call notes: what was discussed) — saved when you leave the box', style: 'margin-top:6px',
-        onblur: () => flushNote().then(() => loadLog()).catch((e) => toast(e.message)) });
+        onblur: () => flushNote().catch((e) => toast(e.message)) });
       const loadLog = async () => {
         const rows = await api(`/api/tasks/${t.id}/log`).catch(() => []);
         logBox.replaceChildren(...(rows.length ? rows.map((r) => h('div', { style: `padding:3px 0;border-bottom:1px solid var(--line);${r.kind === 'note' ? 'font-weight:600' : ''}` },
@@ -1171,7 +1205,7 @@
         viewBoard();
       }) }, h('option', { value: '' }, 'Move…'),
         ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'].filter((s) => s !== t.status).map((s) => h('option', { value: s }, s.replace('_', ' '))));
-      const more = h('details', { class: 'more', ontoggle: (e) => { if (e.target.open) loadLog(); } },
+      const more = h('details', { class: 'more', 'data-key': `more:${t.id}`, ontoggle: (e) => { if (e.target.open) loadLog(); } },
         h('summary', {}, t.notes ? `More · 📝 ${t.notes}` : 'More'),
         t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, withPhones(t.details)) : null,
         closed ? null : h('div', { class: 'row', style: 'margin:6px 0' },
@@ -1181,13 +1215,8 @@
         h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' }, 'History & notes'),
         logBox,
         noteIn,
-        h('button', { class: 'btn small', style: 'margin-top:4px', onclick: guard(async () => {
-          if (!noteIn.value.trim()) return;
-          await api(`/api/tasks/${t.id}/notes`, { body: { text: noteIn.value } });
-          noteIn.value = '';
-          toast('Note saved');
-          loadLog();
-        }) }, 'Save note'));
+        // pressing the button already left the box (that save is running): this only waits for it, or saves if not
+        h('button', { class: 'btn small', style: 'margin-top:4px', onmousedown: (e) => e.preventDefault(), onclick: guard(() => flushNote()) }, 'Save note'));
       const pick = closed || !selecting ? null : h('input', { type: 'checkbox', class: 'pick', 'data-id': t.id, 'aria-label': `Select "${t.title}"`, checked: picked.has(t.id),
         onchange: (e) => { toggle(t.id, e.target.checked); drawPickBar(); } });
       const el = h('div', { class: 'taskcard' + (t.priority ? ' prio' : '') + (overdue ? ' overdue' : '') + (picked.has(t.id) ? ' picked' : ''), 'data-id': t.id },
@@ -1216,6 +1245,7 @@
           if (e.button > 0) return;
           // pressing on text (title, note, details, a number) is for selecting/copying it, not for selecting cards
           if (e.target.closest('.tc-title, .tc-note, .tc-meta, details.more, a, button, input, textarea, select')) return;
+          if (document.activeElement?.matches?.('textarea') || [...el.querySelectorAll('textarea')].some((x) => x.value.trim())) return; // typing a note
           fired = false;
           start = [e.clientX, e.clientY];
           timer = setTimeout(() => {
@@ -1267,14 +1297,14 @@
     }
     const dayLabel = (k) => (k === tomorrow ? 'Tomorrow' : new Date(k + 'T12:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' }));
     const futureEl = days.length
-      ? days.map((g, i) => h('details', { class: 'day', open: i < 2 },
+      ? days.map((g, i) => h('details', { class: 'day', 'data-key': `day:${g.k}`, open: i < 2 },
           h('summary', {}, h('b', {}, dayLabel(g.k)), h('span', { class: 'muted' }, ` · ${g.items.length}`), selectAll(g.items),
             g.items.some((t) => t.priority) ? h('span', { class: 'ico', title: 'Has a must-do' }, ' ⭐') : null,
             h('span', { class: 'muted day-peek' }, ' — ', g.items.slice(0, 3).map((t) => `${fmtTime(due(t))} ${t.title.replace(/^(Interview|Follow up|Scheduled): /, '').replace(/ — .*$/, '')}`).join(' · '))),
           h('div', { class: 'cardlist' }, g.items.map(card))))
       : [h('p', { class: 'muted' }, 'Nothing planned yet.')];
     const section = (titleIcon, title, items, body, { open = true, hint, cards } = {}) =>
-      h('details', { class: 'section', open },
+      h('details', { class: 'section', 'data-key': `sec:${title}`, open },
         h('summary', {}, h('span', { class: 'sec-title' }, titleIcon, ' ', title), h('span', { class: 'count' }, items), hint ? h('span', { class: 'muted sec-hint' }, hint) : null, cards ? selectAll(cards) || (cards.length ? selectBtn() : null) : null),
         body);
     // filters: compact selects
@@ -1382,10 +1412,10 @@
     const nowReplies = now.filter((t) => t.kind === 'reply' && !t.priority);
     const nowMain = now.filter((t) => !nowReplies.includes(t));
     shell([
-      h('div', { class: 'row', style: 'margin-bottom:8px' }, h('h1', { class: 'grow', style: 'margin:0' }, 'Board'), filters),
+      h('div', { class: 'row board-root', style: 'margin-bottom:8px' }, h('h1', { class: 'grow', style: 'margin:0' }, 'Board'), filters),
       section('🔥', 'Do now', now.length, h('div', {},
         nowMain.length ? h('div', { class: 'cardlist' }, nowMain.map(card)) : !nowReplies.length ? h('p', { class: 'muted' }, 'All clear — nothing due now.') : null,
-        nowReplies.length ? h('details', { class: 'day', open: nowReplies.length <= 3 }, h('summary', {}, h('b', {}, `💬 ${nowReplies.length} candidate${nowReplies.length > 1 ? 's' : ''} waiting for a reply`), h('span', { class: 'muted' }, ' — the AI drafts these; open to see them')),
+        nowReplies.length ? h('details', { class: 'day', 'data-key': 'replies', open: nowReplies.length <= 3 }, h('summary', {}, h('b', {}, `💬 ${nowReplies.length} candidate${nowReplies.length > 1 ? 's' : ''} waiting for a reply`), h('span', { class: 'muted' }, ' — the AI drafts these; open to see them')),
           h('div', { class: 'cardlist' }, nowReplies.map(card))) : null),
         { hint: selecting ? 'tap cards to select' : priorityNow ? `${priorityNow} must-do` : '', cards: now }),
       section('📅', 'Future', future.length, h('div', {}, futureEl), { hint: 'by day' }),
@@ -1396,6 +1426,12 @@
       pickBar,
     ]);
     drawPickBar();
+    if (wasBoard) {
+      const m = document.querySelector('main');
+      m.querySelectorAll('details[data-key]').forEach((d) => { if (openFolds.has(d.dataset.key)) d.open = true; else if (shutFolds.has(d.dataset.key)) d.open = false; });
+      m.scrollTop = keepY;
+      requestAnimationFrame(() => { m.scrollTop = keepY; }); // again once laid out (images, open folds)
+    }
   }
 
   // ---------- role chips (Chef / Front office / Housekeeping …) ----------
@@ -1900,16 +1936,21 @@
         // edits are saved as you type, so approving another draft (or reloading) never loses them
         let timer = null;
         let last = ta.value;
+        // one save at a time: a save already running is awaited (then the newest text is saved if it changed), so
+        // blur + Approve, or a timer + blur, never race each other
+        let inFlight = null;
         const save = async () => {
           clearTimeout(timer);
-          if (ta.value === last || !ta.value.trim()) return;
+          if (inFlight) await inFlight.catch(() => {});
+          if (ta.value === last || !ta.value.trim() || r.handled) return;
           const text = ta.value;
           saved.textContent = 'Saving…';
+          inFlight = api(`/api/outbox/${r.id}`, { method: 'PATCH', body: { text } });
           try {
-            await api(`/api/outbox/${r.id}`, { method: 'PATCH', body: { text } });
+            await inFlight;
             last = text;
             saved.textContent = '✓ Saved';
-          } catch (e) { saved.textContent = '⚠️ Not saved: ' + e.message; }
+          } catch (e) { saved.textContent = '⚠️ Not saved: ' + e.message; } finally { inFlight = null; }
         };
         ta.addEventListener('input', () => { saved.textContent = 'Editing…'; clearTimeout(timer); timer = setTimeout(save, 800); });
         ta.addEventListener('blur', save);
@@ -1954,6 +1995,7 @@
         r.status === 'draft'
           ? h('div', {}, ta, h('div', { class: 'row', style: 'margin-top:8px' },
               h('button', { class: 'btn primary small', onclick: guard(async () => {
+                await r.saveNow?.(); // a save still running finishes first (else it fails after the approval: "Not saved")
                 const u = await api(`/api/outbox/${r.id}/approve`, { body: r.payload.waTemplate ? {} : { text: ta.value } });
                 const msg = later(u) ? `✅ Approved — goes out ${whenLong(u.scheduled_at)}` : '✅ Approved — sending soon';
                 toast(msg);
@@ -2070,10 +2112,10 @@ ${laterText(shown)}` : ''}`)) return;
       const firstBy = f.atRisk.map((m) => m.expires_at).sort()[0];
       const others = state.accounts.filter((a) => a.id !== f.account);
       const pickTo = h('select', { 'aria-label': 'Send them from another number' }, h('option', { value: '' }, '📱 Send them from…'), ...others.map((a) => h('option', { value: a.id }, `${a.label}${a.phone ? ' · +' + a.phone : ''}`)));
-      pickTo.addEventListener('change', async () => {
+      pickTo.addEventListener('change', guard(async () => {
         if (!pickTo.value) return;
         await moveTo(ids, pickTo.value);
-      });
+      }));
       return h('div', { class: 'card', style: 'max-width:820px;margin-bottom:10px;border-left:4px solid var(--bad)' },
         h('b', {}, `⚠️ Not enough sending capacity on ${f.label}`),
         f.atRisk.length ? h('p', { style: 'margin:6px 0' },
@@ -2083,19 +2125,19 @@ ${laterText(shown)}` : ''}`)) return;
         f.atRisk.length ? h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;margin-top:6px' },
           h('button', { class: 'btn small', onclick: () => { state.outboxIds = ids; state.outboxSelecting = true; state.outboxPicked = new Set(ids); viewOutbox(); } }, '👀 Show them'),
           pickTo,
-          h('button', { class: 'btn small', onclick: async () => {
+          h('button', { class: 'btn small', onclick: guard(async () => {
             if (!confirm(`Skip these ${ids.length} messages? They are rejected and not sent.`)) return;
             const r = await api('/api/outbox/reject-selected', { body: { ids } });
             toast(`Skipped ${r.rejected}`);
             viewOutbox({ keepScroll: true });
-          } }, '✖ Skip them'),
-          f.raiseTo ? h('button', { class: 'btn small', onclick: async () => {
+          }) }, '✖ Skip them'),
+          f.raiseTo ? h('button', { class: 'btn small', onclick: guard(async () => {
             if (!confirm(`Raise ${f.label}'s daily limit from ${f.dailyCap} to ${f.raiseTo}?${f.cloud ? '' : `\n\nThis is a linked phone: more first messages a day means more risk of a WhatsApp block (a number was blocked after 48 new numbers in a day; the hub never goes above ${f.maxSafe}). You can lower it again afterwards.`}`)) return;
             await api(`/api/accounts/${encodeURIComponent(f.account)}`, { method: 'PATCH', body: { settings: { dailyCap: f.raiseTo, ...(f.cloud ? {} : { newChatsPer24h: Math.max(state.accounts.find((a) => a.id === f.account)?.settings?.newChatsPer24h || 0, Math.min(f.raiseTo, f.maxSafe)) }) } } });
             await loadAccounts(true);
             toast(`${f.label}: daily limit now ${f.raiseTo}`);
             viewOutbox({ keepScroll: true });
-          } }, `⬆ Raise limit to ${f.raiseTo}`) : h('span', { class: 'muted', style: 'font-size:12px;align-self:center' }, f.cloud ? 'Meta’s own daily limit is reached — use another number or skip.' : `Even ${f.maxSafe} a day (the safe maximum) isn’t enough — use another number or skip.`)) : null);
+          }) }, `⬆ Raise limit to ${f.raiseTo}`) : h('span', { class: 'muted', style: 'font-size:12px;align-self:center' }, f.cloud ? 'Meta’s own daily limit is reached — use another number or skip.' : `Even ${f.maxSafe} a day (the safe maximum) isn’t enough — use another number or skip.`)) : null);
     });
     const when = (t) => (t ? new Date(t).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '');
     const statusCards = statuses.filter((q) => q.queued || q.drafts).map((q) => h('div', { class: 'card', style: `max-width:820px;margin-bottom:10px;border-left:4px solid ${q.state === 'held' ? 'var(--bad)' : 'var(--accent)'}` },

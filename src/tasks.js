@@ -3,7 +3,7 @@
  * 10 interested ones tomorrow"). Tasks that own outbox messages move between columns automatically
  * from the state of those messages; plain to-do tasks are moved by you or the AI.
  */
-import { query } from './db.js';
+import { query, tx } from './db.js';
 import { roleOf, roleFilter } from './campaign.js';
 import { toJid } from './store.js';
 import config from './config.js';
@@ -21,11 +21,18 @@ export async function logTask(taskId, text, { actor = 'hub', kind = 'event' } = 
 
 /** A note on a card (call notes, what was agreed) — from the owner ('you') or the AI. */
 export async function addNote(taskId, text, actor = 'you') {
-  if (!String(text || '').trim()) throw new Error('Write the note first');
-  const [t] = await query('UPDATE tasks SET updated_at = now() WHERE id = $1 RETURNING id, title', [taskId]);
-  if (!t) throw new Error('Task not found');
-  await logTask(t.id, String(text).trim(), { actor, kind: 'note' });
-  return t;
+  const note = String(text || '').trim();
+  if (!note) throw new Error('Write the note first');
+  // In one transaction that locks the card: the same note from the same person seconds ago is one note sent twice
+  // (a double tap, blur + "Save note"), not two — a second request waits for the first, then sees it.
+  return tx(async (q) => {
+    const [t] = await q('UPDATE tasks SET updated_at = now() WHERE id = $1 RETURNING id, title', [taskId]);
+    if (!t) throw new Error('Task not found');
+    const [dup] = await q(`SELECT 1 FROM task_log WHERE task_id = $1 AND kind = 'note' AND actor = $2 AND text = $3 AND at > now() - interval '30 seconds' LIMIT 1`, [t.id, actor, note.slice(0, 2000)]);
+    if (dup) return { ...t, duplicate: true };
+    await q('INSERT INTO task_log (task_id, actor, kind, text) VALUES ($1,$2,$3,$4)', [t.id, actor, 'note', note.slice(0, 2000)]);
+    return t;
+  });
 }
 
 /** One note on several cards; optionally a card for the AI (due now) that lists them, and close the originals. */
