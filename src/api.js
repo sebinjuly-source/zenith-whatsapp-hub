@@ -543,13 +543,14 @@ export function buildApp() {
     res.json(p);
   }));
   api.get('/playbooks', wrap(async (req, res) => {
-    const { listCampaignPlaybooks } = await import('./playbook.js');
-    res.json(await listCampaignPlaybooks());
+    const { listCampaignPlaybooks, deletedPlaybooks } = await import('./playbook.js');
+    // ?deleted=1: the deleted ones (restorable from their history)
+    res.json(req.query.deleted === '1' ? await deletedPlaybooks() : await listCampaignPlaybooks());
   }));
   api.delete('/playbooks/:campaign', wrap(async (req, res) => {
     const { deleteCampaignPlaybook } = await import('./playbook.js');
-    await deleteCampaignPlaybook(req.params.campaign);
-    await act(req, null, `Deleted the "${req.params.campaign}" campaign playbook`);
+    await deleteCampaignPlaybook(req.params.campaign, { actor: actorOf(req) });
+    await act(req, null, `Deleted the "${req.params.campaign}" campaign playbook (kept in its history — restorable)`);
     res.json({ ok: true });
   }));
   // Rows with status columns, e.g. for the Google Sheets script to write back

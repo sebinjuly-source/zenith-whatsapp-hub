@@ -2310,6 +2310,7 @@ ${laterText(shown)}` : ''}`)) return;
       h('button', { class: 'btn primary', type: 'submit' }, 'Save prices'));
     // Main playbook + one per campaign (the AI reads the main one always, a campaign's when it works on it)
     const pbList = await api('/api/playbooks').catch(() => []);
+    const pbDeleted = await api('/api/playbooks?deleted=1').catch(() => []);
     const pbText = h('textarea', { name: 'text', rows: 16, value: pb.text || '' });
     const pbStatus = h('span', { class: 'muted', style: 'font-size:13px' }, 'Saves by itself as you type.');
     const pbInc = h('div', { class: 'row', style: 'flex-wrap:wrap;gap:4px 14px;margin-bottom:8px' });
@@ -2389,6 +2390,7 @@ ${laterText(shown)}` : ''}`)) return;
     }) },
       h('option', { value: '' }, '📘 Main playbook (always read)'),
       pbList.map((p) => h('option', { value: p.campaign }, `🎯 ${p.campaign}`)),
+      pbDeleted.map((p) => h('option', { value: p.campaign }, `🗑 ${p.campaign} (deleted — History restores it)`)),
       h('option', { value: '+' }, '＋ New campaign playbook…'));
     state.pbCampaign = '';
     showIncludes();
@@ -2398,7 +2400,17 @@ ${laterText(shown)}` : ''}`)) return;
       pbInc,
       pbText,
       h('div', { style: 'margin-top:8px' }, pbStatus, h('span', { class: 'muted', style: 'font-size:12px' }, ' · Ctrl+Z undoes while typing; History keeps every saved version.')),
-      pbHistFold);
+      pbHistFold,
+      h('div', { style: 'margin-top:10px' }, h('button', { class: 'btn small danger', type: 'button', onclick: guard(async () => {
+        const c = state.pbCampaign;
+        if (!c) return toast('The main playbook can\'t be deleted — pick a campaign playbook first');
+        if (!pbList.some((p) => p.campaign === c)) return toast('This playbook is already deleted — open History to restore it');
+        if (!confirm(`Delete the "${c}" playbook? The AI stops reading it. Its text stays in History, so you can restore it.`)) return;
+        clearTimeout(pbTimer);
+        await api(`/api/playbooks/${encodeURIComponent(c)}`, { method: 'DELETE' });
+        toast(`Deleted "${c}" — restorable from History`);
+        viewSettings();
+      }) }, '🗑 Delete this playbook')));
     shell([
       h('div', { class: 'row', style: 'margin-bottom:6px' }, h('h1', { class: 'grow', style: 'margin:0' }, '⚙️ Settings'),
         h('select', { style: 'max-width:300px', 'aria-label': 'Settings for', onchange: (e) => { state.settingsFor = e.target.value; viewSettings(); } },

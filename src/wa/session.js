@@ -607,7 +607,7 @@ export class Session extends EventEmitter {
     // Opt-out replies ("stop", "not interested" …) tag the contact so campaigns skip them.
     if (r.body && !isJidGroup(r.chatJid)) {
       const text = r.body.trim().toLowerCase();
-      if (settings.optOutWords.some((w) => text === w || (text.length < 60 && text.includes(w)))) {
+      if (isOptOut(text, settings.optOutWords)) {
         await store.updateContact(this.id, r.chatJid, { addTags: ['opted-out'] });
         await logEvent(this.id, 'info', `${r.chatJid.split('@')[0]} opted out ("${r.body.slice(0, 40)}")`);
       }
@@ -866,4 +866,15 @@ export class Session extends EventEmitter {
     }
     return sent;
   }
+}
+
+/**
+ * Is this incoming text an opt-out ("stop", "not interested" …)? About themselves only: the message is or starts
+ * with the phrase, or is very short — and not about someone else ("So he's not interested may be" from a referrer
+ * about his friend once tagged the referrer opted-out).
+ */
+export function isOptOut(text, words) {
+  const t = String(text || '').trim().toLowerCase();
+  if (/\b(he|she|they|him|his|her|them|woh?|vo|unk[aeo]|usk[aeo]|bhai|friend|dost)\b/.test(t)) return false;
+  return (words || []).some((w) => t === w || t.startsWith(w) || (t.length < 30 && t.includes(w)));
 }

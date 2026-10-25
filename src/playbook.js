@@ -126,6 +126,17 @@ export async function listCampaignPlaybooks() {
   return rows.map((r) => ({ campaign: r.key.slice('playbook:'.length), chars: String(r.value?.text || '').length, includes: includesOf(r.value?.text), updatedAt: r.updated_at }));
 }
 
-export async function deleteCampaignPlaybook(campaign) {
-  await query(`DELETE FROM config WHERE lower(key) = lower($1)`, [keyOf(campaign)]);
+/** Delete a campaign playbook. Its text stays in the history (a last version is kept), so it can be restored. */
+export async function deleteCampaignPlaybook(campaign, { actor = 'you' } = {}) {
+  const [cur] = await query(`SELECT key, value FROM config WHERE lower(key) = lower($1)`, [keyOf(campaign)]);
+  if (!cur) throw new Error(`No playbook for "${campaign}"`);
+  await query(`INSERT INTO playbook_versions (key, text, actor) VALUES ($1, $2, $3)`, [cur.key, String(cur.value?.text ?? ''), `${actor} (deleted)`]);
+  await query(`DELETE FROM config WHERE key = $1`, [cur.key]);
+}
+
+/** Campaign playbooks that were deleted (their history is kept): [{ campaign, deletedAt }]. */
+export async function deletedPlaybooks() {
+  const rows = await query(`SELECT DISTINCT ON (lower(v.key)) v.key, v.at FROM playbook_versions v
+    WHERE v.key LIKE 'playbook:%' AND NOT EXISTS (SELECT 1 FROM config c WHERE lower(c.key) = lower(v.key)) ORDER BY lower(v.key), v.id DESC`);
+  return rows.map((r) => ({ campaign: r.key.slice('playbook:'.length), deletedAt: r.at }));
 }

@@ -85,9 +85,17 @@ const helpFor = (err) => {
  * how many of their messages are unanswered, the campaign / list / stage, and whether a Board card or a draft already
  * covers it. People who are on no list get no "Reply to" card, so this is how the AI sees them.
  */
-async function inboxRows({ since, account, campaign, waitingOnly = true, limit = 40 }) {
+async function inboxRows({ since, account, campaign, waitingOnly = true, limit = 40, unlisted = false }) {
   const p = [since];
   const where = [];
+  // never our own numbers (the hub's numbers, the owner's alert phones: staff talking to each other)
+  const { alertPhones } = await import('./notify.js');
+  const own = [...manager.list().map((a) => a.phone), ...(await alertPhones().catch(() => []))].filter(Boolean).map((x) => String(x).replace(/\D/g, ''))
+    .flatMap((x) => (x.length === 10 ? [x, '91' + x] : [x]));
+  p.push(own);
+  where.push(`split_part(ib.chat_jid, '@', 1) <> ALL($${p.length}::text[])`);
+  // people on a list (a campaign) only, unless asked: the numbers are also used by staff for everyday chats
+  if (!unlisted) where.push('EXISTS (SELECT 1 FROM list_members lmx WHERE lmx.jid = ib.chat_jid)');
   if (account) { p.push(account); where.push(`ib.account_id = $${p.length}`); }
   if (campaign) { p.push(campaign); where.push(roleFilter(roleOf('ib.account_id', 'ib.chat_jid'), p.length)); }
   if (waitingOnly) where.push('NOT ib.from_me');
@@ -98,7 +106,7 @@ async function inboxRows({ since, account, campaign, waitingOnly = true, limit =
        WHERE ts > $1 AND chat_jid NOT LIKE '%@g.us' AND chat_jid NOT LIKE '%broadcast%' AND chat_jid NOT LIKE '%@newsletter'
        ORDER BY account_id, chat_jid, ts DESC)
      SELECT ib.*, ${roleOf('ib.account_id', 'ib.chat_jid')} AS campaign,
-       COALESCE(NULLIF(ct.name, ''), NULLIF(ch.name, ''), ct.notify) AS name,
+       COALESCE(NULLIF(ct.name, ''), NULLIF(ch.name, ''), (SELECT NULLIF(m.name, '') FROM list_members m WHERE m.jid = ib.chat_jid AND COALESCE(m.name, '') <> '' LIMIT 1), ct.notify) AS name,
        (SELECT count(*)::int FROM messages y WHERE y.account_id = ib.account_id AND y.chat_jid = ib.chat_jid AND NOT y.from_me
           AND y.ts > COALESCE((SELECT max(z.ts) FROM messages z WHERE z.account_id = ib.account_id AND z.chat_jid = ib.chat_jid AND z.from_me), 0)) AS unanswered,
        (SELECT m.stage FROM list_members m JOIN lists li ON li.id = m.list_id WHERE m.jid = ib.chat_jid ORDER BY (li.account_id = ib.account_id) DESC, li.id DESC LIMIT 1) AS stage,
@@ -264,7 +272,7 @@ function buildServer(playbook = '', focus = '') {
 
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). The Board only has cards for people on lists; inbox_summary shows every chat waiting for an answer on every number (new guests, enquiries) — look at it before deciding, and read the chat (get_messages) before drafting. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who have written to us before (interested candidates, interview follow-ups) → first messages to new people → nudges to non-repliers. Only messages to people who never wrote count toward a linked number's daily limit. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). Work only with people on campaign lists: they get "Reply to" cards, and inbox_summary shows every one of them waiting for an answer (also those whose card was closed before a new message) — look at it before deciding and read the chat (get_messages) before drafting. Chats of people on no list are the staff's everyday chats: leave them alone unless the owner asks; never answer the hub's own numbers or the owner's phones. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who have written to us before (interested candidates, interview follow-ups) → first messages to new people → nudges to non-repliers. Only messages to people who never wrote count toward a linked number's daily limit. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
   const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter for this call: a campaign name, "none" (hotel / no campaign) or "all". Default: ${focus ? `"${focus}" (the campaign the owner has open)` : 'all campaigns'}.`);
   const tool = (name, description, inputSchema, fn) => {
@@ -330,8 +338,8 @@ function buildServer(playbook = '', focus = '') {
     const waiting = await inboxRows({ since: Math.floor(Date.now() / 1000) - 3 * 86400, campaign: a.campaign, limit: 200 }).catch(() => []);
     const unanswered = waiting.filter((w) => !w.waiting_msg);
     const noCard = unanswered.filter((w) => !w.card);
-    out.push(`   INBOX: ${unanswered.length} chat(s) waiting for an answer (last 3 days, no draft yet); ${noCard.length} of them have no Board card (people on no list, e.g. new guests) → inbox_summary`);
-    for (const w of noCard.slice(0, 6)) out.push(`   - ${w.account_id}: ${w.name || '+' + w.chat_jid.split('@')[0]}${w.campaign ? ` · ${w.campaign}` : ' · no campaign'} — "${trim(w.body || '[' + w.type + ']', 80)}"`);
+    out.push(`   INBOX (people on lists): ${unanswered.length} chat(s) waiting for an answer (last 3 days, no draft yet)${noCard.length ? `; ${noCard.length} with no open card (closed earlier, new message since) → inbox_summary` : ''}`);
+    for (const w of noCard.slice(0, 6)) out.push(`   - ${w.account_id}: ${w.name || '+' + w.chat_jid.split('@')[0]}${w.campaign ? ` · ${w.campaign}` : ''}${w.stage ? ` [${w.stage}]` : ''} — "${trim(w.body || '[' + w.type + ']', 80)}"`);
     const [fb] = await query(`SELECT count(*)::int n FROM outbox WHERE status = 'rejected' AND error LIKE 'Rejected:%' AND created_at > now() - interval '3 days'`);
     if (fb.n) out.push(`   OWNER FEEDBACK: ${fb.n} draft(s) rejected with a reason in the last 3 days → owner_feedback (some reasons are instructions, e.g. "wish him on festivals")`);
     const upcomingVisits = later.filter((t) => t.kind === 'visit').slice(0, 5);
@@ -761,15 +769,16 @@ function buildServer(playbook = '', focus = '') {
     return `Changed ${r.changed.length} (${what}).${r.skipped.length ? ` Skipped ${r.skipped.length}: ${r.skipped.slice(0, 20).map((x) => `#${x.id} ${x.why}`).join('; ')}` : ''}`;
   });
 
-  tool('inbox_summary', 'The INBOX at a glance across all numbers (big picture before drafting): chats with new messages, newest first — who wrote, how many of their messages are still unanswered, their campaign / list / stage, the last message, and whether a Board card or a waiting draft already covers it. People on no list (new guests, enquiries, businesses) get no "Reply to" card — this is where you see them. Then read a chat with get_messages(full_text) before answering. Skip spam, ads and businesses selling to us.', {
+  tool('inbox_summary', 'The INBOX at a glance across all numbers (big picture before drafting): chats of people on campaign lists with new messages, newest first — who wrote, how many of their messages are still unanswered, their campaign / list / stage, the last message, and whether a Board card or a waiting draft covers it (a card closed earlier + a new message = NO CARD: look at it). The hub\'s own numbers and the owner\'s phones are never listed. Chats of people on no list are staff\'s everyday chats — leave them alone; include_unlisted=true only when the owner asks about them. Read a chat with get_messages(full_text) before answering.', {
     since: z.string().optional().describe('From when: "YYYY-MM-DD HH:MM" (owner time) or ISO; default the last 24 hours'),
     account: z.string().optional().describe('One number; default all'),
     waiting_only: z.boolean().optional().describe('Only chats where they spoke last (default true); false = every chat with activity'),
     limit: z.number().int().min(1).max(200).optional(),
+    include_unlisted: z.boolean().optional().describe('Also chats of people on no list (staff\'s everyday chats) — only when the owner asks'),
   }, async (a) => {
     const since = a.since ? Math.floor(new Date(localTime(a.since)).getTime() / 1000) : Math.floor(Date.now() / 1000) - 86400;
     if (!since) throw new Error('Could not read since');
-    const rows = await inboxRows({ since, account: a.account ? (await manager.resolve(a.account)).id : null, campaign: a._c, waitingOnly: a.waiting_only !== false, limit: a.limit || 60 });
+    const rows = await inboxRows({ since, account: a.account ? (await manager.resolve(a.account)).id : null, campaign: a._c, waitingOnly: a.waiting_only !== false, limit: a.limit || 60, unlisted: !!a.include_unlisted });
     if (!rows.length) return `Nothing ${a.waiting_only === false ? 'new' : 'waiting'} since ${d(new Date(since * 1000))}.`;
     const byAcc = {};
     for (const r of rows) (byAcc[r.account_id] ||= []).push(r);

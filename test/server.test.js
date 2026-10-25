@@ -1806,6 +1806,13 @@ test('playbook edits are versioned (one version per sitting), logged once, resto
   assert.doesNotMatch(inCamp, /SALES RULES|Sales test/, 'other campaigns are not shown');
   assert.match(await mcp('get_playbook', { campaign: 'all' }), /Sales test/);
   await call('PUT', '/api/focus', { campaign: '' });
+  // delete from Settings: gone for the AI, kept in history, restorable
+  assert.equal((await call('DELETE', `/api/playbooks/${encodeURIComponent('Sales test')}`)).status, 200);
+  assert.ok((await call('GET', '/api/playbooks?deleted=1')).data.some((p) => p.campaign === 'Sales test'));
+  const sh = (await call('GET', `/api/playbook/history?campaign=${encodeURIComponent('Sales test')}`)).data;
+  assert.equal(sh[0].text, 'SALES RULES');
+  await call('POST', '/api/playbook/restore', { id: sh[0].id });
+  assert.equal((await call('GET', `/api/playbook?campaign=${encodeURIComponent('Sales test')}`)).data.text, 'SALES RULES', 'restored');
   for (const c of ['Hiring – all roles', 'Cook test', 'Sales test']) await call('DELETE', `/api/playbooks/${encodeURIComponent(c)}`);
 });
 
@@ -1839,9 +1846,19 @@ test('funnel stages per campaign (hiring, sales, win-back, own); closed custom s
   // the inbox: someone on no list wrote — no Board card, but the AI sees them
   const now = Math.floor(Date.now() / 1000);
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300099@s.whatsapp.net','IN1',false,$1,'text','Do you have a room for 2 nights from Friday?')`, [now - 600]);
-  const inbox = await mcp('inbox_summary', { campaign: 'all' });
-  assert.match(inbox, /919833300099.*not on a list.*1 unanswered.*room for 2 nights.*NO CARD/);
-  assert.match(await mcp('hub_overview', { campaign: 'all' }), /INBOX: \d+ chat\(s\) waiting for an answer.*no Board card.*inbox_summary/);
+  // people on no list are staff's everyday chats: left out unless asked
+  assert.doesNotMatch(await mcp('inbox_summary', { campaign: 'all' }), /919833300099/);
+  assert.match(await mcp('inbox_summary', { campaign: 'all', include_unlisted: true }), /919833300099.*not on a list.*1 unanswered.*room for 2 nights.*NO CARD/);
+  // a person on a list whose card was closed, then wrote again: shown (NO CARD)
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300001@s.whatsapp.net','IN2',false,$1,'text','Sample received, thanks')`, [now - 300]);
+  await query(`UPDATE tasks SET status = 'done' WHERE ref = 'reply:stg:919833300001@s.whatsapp.net'`);
+  assert.match(await mcp('inbox_summary', { campaign: 'all' }), /Asha.*Gift buyers.*Sample received/);
+  assert.match(await mcp('hub_overview', { campaign: 'all' }), /INBOX \(people on lists\): \d+ chat\(s\) waiting/);
+  // our own numbers (the hub's, the owner's alert phones) never show, even when on no list
+  await call('PUT', '/api/alerts', { phones: '9833300077' });
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300077@s.whatsapp.net','IN3',false,$1,'text','They are constantly calling me')`, [now - 200]);
+  assert.doesNotMatch(await mcp('inbox_summary', { campaign: 'all', include_unlisted: true }), /constantly calling/);
+  await call('PUT', '/api/alerts', { phones: '' });
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'stg' AND status IN ('draft','queued')`);
   await manager.remove('stg');
 });
@@ -2369,4 +2386,11 @@ test('the dashboard script parses (a syntax error there blanks the whole dashboa
   const vm = await import('node:vm');
   const code = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', 'public', 'app.js'), 'utf8');
   assert.doesNotThrow(() => new vm.Script(code, { filename: 'public/app.js' }));
+});
+
+test('opt-out words: only about themselves — a referrer saying his friend is not interested is not an opt-out (Naresh, 24 Oct)', async () => {
+  const { isOptOut } = await import('../src/wa/session.js');
+  const w = ['stop', 'unsubscribe', 'not interested', 'dont message', "don't message"];
+  for (const t of ['Not interested', 'stop', 'Sorry not interested sir', 'I am not interested', 'please stop messaging']) assert.equal(isOptOut(t, w), true, t);
+  for (const t of ["So he's not interested may be", 'wo not interested hai', 'Stop the follow up for him', 'Hi ma\'am jagdish bol rahe hai salary aur duty off nahi hai, not interested']) assert.equal(isOptOut(t, w), false, t);
 });
