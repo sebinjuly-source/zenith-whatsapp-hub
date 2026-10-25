@@ -305,7 +305,7 @@ export async function noteRejection(rows, { reason = '', actor = 'you' } = {}) {
     ).catch(() => []);
     const text = `${actor === 'ai' ? 'AI' : 'Owner'} rejected draft #${r.id}${reason ? ` — reason: ${reason}` : ' (no reason given — do not draft the same again; ask the owner if unsure)'}: "${String(r.payload?.text || r.payload?.waTemplate?.name || '').replace(/\s+/g, ' ').slice(0, 160)}"`;
     for (const c of cards) await logTask(c.id, text, { actor, kind: 'note' });
-    if (reason) await query('UPDATE outbox SET error = $2 WHERE id = $1', [r.id, `Rejected: ${reason}`]).catch(() => {});
+    if (reason) await query('UPDATE outbox SET error = $2 WHERE id = $1', [r.id, `${actor === 'ai' ? 'Rejected by AI' : 'Rejected'}: ${reason}`]).catch(() => {});
   }
 }
 
@@ -315,6 +315,9 @@ export async function rejectMany(ids, { reason = '', actor = 'you' } = {}) {
     [ids.map(Number)],
   );
   await noteRejection(rows.filter((r) => r.source !== 'campaign'), { reason, actor });
+  // campaign messages get no card note, but the reason is still kept on each (the AI reads it in owner_feedback)
+  const camp = rows.filter((r) => r.source === 'campaign').map((r) => r.id);
+  if (reason && camp.length) await query('UPDATE outbox SET error = $2 WHERE id = ANY($1::bigint[])', [camp, `${actor === 'ai' ? 'Rejected by AI' : 'Rejected'}: ${reason}`]);
   await afterBatchChange(rows);
   return { rejected: rows.length, perAccount: countBy(rows, 'account_id') };
 }

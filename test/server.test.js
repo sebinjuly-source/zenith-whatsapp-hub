@@ -1742,6 +1742,15 @@ test('owner requests 25 Oct: playbooks are not hidden by the open campaign; camp
   const m2 = await outbox.enqueue({ account: 'fb', to: '919822200002', payload: { text: 'win-back' }, source: 'campaign' });
   await outbox.reject(m2.id, { reason: 'Just wish him on festivals' });
   assert.match(await mcp('owner_feedback', {}), /Just wish him on festivals/);
+  // several campaign drafts rejected at once keep the reason too; the AI's own rejections are labelled as the AI's
+  const m3 = await outbox.enqueue({ account: 'fb', to: '919822200003', payload: { text: 'a' }, source: 'campaign' });
+  const m4 = await outbox.enqueue({ account: 'fb', to: '919822200004', payload: { text: 'b' }, source: 'campaign' });
+  await call('POST', '/api/outbox/reject-selected', { ids: [m3.id, m4.id], reason: 'Only festival wishes for these' });
+  assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE id = ANY($1) AND error = 'Rejected: Only festival wishes for these'`, [[m3.id, m4.id]]))[0].n, 2);
+  const m5 = await outbox.enqueue({ account: 'fb', to: '919822200005', payload: { text: 'c' }, source: 'mcp' });
+  await mcp('reject_draft', { id: m5.id, reason: 'my own duplicate' });
+  assert.match((await query(`SELECT error FROM outbox WHERE id = $1`, [m5.id]))[0].error, /^Rejected by AI: my own duplicate/);
+  assert.doesNotMatch(await mcp('owner_feedback', {}), /my own duplicate/, 'owner feedback shows only the owner\'s reasons');
   // read-only look at anything, never a write, never the WhatsApp keys
   assert.match(await mcp('inspect_data', { sql: `SELECT id, status FROM outbox WHERE account_id = 'fb' ORDER BY id` }), new RegExp(`${m1.id} \\| queued`));
   assert.match(await mcp('inspect_data', { sql: `DELETE FROM outbox` }), /Only a SELECT/);
