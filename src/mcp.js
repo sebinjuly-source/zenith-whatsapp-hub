@@ -9,7 +9,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import config from './config.js';
-import { query } from './db.js';
+import { query, tx } from './db.js';
 import { manager } from './wa/manager.js';
 import * as store from './store.js';
 import * as outbox from './outbox.js';
@@ -231,7 +231,7 @@ function buildServer(playbook = '', focus = '') {
 
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who have written to us before (interested candidates, interview follow-ups) → first messages to new people → nudges to non-repliers. Only messages to people who never wrote count toward a linked number's daily limit. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who have written to us before (interested candidates, interview follow-ups) → first messages to new people → nudges to non-repliers. Only messages to people who never wrote count toward a linked number's daily limit. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
   const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter for this call: a campaign name, "none" (hotel / no campaign) or "all". Default: ${focus ? `"${focus}" (the campaign the owner has open)` : 'all campaigns'}.`);
   const tool = (name, description, inputSchema, fn) => {
@@ -293,6 +293,8 @@ function buildServer(playbook = '', focus = '') {
       out.push(`   OWNER NOTES TO ACT ON (${pendingNotes.length}) → list_tasks(owner_notes=true), do what each says, then add_task_note:`);
       for (const t of pendingNotes.slice(0, 8)) out.push(`   - #${t.id} ${trim(t.title, 60)} — "${trim(t.last_note, 120)}"`);
     }
+    const [fb] = await query(`SELECT count(*)::int n FROM outbox WHERE status = 'rejected' AND error LIKE 'Rejected:%' AND created_at > now() - interval '3 days'`);
+    if (fb.n) out.push(`   OWNER FEEDBACK: ${fb.n} draft(s) rejected with a reason in the last 3 days → owner_feedback (some reasons are instructions, e.g. "wish him on festivals")`);
     const upcomingVisits = later.filter((t) => t.kind === 'visit').slice(0, 5);
     out.push(`2. COMING UP: ${later.length} dated cards${upcomingVisits.length ? '; interviews: ' + upcomingVisits.map((t) => trim(t.title.replace(/^Interview: /, ''), 50)).join('; ') : ''}`);
     const [dr] = a.campaign
@@ -631,17 +633,34 @@ function buildServer(playbook = '', focus = '') {
       : 'Nobody matches. Try fewer or different words, or find_contacts() for the groups.';
   });
 
-  tool('list_outbox', 'List drafts / queued / sent / failed messages created by agents, campaigns or the API.', {
+  tool('list_outbox', 'List drafts / queued / sent / failed / rejected messages (AI, campaigns, API), newest first. Zoom in: ids=[…] or full=true shows each message COMPLETE (whole text, picture/file, send time, "send by", list, task, note, rejection reason). search finds words in the text, note or reason; to = one person; offset pages through. Owner rejection reasons show as "error: Rejected: …" — read and follow them.', {
     account: z.string().optional(),
-    status: z.string().optional().describe('Comma list: draft,queued,sent,failed,rejected (default draft,queued,failed)'),
-    limit: z.number().int().min(1).max(100).optional(),
+    status: z.string().optional().describe('Comma list: draft,queued,sent,failed,rejected (default draft,queued,failed; with ids: any)'),
+    limit: z.number().int().min(1).max(500).optional().describe('Default 20 (full=true: 10)'),
+    offset: z.number().int().min(0).optional(),
+    ids: z.array(z.number().int()).optional().describe('Exactly these messages (any status), shown in full'),
+    full: z.boolean().optional().describe('Whole text and every detail, not a 100-character preview'),
+    search: z.string().optional().describe('Words in the message text, picture caption, note or rejection reason, e.g. "Sir / Madam"'),
+    to: z.string().optional().describe('Only messages to this phone number'),
     campaign: z.string().optional().describe('Campaign = job role, e.g. Chef, Front office, Housekeeping; "none" = chats on no list (hotel guests)'),
   }, async (a) => {
-    const rows = await outbox.listOutbox({ account: a.account, status: a.status || 'draft,queued,failed', limit: a.limit || 20, role: a.campaign });
+    const full = a.full || !!a.ids?.length;
+    const rows = await outbox.listOutbox({ account: a.account, status: a.ids?.length && !a.status ? undefined : a.status || 'draft,queued,failed', limit: a.limit || (full ? 10 : 20),
+      role: a.ids?.length ? undefined : a.campaign, ids: a.ids, search: a.search, to: a.to, offset: a.offset });
     const p = await priceRows(rows, manager);
+    if (full) {
+      return rows.length ? rows.map((r, i) => [
+        `=== #${r.id} | ${r.account_id} | ${r.status} | ${r.campaign || 'no campaign'} | to ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${money(p.items[i].price, p.currency)}`,
+        `created ${d(r.created_at)} by ${r.source} · goes out ${d(r.scheduled_at)}${r.expires_at ? ` · send by ${d(r.expires_at)}` : ''}${r.sent_at ? ` · sent ${d(r.sent_at)}` : ''}${r.task_id ? ` · task #${r.task_id}${r.task_title ? ` "${r.task_title}"` : ''}` : ''}${r.list_id ? ` · list #${r.list_id}` : ''}${r.note ? ` · note: ${r.note}` : ''}`,
+        r.payload.waTemplate ? `Meta template "${r.payload.waTemplate.name}" (wording fixed by Meta)` : null,
+        r.payload.attachment ? `Picture/file: ${r.payload.attachment.url || '(uploaded file)'}${r.payload.attachment.fileName ? ` (${r.payload.attachment.fileName})` : ''}` : null,
+        `Text:\n${r.payload.text ?? r.payload.attachment?.caption ?? '(none)'}`,
+        r.error ? `${/^Rejected:/.test(r.error) ? 'OWNER/AI REJECTION REASON' : 'error'}: ${r.error}${helpFor(r.error)}` : null,
+      ].filter(Boolean).join('\n')).join('\n\n') + (rows.length === (a.limit || 10) ? `\n\n(more: offset=${(a.offset || 0) + rows.length})` : '') : 'Nothing.';
+    }
     return rows.length
       ? rows.map((r, i) => `#${r.id} | ${r.account_id} | ${r.status}${['draft', 'queued'].includes(r.status) && new Date(r.scheduled_at) > new Date(Date.now() + 60000) ? ` (for ${d(r.scheduled_at)})` : ''}${r.expires_at && ['draft', 'queued'].includes(r.status) ? ` (send by ${d(r.expires_at)})` : ''}${r.campaign ? ` | ${r.campaign}` : ''} | ${money(p.items[i].price, p.currency)} | ${r.to_jid}${r.to_name ? ` (${r.to_name})` : ''} | ${trim(r.payload.text || r.payload.attachment?.caption || '[file]', 100)}${r.error ? ` | error: ${r.error}${helpFor(r.error)}` : ''}`).join('\n')
-        + `\nTotal of these: ${money(p.total, p.currency)}`
+        + `\nTotal of these: ${money(p.total, p.currency)}${rows.length === (a.limit || 20) ? ` · more: offset=${(a.offset || 0) + rows.length}` : ''} · whole messages: ids=[…] or full=true`
       : 'Nothing.';
   });
 
@@ -683,6 +702,82 @@ function buildServer(playbook = '', focus = '') {
     const r = await outbox.editDraft(a.id, a.text);
     await ai(r.account_id, `Edited draft #${r.id} to ${r.to_jid.split('@')[0]}`);
     return `Draft #${r.id} updated — still waiting for the owner's approval${new Date(r.scheduled_at) > new Date(Date.now() + 60000) ? ` (goes out ${d(r.scheduled_at)} once approved)` : ''}.`;
+  });
+
+  tool('edit_messages', 'Change unsent messages — drafts AND approved ones still waiting — when the owner asks (a note on the Drafts page, a card note, a rejection reason, a chat): find → replace across many (e.g. find "Dear Sir / Madam," replace "Hello"), a whole new text for one, add or swap the picture/file (attachment_url, e.g. the Premium Room poster), or remove it. Each keeps its number, send time, "send by" and approval state. Read them first with list_outbox(ids=[…]). Meta template messages can\'t be changed (wording fixed by Meta) — reject and redraft those.', {
+    ids: z.array(z.number().int()).min(1).max(500),
+    text: z.string().optional().describe('Whole new text — one message only'),
+    find: z.string().optional().describe('Exact words to replace in every message given'),
+    replace: z.string().optional().describe('Replacement for find ("" deletes it)'),
+    attachment_url: z.string().optional().describe('Add or swap the picture / file (public link or Drive link)'),
+    file_name: z.string().optional(),
+    remove_attachment: z.boolean().optional(),
+  }, async (a) => {
+    await scope.assertDrafts(a._c, a.ids);
+    const r = await outbox.editMessages(a.ids, { text: a.text, find: a.find, replace: a.replace ?? '', removeAttachment: !!a.remove_attachment,
+      attachment: a.attachment_url ? { url: a.attachment_url, fileName: a.file_name } : undefined });
+    const what = [a.text !== undefined ? 'new text' : null, a.find !== undefined ? `"${trim(a.find, 40)}" → "${trim(a.replace ?? '', 40)}"` : null,
+      a.attachment_url ? 'picture/file set' : null, a.remove_attachment ? 'picture/file removed' : null].filter(Boolean).join(', ');
+    if (r.changed.length) await ai(null, `Edited ${r.changed.length} unsent message(s) (${what}): #${r.changed.slice(0, 30).join(', #')}${r.changed.length > 30 ? '…' : ''}`);
+    return `Changed ${r.changed.length} (${what}).${r.skipped.length ? ` Skipped ${r.skipped.length}: ${r.skipped.slice(0, 20).map((x) => `#${x.id} ${x.why}`).join('; ')}` : ''}`;
+  });
+
+  tool('owner_feedback', 'Everything the owner told the AI lately, in one place: notes on Board cards (call notes, instructions — newest first, marked DONE when the AI wrote a note after), reasons given when rejecting drafts, and Drafts-page notes ("Owner: …" cards). Read it at the start of a session and act on what is still open.', {
+    days: z.number().int().min(1).max(60).optional().describe('How far back (default 7)'),
+  }, async (a) => {
+    const days = a.days || 7;
+    const notes = await query(
+      `SELECT l.task_id, l.at, l.text, t.title, t.status, t.account_id, t.role,
+         EXISTS (SELECT 1 FROM task_log x WHERE x.task_id = l.task_id AND x.actor = 'ai' AND x.id > l.id) AS answered
+       FROM task_log l JOIN tasks t ON t.id = l.task_id
+       WHERE l.actor = 'you' AND l.kind = 'note' AND l.at > now() - ($1 || ' days')::interval ORDER BY l.at DESC LIMIT 100`, [String(days)]);
+    const owner = await query(`SELECT id, title, status, details, created_at FROM tasks WHERE title LIKE 'Owner:%' AND created_at > now() - ($1 || ' days')::interval ORDER BY id DESC LIMIT 40`, [String(days)]);
+    const rej = await query(
+      `SELECT o.id, o.account_id, o.to_jid, o.error, COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')}) AS campaign, ct.name
+       FROM outbox o LEFT JOIN contacts ct ON ct.account_id = o.account_id AND ct.jid = o.to_jid
+       WHERE o.status = 'rejected' AND o.error LIKE 'Rejected:%' AND o.created_at > now() - ($1 || ' days')::interval ORDER BY o.id DESC LIMIT 100`, [String(days)]);
+    const out = [`OWNER NOTES ON CARDS (${notes.length}, last ${days} days):`];
+    for (const n of notes) out.push(`- ${n.answered ? 'DONE' : 'OPEN'} #${n.task_id} [${n.status}] ${trim(n.title, 60)} — ${d(n.at)}: "${n.text.replace(/\s+/g, ' ')}"`);
+    out.push(`\nOWNER REQUESTS FROM THE DRAFTS PAGE (${owner.length}):`);
+    for (const t of owner) out.push(`- #${t.id} [${t.status}] ${t.title}`);
+    // group identical reasons (bulk replacements) so a real instruction stands out
+    const byReason = new Map();
+    for (const r of rej) { const k = r.error.replace(/^Rejected:\s*/, ''); (byReason.get(k) || byReason.set(k, []).get(k)).push(r); }
+    out.push(`\nREJECTION REASONS (${rej.length} drafts):`);
+    for (const [reason, rs] of byReason) out.push(`- "${reason}" — ${rs.length > 1 ? `${rs.length} drafts (#${rs.slice(0, 8).map((x) => x.id).join(', #')})` : `#${rs[0].id} to ${rs[0].to_jid.split('@')[0]}${rs[0].name ? ` (${rs[0].name})` : ''} on ${rs[0].account_id}${rs[0].campaign ? ` · ${rs[0].campaign}` : ''}`}`);
+    out.push('\nA reason that asks for something ("wish him on festivals", "follow up near the date") is an instruction: do it (drafts for approval), then note it on the person\'s card.');
+    return out.join('\n');
+  });
+
+  // Read-only look at any data in the hub (not the WhatsApp login keys): the AI can zoom in wherever it needs.
+  const SQL_DENY = /\bwa_auth\b|pg_read|pg_ls|pg_stat_file|lo_(import|export|get)|dblink|\bcopy\b|current_setting|set_config|pg_sleep|pg_terminate|pg_cancel/i;
+  tool('describe_data', 'The hub\'s database tables and their columns (for inspect_data). Main ones: messages (every WhatsApp message: account_id, chat_jid, from_me, ts = unix seconds, body, type), chats, contacts, outbox (everything sent or to send: status, payload JSON with text/attachment, scheduled_at, expires_at, role = campaign, error = failure or rejection reason), tasks + task_log (Board cards and their history/notes), lists + list_members (batches, stage, visit_at, follow-ups), directory (contact book), templates, rules, campaigns, events (activity log), meta_events, wa_templates, config.', {
+    table: z.string().optional().describe('One table for its columns; omit for all'),
+  }, async (a) => {
+    const rows = await query(`SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name <> 'wa_auth'
+      ${a.table ? 'AND table_name = $1' : ''} ORDER BY table_name, ordinal_position`, a.table ? [a.table] : []);
+    const by = {};
+    for (const r of rows) (by[r.table_name] ||= []).push(`${r.column_name} ${r.data_type.replace('timestamp with time zone', 'timestamptz').replace('character varying', 'text')}`);
+    return Object.entries(by).map(([t, c]) => `${t}: ${c.join(', ')}`).join('\n') || 'No such table.';
+  });
+  tool('inspect_data', 'Run ONE read-only SQL SELECT on the hub\'s database to zoom in on anything the other tools don\'t show (counts, patterns, a person\'s whole history, why something happened). Read-only: it can never change data. Up to 300 rows, 15 s. Times: messages.ts is unix seconds (to_timestamp(ts)); others are timestamptz (owner time zone: AT TIME ZONE \'Asia/Kolkata\'). Use describe_data for columns. Prefer the normal tools for actions.', {
+    sql: z.string().describe('One SELECT (or WITH … SELECT) statement'),
+    limit: z.number().int().min(1).max(300).optional(),
+  }, async (a) => {
+    const sql = a.sql.trim().replace(/;\s*$/, '');
+    if (!/^(select|with|explain)\b/i.test(sql)) throw new Error('Only a SELECT (or WITH … SELECT) is allowed');
+    if (sql.includes(';')) throw new Error('One statement only');
+    if (SQL_DENY.test(sql)) throw new Error('That table or function is not available (WhatsApp login keys and server functions are off-limits)');
+    const limit = a.limit || 100;
+    const rows = await tx(async (q) => {
+      await q('SET TRANSACTION READ ONLY');
+      await q(`SET LOCAL statement_timeout = '15s'`).catch(() => {});
+      return q(`SELECT * FROM (${sql}) AS q LIMIT ${limit + 1}`);
+    });
+    if (!rows.length) return 'No rows.';
+    const cols = Object.keys(rows[0]);
+    const cell = (v) => (v == null ? '' : v instanceof Date ? d(v) : typeof v === 'object' ? JSON.stringify(v) : String(v)).replace(/\s+/g, ' ').slice(0, 600);
+    return [cols.join(' | '), ...rows.slice(0, limit).map((r) => cols.map((c) => cell(r[c])).join(' | ')), rows.length > limit ? `(more than ${limit} rows — narrow it or raise limit)` : `(${rows.length} rows)`].join('\n');
   });
 
   tool(
@@ -1115,16 +1210,16 @@ function buildServer(playbook = '', focus = '') {
       // every campaign works under the main rules too; hiring campaigns include the shared hiring playbook (INCLUDE)
       const p = await getCampaignPlaybook(a.campaign);
       if (!p) return `MAIN PLAYBOOK:\n${main}\n\n(No playbook for campaign "${a.campaign}" yet — follow the main rules. Campaign playbooks: ${list.map((c) => c.campaign).join(', ') || 'none'}; the owner can add one: save_playbook with campaign.)`;
-      return `MAIN PLAYBOOK (applies to every campaign):\n${main}\n\n=== CAMPAIGN PLAYBOOK — ${p.campaign} ===\n${p.text}`;
+      return `MAIN PLAYBOOK (applies to every campaign):\n${main}\n\n=== CAMPAIGN PLAYBOOK — ${p.campaign}${p.text.includes('--- included:') ? ' (with the playbooks it follows, included below)' : ''} ===\n${p.text}`;
     }
-    return list.length ? `${main}\n\nCAMPAIGN PLAYBOOKS: ${list.map((c) => c.campaign).join(', ')} — get_playbook(campaign=…) for one.` : main;
+    return list.length ? `${main}\n\nCAMPAIGN PLAYBOOKS: ${list.map((c) => `${c.campaign}${c.includes?.length ? ` (also follows ${c.includes.join(', ')})` : ''}`).join('; ')} — get_playbook(campaign=…) for one.` : main;
   });
 
   // Settings the AI may change (asked by the owner). Owner-only: approval mode, daily / new-number limits and the gap
   // between messages (they protect the numbers from WhatsApp bans and keep AI messages behind approval), Meta prices.
   const AI_SETTINGS = ['sendStart', 'sendEnd', 'sendDays', 'anytime', 'typing', 'followupStart', 'followupDailyMax', 'storeGroups',
     'autosaveImages', 'autosaveDocuments', 'autosaveKnownOnly', 'autosaveMaxMb', 'optOutWords', 'webhookUrl'];
-  const OWNER_ONLY = { aiMode: 'approval mode', dailyCap: 'daily limit', newChatsPer24h: 'new-number limit', delayMinSec: 'gap between messages', delayMaxSec: 'gap between messages' };
+  const OWNER_ONLY = { aiMode: 'approval mode', dailyCap: 'daily limit', warmDailyCap: 'limit for people who wrote before', newChatsPer24h: 'new-number limit', delayMinSec: 'gap between messages', delayMaxSec: 'gap between messages' };
 
   tool('get_settings', 'Settings of one number (or the shared defaults for all numbers): sending hours/days, follow-up time and daily max, typing, auto-save, opt-out words, notify URL, approval mode and limits (read-only for the AI); plus the morning summary and alert phones. Which settings a number has changed itself is marked "own".', {
     account: z.string().optional().describe('Number id; "all" = the shared defaults; omit = every number, short'),
@@ -1141,7 +1236,7 @@ function buildServer(playbook = '', focus = '') {
     const dg = await import('./digest.js').then((m) => m.getDigest());
     const { alertPhones } = await import('./notify.js');
     out.push(`MORNING SUMMARY: ${dg.enabled ? `on at ${dg.time} from ${dg.account}` : 'off'} | ALERT PHONES: ${(await alertPhones()).map((p) => '+' + p).join(', ') || 'none'}`);
-    out.push(`You may change: ${AI_SETTINGS.join(', ')}, purpose, the morning summary and alert phones (update_settings). Owner only: ${[...new Set(Object.values(OWNER_ONLY))].join(', ')}, Meta prices.`);
+    out.push(`You may change (update_settings, when the owner asks): ${AI_SETTINGS.join(', ')}, purpose, name, the morning summary and alert phones; with owner_asked (their words): ${[...new Set(Object.values(OWNER_ONLY))].join(', ')}. Meta prices: dashboard only. Settings belong to a NUMBER, whatever campaign is open.`);
     return out.join('\n');
   });
 
@@ -1151,14 +1246,16 @@ function buildServer(playbook = '', focus = '') {
     purpose: z.string().optional(),
     morning_summary: z.object({ enabled: z.boolean().optional(), time: z.string().optional(), account: z.string().optional() }).optional(),
     alert_phones: z.array(z.string()).optional().describe('Replaces the list of phones that get alerts and the morning summary'),
+    label: z.string().optional().describe("A number's display name (owner asked)"),
+    owner_asked: z.string().optional().describe('The owner\'s own words asking for it — required for the owner-only settings (approval mode aiMode, dailyCap, warmDailyCap, newChatsPer24h, delays); quoted in the activity log'),
   }, async (a) => {
     const done = [];
     const s = a.settings || {};
     const refused = Object.keys(s).filter((k) => OWNER_ONLY[k]);
-    if (refused.length) throw new Error(`${refused.map((k) => OWNER_ONLY[k]).join(', ')}: owner only — ask the owner to change it in the dashboard (Settings). Nothing was changed.`);
-    const unknown = Object.keys(s).filter((k) => !AI_SETTINGS.includes(k));
+    if (refused.length && !a.owner_asked?.trim()) throw new Error(`${refused.map((k) => OWNER_ONLY[k]).join(', ')}: only when the owner asked — pass owner_asked with their words. Nothing was changed.`);
+    const unknown = Object.keys(s).filter((k) => !AI_SETTINGS.includes(k) && !OWNER_ONLY[k]);
     if (unknown.length) throw new Error(`Unknown setting(s): ${unknown.join(', ')}. Allowed: ${AI_SETTINGS.join(', ')}`);
-    if (Object.keys(s).length || a.purpose !== undefined) {
+    if (Object.keys(s).length || a.purpose !== undefined || a.label !== undefined) {
       if (!a.account) throw new Error('Say which number (account), or "all"');
       const { describeSettingsChange } = await import('./describe.js');
       if (a.account === 'all') {
@@ -1170,9 +1267,9 @@ function buildServer(playbook = '', focus = '') {
       } else {
         const sess = await manager.resolve(a.account);
         const before = normalizeSettings(sess.account.settings);
-        const acc = await manager.update(sess.id, { ...(Object.keys(s).length ? { settings: s } : {}), ...(a.purpose !== undefined ? { purpose: a.purpose } : {}) });
-        const what = [describeSettingsChange(before, normalizeSettings(acc.settings)), a.purpose !== undefined ? `Purpose: ${a.purpose}` : null].filter(Boolean).join('; ');
-        await ai(sess.id, `Changed settings — ${what || 'no change'} (owner asked)`);
+        const acc = await manager.update(sess.id, { ...(Object.keys(s).length ? { settings: s } : {}), ...(a.purpose !== undefined ? { purpose: a.purpose } : {}), ...(a.label ? { label: a.label } : {}) });
+        const what = [describeSettingsChange(before, normalizeSettings(acc.settings)), a.purpose !== undefined ? `Purpose: ${a.purpose}` : null, a.label ? `Name: ${a.label}` : null].filter(Boolean).join('; ');
+        await ai(sess.id, `Changed settings — ${what || 'no change'} (${a.owner_asked ? `owner asked: "${trim(a.owner_asked, 160)}"` : 'owner asked'})`);
         done.push(`${sess.id}: ${what || 'no change'}`);
       }
     }
@@ -1191,9 +1288,11 @@ function buildServer(playbook = '', focus = '') {
 
   tool('save_playbook', "Replace the main playbook, or one campaign's playbook (campaign=…, created if new — e.g. \"Corporate sales\", \"Win-back\", \"Chef\"). Only when the owner asks to change their rules, or to write down the rules of a campaign the owner set up. Keep campaign-specific rules (offer, wording, who to target) in the campaign's playbook and general rules in the main one.", {
     text: z.string(), campaign: z.string().optional().describe('Campaign name; omit (or "all") for the MAIN playbook — never the open campaign by default'),
+    includes: z.array(z.string()).optional().describe('Campaign playbook only: other playbooks it also follows (e.g. ["Hiring – all roles"]); replaces its INCLUDE lines'),
   }, async (a) => {
     const camp = a.campaign && !/^all$/i.test(a.campaign) ? a.campaign : null;
-    await savePlaybook(a.text, camp);
+    const { withIncludes } = await import('./playbook.js');
+    await savePlaybook(camp && a.includes ? withIncludes(a.text, a.includes) : a.text, camp);
     await ai(null, camp ? `Updated the "${camp}" campaign playbook` : 'Updated the playbook');
     return camp ? `Campaign playbook "${camp}" saved.` : 'Main playbook saved.';
   });
@@ -1212,11 +1311,15 @@ function buildServer(playbook = '', focus = '') {
       'none = Hotel / no campaign (people on no list)'].join('\n');
   });
   tool('create_campaign', 'Create a campaign when the owner asks (e.g. "Diwali offer", "Driver hiring"), optionally with its playbook (rules: who to contact, what to say and never say). Then add people with import_list(role=<campaign>). It does not switch the owner\'s dashboard unless open=true.', {
-    name: z.string(), playbook: z.string().optional().describe('The campaign\'s own rules; start with "INCLUDE: Hiring – all roles" for a hiring campaign'),
+    name: z.string(), playbook: z.string().optional().describe('The campaign\'s own rules'),
+    includes: z.array(z.string()).optional().describe('Other playbooks it also follows, e.g. ["Hiring – all roles"] for a hiring campaign'),
     open: z.boolean().optional().describe('Also open it in the dashboard (switch_campaign)'),
   }, async (a) => {
     const r = await scope.createCampaign(a.name);
-    if (a.playbook?.trim()) await savePlaybook(a.playbook, r.name);
+    if (a.playbook?.trim() || a.includes?.length) {
+      const { withIncludes } = await import('./playbook.js');
+      await savePlaybook(withIncludes(a.playbook || '', a.includes || []), r.name);
+    }
     if (a.open) await scope.setFocus(r.name);
     await ai(null, `${r.created ? 'Created' : 'Found'} campaign "${r.name}"${a.playbook ? ' with its playbook' : ''}${a.open ? ' and opened it' : ''}`, r.name);
     return `Campaign "${r.name}" ${r.created ? 'created' : 'already existed'}${a.playbook ? ', playbook saved' : ''}${a.open ? ' — now open in the dashboard' : ''}.`;

@@ -71,7 +71,7 @@ reminders always go from the number that has their chat.
 
 ## 3. Dashboard pages
 
-**Campaigns — like separate users.** A campaign (Chef hiring, Reception = "Front office", Housekeeping, Corporate sales, Win-back, a Diwali offer…) is created from the picker at the top right (**➕ New campaign…**, with its own rules for the AI = its playbook) or by a list with that job role. The campaign you pick is saved on the server and decides what you **and the AI** see and may change: Board, Inbox, Drafts (and the badge), Lists, Contacts, Templates, Rules, Activity and playbooks show only that campaign, and every action on anything of another campaign is refused (dashboard API and every MCP tool). **🌐 All campaigns** shows everything; **🏨 Hotel / no campaign** = people on no list. Numbers are shared by all campaigns. A person belongs to a campaign when they are on one of its lists. Templates, contacts and rules created inside a campaign belong to it; items with no campaign are *shared* — visible everywhere, changed only with All campaigns picked. For the AI the campaign is a **filter for the whole hub, not a wall**: every MCP tool takes `campaign="<name>"` (or `"all"`, `"none"`); without it the tool uses the campaign open in the dashboard, so the AI's context stays small and it never changes another campaign's items by accident (the error says how to do it on purpose). `list_campaigns`, `create_campaign` and `switch_campaign` (when the owner asks — the dashboard follows). Every campaign works under the main playbook plus its own; hiring campaigns include "Hiring – all roles". Background routines pass `campaign="all"` (a URL can also pin one: `/mcp/<key>/<campaign>` or `/mcp/<key>/all`). Scripts using the API key are not tied to the picker.
+**Campaigns — like separate users.** A campaign (Chef hiring, Reception = "Front office", Housekeeping, Corporate sales, Win-back, a Diwali offer…) is created from the picker at the top right (**➕ New campaign…**, with its own rules for the AI = its playbook) or by a list with that job role. The campaign you pick is saved on the server and decides what you **and the AI** see and may change: Board, Inbox, Drafts (and the badge), Lists, Contacts, Templates, Rules and Activity show only that campaign, and every action on anything of another campaign is refused (dashboard API and every MCP tool). **🌐 All campaigns** shows everything; **🏨 Hotel / no campaign** = people on no list. Numbers are shared by all campaigns. A person belongs to a campaign when they are on one of its lists. Templates, contacts and rules created inside a campaign belong to it; items with no campaign are *shared* — visible everywhere, changed only with All campaigns picked. For the AI the campaign is a **filter for the whole hub, not a wall**: every MCP tool takes `campaign="<name>"` (or `"all"`, `"none"`); without it the tool uses the campaign open in the dashboard, so the AI's context stays small and it never changes another campaign's items by accident (the error says how to do it on purpose). `list_campaigns`, `create_campaign` and `switch_campaign` (when the owner asks — the dashboard follows). Every campaign works under the main playbook plus its own; a campaign can also **follow** shared playbooks (ticked in the ➕ New campaign pop-up or in Settings → Playbook → "also follows" — e.g. "Hiring – all roles" for every hiring campaign; stored as `INCLUDE:` lines). **Not campaign things:** numbers and their settings (limits, delays, hours, approval mode, name, purpose, on/off) belong to the NUMBER, and playbooks are the hub's rules — Settings shows the main playbook and every campaign playbook whichever campaign is open, and saving without picking a campaign always saves the main one. Background routines pass `campaign="all"` (a URL can also pin one: `/mcp/<key>/<campaign>` or `/mcp/<key>/all`). Scripts using the API key are not tied to the picker.
 
 The top bar has the three pages used all day: **🗂️ Board**, **💬 Inbox** and **✉️ Drafts** (with a count). Everything else
 opens from **☰** at the top left in a side pane (✕ or a tap outside closes it), with icons: 📋 Lists, 📱 Numbers, 📝 Templates, ⚡ Rules, ⚙️ Settings, 🔌 Connect AI &
@@ -138,7 +138,7 @@ send_message (text, files, buttons, wa_template, schedule_at), bulk_send, list_o
 approve_task, list_tasks (kind=reply|followup|visit|scheduled|reminder, for=you|ai, due_now), create_task / update_task (for, priority), add_task_note, task_history, list_lists, list_members, import_list,
 send_to_list (wa_template, schedule_at, attachment_url — one image for everyone, each person's message as its caption), set_followup, update_list_member (visit_at, available_from, follow_up_at), pipeline, set_pipeline, known_candidates,
 list_templates, save_template, list_meta_templates, create_meta_template, meta_health_check, message_timeline,
-hub_overview, find_contacts, save_contact, archive_list, remove_list_member, list_rules, save_rule, set_chat_state, get_playbook, save_playbook, recent_activity, save_media,
+hub_overview, owner_feedback, describe_data, inspect_data, edit_messages, find_contacts, save_contact, archive_list, remove_list_member, list_rules, save_rule, set_chat_state, get_playbook, save_playbook, recent_activity, save_media,
 fetch_older_messages, backfill_history, list_shared_contacts, find_followups`.
 
 **Calls in chats.** Linked numbers record WhatsApp calls as lines like `📞 Voice call — answered, 2:14` or
@@ -221,7 +221,7 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
   number and campaign — the incident that led to this rule).
 - A campaign never leaks into another: the dashboard refuses actions outside the open campaign; the AI must name another
   campaign on purpose (`campaign="…"` / `"all"`).
-- Tests: `npm test` (108 end-to-end tests, one of which calls every one of the 60 AI tools, including a fake Meta server;
+- Tests: `npm test` (109 end-to-end tests, one of which calls every one of the 64 AI tools, including a fake Meta server;
   one checks that the dashboard script parses — a syntax error there blanks the whole dashboard).
 
 ---
@@ -373,6 +373,27 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
   Housekeeping, Corporate sales, Win-back.
 - Lists whose role is not a hiring role (Corporate sales, Win-back, …) start with the candidate pipeline OFF, so no
   Hinglish interview texts reach a corporate contact.
+
+### 10.9f Settings, numbers and what the AI can do (25 Oct)
+- **Settings save as you change them** (no Save button): each change PATCHes the number (or PUTs the all-numbers
+  defaults) and the line under the form says "✓ Saved hh:mm:ss" or "⚠️ Not saved: <why>". Switching a number to
+  "Send automatically" or pausing it asks first. Bug fixed: after a save the page re-read a 15-second cached copy of
+  the numbers, so the old values came back; Settings now always loads fresh (`loadAccounts(true)`). The live log
+  showed none of the owner's earlier edits had reached the server — the Save button sat at the very bottom.
+- **Numbers → ⚙️ Edit**: a pop-up for name, purpose, Active (pause) and 🗑 Delete, saved as you type; "Limits,
+  delays & hours →" opens Settings for that number.
+- **Playbooks**: `GET /api/playbook` = main unless `?campaign=`; `PUT` saves the main one unless `campaign` is given;
+  `/api/playbooks` lists all (with `includes`); `POST /api/campaigns` takes `includes`. The playbook editor autosaves.
+- **AI toolbox (64 tools)** — big picture first, then zoom in, then change what the owner asked:
+  `hub_overview` → `owner_feedback` (owner card notes OPEN/DONE, Drafts-page "Owner:" requests, rejection reasons
+  grouped) → `list_outbox(ids|full|search|to|offset)` whole messages with picture, send time, send-by, rejection reason
+  → `get_messages(full_text)`, `task_history`, `describe_data` + `inspect_data` (one read-only SELECT in a READ ONLY
+  transaction, 15 s, ≤300 rows; `wa_auth` and server functions refused). Changes: `edit_messages` (drafts AND
+  approved-unsent: whole text for one, find/replace for many, add/swap/remove the picture; keeps status, number, time),
+  `update_settings` (owner-only settings — approval mode, limits, gaps — only with `owner_asked` = the owner's words,
+  quoted in Activity; also a number's name), `save_playbook(includes)`, `create_campaign(includes)`.
+- Approve dialogs say "All 9 of these are dated for later (the first …) — none goes out now" instead of "9 have a
+  later date", which read like 9 more messages.
 
 ### 10.9e Drafts page and sending controls (24 Oct)
 - Edits save as you type (`PATCH /api/outbox/:id` → `outbox.editDraft`); approve/reject change one card in place, the

@@ -69,10 +69,22 @@ export async function campaignRules(campaign) {
   return { ...p, text: lines.join('\n') };
 }
 
+/** The other playbooks a campaign playbook follows ("INCLUDE: <name>" lines). */
+export function includesOf(text) {
+  return String(text || '').split('\n').map((l) => l.match(/^\s*INCLUDE:\s*(.+?)\s*$/i)?.[1]).filter(Boolean);
+}
+
+/** The text with exactly these INCLUDE lines at the top (others removed) — the "Also follows" choice in the UI. */
+export function withIncludes(text, includes = []) {
+  const body = String(text || '').split('\n').filter((l) => !/^\s*INCLUDE:/i.test(l)).join('\n').replace(/^\n+/, '');
+  const head = [...new Set(includes.map((x) => String(x).trim()).filter(Boolean))].map((x) => `INCLUDE: ${x}`).join('\n');
+  return [head, body].filter(Boolean).join('\n\n') || head;
+}
+
 /** Campaign playbooks that exist: [{ campaign, chars, updatedAt }]. */
 export async function listCampaignPlaybooks() {
   const rows = await query(`SELECT key, value, updated_at FROM config WHERE key LIKE 'playbook:%' ORDER BY key`);
-  return rows.map((r) => ({ campaign: r.key.slice('playbook:'.length), chars: String(r.value?.text || '').length, updatedAt: r.updated_at }));
+  return rows.map((r) => ({ campaign: r.key.slice('playbook:'.length), chars: String(r.value?.text || '').length, includes: includesOf(r.value?.text), updatedAt: r.updated_at }));
 }
 
 export async function deleteCampaignPlaybook(campaign) {

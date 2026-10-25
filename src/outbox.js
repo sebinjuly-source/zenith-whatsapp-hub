@@ -403,6 +403,46 @@ export async function editDraft(id, text) {
   return u;
 }
 
+/**
+ * Change unsent messages — drafts or approved ones still waiting (they keep their status, send time and number):
+ *  text (whole new wording; one message at a time), find → replace (literal, every message given), attachment
+ *  (add or swap the picture / file: { url, fileName? }), removeAttachment. Meta template messages keep Meta's wording
+ *  (only their picture header can't change here either). Returns { changed: [ids], skipped: [{ id, why }] }.
+ */
+export async function editMessages(ids, { text, find, replace = '', attachment, removeAttachment = false } = {}) {
+  const list = [...new Set((ids || []).map(Number).filter(Boolean))];
+  if (!list.length) throw new Error('Give the message ids');
+  if (text !== undefined && list.length > 1) throw new Error('A whole new text is for one message — for many use find/replace');
+  if (text === undefined && find === undefined && !attachment && !removeAttachment) throw new Error('Nothing to change: give text, find/replace, attachment_url or remove_attachment');
+  if (find !== undefined && !String(find)) throw new Error('find is empty');
+  const rows = await query(`SELECT * FROM outbox WHERE id = ANY($1::bigint[]) ORDER BY id`, [list]);
+  const changed = [];
+  const skipped = list.filter((id) => !rows.some((r) => Number(r.id) === id)).map((id) => ({ id, why: 'not found' }));
+  for (const r of rows) {
+    if (!['draft', 'queued'].includes(r.status)) { skipped.push({ id: r.id, why: `already ${r.status}` }); continue; }
+    const p = { ...r.payload };
+    if (p.waTemplate) { skipped.push({ id: r.id, why: 'Meta template message — wording and picture are fixed by Meta' }); continue; }
+    const body = p.text ?? p.attachment?.caption ?? '';
+    let next = body;
+    if (text !== undefined) next = String(text);
+    if (find !== undefined) {
+      if (!body.includes(find)) { if (!attachment && !removeAttachment) { skipped.push({ id: r.id, why: 'text not found' }); continue; } } else next = body.split(find).join(replace);
+    }
+    if (!String(next).trim() && !attachment && !p.attachment) { skipped.push({ id: r.id, why: 'would be empty' }); continue; }
+    if (removeAttachment && p.attachment) {
+      p.text = next;
+      delete p.attachment;
+    } else if (attachment) {
+      p.attachment = { url: attachment.url, ...(attachment.fileName ? { fileName: attachment.fileName } : {}) };
+      p.text = next;
+    } else if (p.attachment && p.text == null) p.attachment = { ...p.attachment, caption: next };
+    else p.text = next;
+    const [u] = await query(`UPDATE outbox SET payload = $2 WHERE id = $1 AND status IN ('draft','queued') RETURNING id`, [r.id, JSON.stringify(p)]);
+    if (u) changed.push(Number(r.id)); else skipped.push({ id: r.id, why: 'went out meanwhile' });
+  }
+  return { changed, skipped };
+}
+
 /** The owner's note on several drafts → one card for the AI listing them (it edits or redrafts them; the owner approves). */
 export async function draftsNoteForAi(ids, text, { actor = 'you' } = {}) {
   const list = [...new Set((ids || []).map(Number).filter(Boolean))];
@@ -435,9 +475,17 @@ export async function reject(id, { reason = '', actor = 'you' } = {}) {
   return row;
 }
 
-export async function listOutbox({ account, status, taskId, limit = 50, role, ids } = {}) {
+export async function listOutbox({ account, status, taskId, limit = 50, role, ids, search, to, offset = 0 } = {}) {
   const p = [];
   const where = [];
+  if (search) {
+    p.push(`%${search}%`);
+    where.push(`(o.payload->>'text' ILIKE $${p.length} OR o.payload->'attachment'->>'caption' ILIKE $${p.length} OR o.note ILIKE $${p.length} OR o.error ILIKE $${p.length})`);
+  }
+  if (to && String(to).replace(/\D/g, '')) {
+    p.push(`${String(to).replace(/\D/g, '')}%`);
+    where.push(`o.to_jid LIKE $${p.length}`);
+  }
   if (ids?.length) {
     p.push(ids.map(Number).filter(Boolean));
     where.push(`o.id = ANY($${p.length}::bigint[])`);
@@ -468,7 +516,7 @@ export async function listOutbox({ account, status, taskId, limit = 50, role, id
      LEFT JOIN chats ch ON ch.account_id = o.account_id AND ch.jid = o.to_jid
      LEFT JOIN tasks t ON t.id = o.task_id
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-     ORDER BY o.id DESC LIMIT $${p.length}`,
+     ORDER BY o.id DESC LIMIT $${p.length} OFFSET ${Math.max(0, parseInt(offset, 10) || 0)}`,
     p,
   );
 }

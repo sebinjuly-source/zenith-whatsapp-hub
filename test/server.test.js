@@ -1698,6 +1698,64 @@ test('send order and limits (25 Oct): "send by" first, then people who wrote bef
   await manager.remove('pr2');
 });
 
+test('owner requests 25 Oct: playbooks are not hidden by the open campaign; campaigns follow other playbooks; the AI reads whole drafts, edits approved ones, sees rejection reasons and can look at any data read-only', async () => {
+  // playbooks: the main one stays the main one whatever campaign is open (cookie = dashboard)
+  const login = await fetch(base + '/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: 'k' }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const dash = (method, p, body) => fetch(base + p, { method, headers: { 'content-type': 'application/json', cookie }, body: body ? JSON.stringify(body) : undefined }).then((r) => r.json());
+  await call('PUT', '/api/playbook', { text: 'MAIN RULES 25oct' });
+  await call('PUT', '/api/playbook', { text: 'HIRING RULES 25oct', campaign: 'Hiring – all roles' });
+  const c = await call('POST', '/api/campaigns', { name: 'Driver hiring', playbook: 'DRIVER RULES', includes: ['Hiring – all roles'] });
+  assert.equal(c.status, 200);
+  await call('PUT', '/api/focus', { campaign: 'Driver hiring' });
+  assert.match((await dash('GET', '/api/playbook')).text, /MAIN RULES 25oct/, 'main playbook shown with a campaign open');
+  const books = await dash('GET', '/api/playbooks');
+  assert.ok(books.some((b) => b.campaign === 'Hiring – all roles') && books.some((b) => b.campaign === 'Driver hiring'), 'every playbook listed');
+  assert.deepEqual(books.find((b) => b.campaign === 'Driver hiring').includes, ['Hiring – all roles']);
+  await dash('PUT', '/api/playbook', { text: 'MAIN RULES 25oct v2' });
+  assert.match((await call('GET', '/api/playbook')).data.text, /MAIN RULES 25oct v2/, 'saving without a campaign saves the MAIN playbook, not the open one');
+  const pb = await mcp('get_playbook', { campaign: 'Driver hiring' });
+  assert.match(pb, /MAIN RULES 25oct v2/);
+  assert.match(pb, /HIRING RULES 25oct/, 'the playbook it follows is included');
+  assert.match(pb, /DRIVER RULES/);
+  await call('PUT', '/api/focus', { campaign: '' });
+  await call('DELETE', `/api/playbooks/${encodeURIComponent('Driver hiring')}`);
+  await call('DELETE', `/api/playbooks/${encodeURIComponent('Hiring – all roles')}`);
+
+  // the AI reads whole messages and edits approved ones (keeps them approved)
+  await manager.create({ id: 'fb', label: 'Feedback' });
+  await manager.update('fb', { settings: { aiMode: 'approve', sendDays: [] , anytime: false } }); // nothing goes out
+  fake('fb');
+  const long = 'Dear Sir / Madam, warm greetings from Zenith Suites 🙏\n\n' + 'Thank you for staying with us. '.repeat(10) + 'END-OF-MESSAGE';
+  const m1 = await outbox.enqueue({ account: 'fb', to: '919822200001', payload: { text: long }, source: 'campaign' });
+  await outbox.approve(m1.id);
+  const full = await mcp('list_outbox', { ids: [m1.id] });
+  assert.match(full, /END-OF-MESSAGE/, 'the whole text, not a preview');
+  assert.match(await mcp('list_outbox', { search: 'Sir / Madam', account: 'fb' }), new RegExp(`#${m1.id}`));
+  const ed = await mcp('edit_messages', { ids: [m1.id], find: 'Dear Sir / Madam,', replace: 'Hello,', attachment_url: 'https://example.com/premium-room.jpg' });
+  assert.match(ed, /Changed 1/);
+  const [row] = await query(`SELECT status, payload FROM outbox WHERE id = $1`, [m1.id]);
+  assert.equal(row.status, 'queued', 'still approved');
+  assert.match(row.payload.text, /^Hello, warm greetings/);
+  assert.equal(row.payload.attachment.url, 'https://example.com/premium-room.jpg');
+  // rejection reasons reach the AI
+  const m2 = await outbox.enqueue({ account: 'fb', to: '919822200002', payload: { text: 'win-back' }, source: 'campaign' });
+  await outbox.reject(m2.id, { reason: 'Just wish him on festivals' });
+  assert.match(await mcp('owner_feedback', {}), /Just wish him on festivals/);
+  // read-only look at anything, never a write, never the WhatsApp keys
+  assert.match(await mcp('inspect_data', { sql: `SELECT id, status FROM outbox WHERE account_id = 'fb' ORDER BY id` }), new RegExp(`${m1.id} \\| queued`));
+  assert.match(await mcp('inspect_data', { sql: `DELETE FROM outbox` }), /Only a SELECT/);
+  assert.match(await mcp('inspect_data', { sql: `WITH x AS (DELETE FROM outbox RETURNING id) SELECT * FROM x` }), /read-only|Error/i);
+  assert.match(await mcp('inspect_data', { sql: `SELECT * FROM wa_auth` }), /off-limits/);
+  assert.equal((await query(`SELECT count(*)::int n FROM outbox WHERE id = $1`, [m1.id]))[0].n, 1, 'nothing deleted');
+  // owner-only settings only with the owner's words
+  assert.match(await mcp('update_settings', { account: 'fb', settings: { dailyCap: 20 } }), /only when the owner asked/);
+  assert.match(await mcp('update_settings', { account: 'fb', settings: { dailyCap: 20 }, owner_asked: 'set the daily limit to 20' }), /Saved/);
+  assert.equal(manager.get('fb').account.settings.dailyCap, 20);
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'fb' AND status IN ('draft','queued')`);
+  await manager.remove('fb');
+});
+
 test('MCP: every tool answers without an error (whole AI toolbox, in the order a session would use it)', async () => {
   const post = (body) => fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify(body) });
   const raw = async (name, args = {}) => {
@@ -1761,6 +1819,10 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('list_outbox', { account: 'mcpall', status: 'draft' });
   await run('edit_draft', { id: idOf(d1), text: 'Namaste Mr Ravi, kab aa sakte hain?' });
   await run('reschedule_messages', { ids: [idOf(d2)], at: '2026-12-10 10:00' });
+  await run('edit_messages', { ids: [idOf(d1)], find: 'Mr Ravi', replace: 'Ravi ji', attachment_url: 'https://example.com/premium-room.jpg' });
+  await run('owner_feedback', {});
+  await run('describe_data', { table: 'outbox' });
+  await run('inspect_data', { sql: `SELECT status, count(*) AS n FROM outbox GROUP BY status` });
   await run('approve_draft', { id: idOf(d1) });
   await run('reject_draft', { id: idOf(d2), reason: 'too early' });
   await manager.create({ id: 'mcpall2', label: 'McpAll2' });
@@ -2032,9 +2094,9 @@ test('person_context and cards show the chat as it is now; settings: allowed one
   assert.equal(acc.settings.sendStart, '09:00');
   assert.equal(acc.purpose, 'Reception hiring');
   const refused = await mcp('update_settings', { account: 'ctx1', settings: { aiMode: 'auto', sendEnd: '22:00' } });
-  assert.match(refused, /^Error: approval mode: owner only/);
+  assert.match(refused, /^Error: approval mode: only when the owner asked/, 'owner-only settings need the words of the owner (owner_asked)');
   assert.notEqual(manager.get('ctx1').account.settings.sendEnd, '22:00', 'nothing changed when one key is refused');
-  assert.match(await mcp('update_settings', { settings: { dailyCap: 500 }, account: 'ctx1' }), /daily limit: owner only/);
+  assert.match(await mcp('update_settings', { settings: { dailyCap: 500 }, account: 'ctx1' }), /daily limit: only when the owner asked/);
   assert.match(await mcp('update_settings', { morning_summary: { time: '06:30' } }), /morning summary on at 06:30/);
   await mcp('update_settings', { morning_summary: { time: '06:00' } });
 });
@@ -2043,11 +2105,12 @@ test('campaign playbooks: main + one per campaign; the AI sees the names, reads 
   const main = await mcp('get_playbook');
   assert.match(await mcp('save_playbook', { campaign: 'Corporate sales', text: 'CORPORATE: never mention prices; ask for a meeting.' }), /Campaign playbook "Corporate sales" saved/);
   await call('PUT', '/api/playbook', { campaign: 'Win-back', text: 'WIN-BACK: warm, short, no prices.' });
-  assert.deepEqual((await call('GET', '/api/playbooks')).data.map((p) => p.campaign).sort(), ['Corporate sales', 'Win-back']);
+  const names = (await call('GET', '/api/playbooks')).data.map((p) => p.campaign);
+  assert.ok(names.includes('Corporate sales') && names.includes('Win-back'));
   // main is untouched; it lists the campaign playbooks
   const m2 = await mcp('get_playbook');
   assert.ok(m2.startsWith(main.split('\n\nCAMPAIGN PLAYBOOKS')[0]));
-  assert.match(m2, /CAMPAIGN PLAYBOOKS: Corporate sales, Win-back/);
+  assert.match(m2, /CAMPAIGN PLAYBOOKS: .*Corporate sales.*Win-back/);
   // one campaign's rules, case-insensitive; a missing one says so
   assert.match(await mcp('get_playbook', { campaign: 'corporate SALES' }), /CAMPAIGN PLAYBOOK — Corporate sales[\s\S]*never mention prices/);
   assert.match(await mcp('get_playbook', { campaign: 'Guests' }), /No playbook for campaign "Guests" yet/);
@@ -2057,7 +2120,7 @@ test('campaign playbooks: main + one per campaign; the AI sees the names, reads 
   const r = await fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) });
   const ins = (await r.json()).result.instructions;
-  assert.match(ins, /CAMPAIGN PLAYBOOKS \(own rules per campaign.*\): Corporate sales, Win-back$/);
+  assert.match(ins, /CAMPAIGN PLAYBOOKS \(own rules per campaign.*\): .*Corporate sales, .*Win-back/m);
   assert.doesNotMatch(ins, /never mention prices/);
   await call('DELETE', '/api/playbooks/Win-back');
   await call('DELETE', '/api/playbooks/Corporate%20sales');
@@ -2150,7 +2213,9 @@ test('campaign scope: a campaign is like a separate user — the dashboard and t
     // contacts and lists
     assert.equal((await asOwner('POST', '/api/directory', { phone: '9744000001', name: 'Alpha One', category: 'Alpha – leads' })).data.role, 'Scope Alpha');
     assert.deepEqual((await asOwner('GET', '/api/lists')).data.map((l) => l.name), ['Alpha people']);
-    assert.match((await asOwner('GET', '/api/playbook')).data.text, /Alpha rules/, 'the Settings page shows the campaign playbook');
+    // playbooks are the hub's rules, not filtered by the open campaign (owner 25 Oct): the main one stays the main one
+    assert.doesNotMatch((await asOwner('GET', '/api/playbook')).data.text, /Alpha rules/, 'no campaign = the main playbook');
+    assert.match((await asOwner('GET', '/api/playbook?campaign=Scope%20Alpha')).data.text, /Alpha rules/, 'a campaign playbook when asked for');
     // every page of the dashboard loads inside a campaign
     for (const p of ['/api/directory?q=&category=', '/api/directory/groups', '/api/events?limit=20', '/api/tasks', '/api/rules', '/api/outbox/status',
       '/api/accounts/scopeacc/chats?limit=20', '/api/people?q=Alpha', '/api/pipeline', '/api/campaigns', '/api/playbooks', '/api/search?q=Hi']) {
@@ -2159,7 +2224,8 @@ test('campaign scope: a campaign is like a separate user — the dashboard and t
     }
     assert.ok((await asOwner('GET', '/api/directory?q=')).data.some((x) => x.name === 'Alpha One'), 'the campaign’s contacts are found');
     assert.ok((await asOwner('GET', '/api/events?limit=50')).data.every((e) => !e.role || e.role === 'Scope Alpha'), 'activity shows only this campaign');
-    assert.ok((await asOwner('PUT', '/api/playbook', { text: 'x', campaign: 'Scope Beta' })).status >= 400, 'another campaign playbook is not changed');
+    // playbooks are hub-wide rules like settings (owner 25 Oct): any of them can be edited in Settings whatever campaign is open
+    assert.equal((await asOwner('PUT', '/api/playbook', { text: 'Beta rules v2', campaign: 'Scope Beta' })).status, 200, 'every playbook is editable in Settings');
 
     // ---- the AI (default MCP URL) follows the dashboard's campaign
     assert.match(await mcp('hub_overview'), /FOCUS: campaign "Scope Alpha"/);

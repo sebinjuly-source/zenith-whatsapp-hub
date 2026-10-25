@@ -444,7 +444,11 @@ export function buildApp() {
   // A new campaign: { name, playbook? } — then pick it at the top; the AI reads its playbook
   api.post('/campaigns', wrap(async (req, res) => {
     const r = await scope.createCampaign(req.body?.name, { description: req.body?.description || null });
-    if (req.body?.playbook?.trim()) await savePlaybook(req.body.playbook, r.name);
+    const inc = (req.body?.includes || []).map(String).filter((x) => x.trim() && !scope.same(x, r.name));
+    if (req.body?.playbook?.trim() || inc.length) {
+      const { withIncludes } = await import('./playbook.js');
+      await savePlaybook(withIncludes(req.body?.playbook || '', inc), r.name);
+    }
     if (r.created) await act(req, null, `Created campaign "${r.name}"`, r.name);
     res.json(r);
   }));
@@ -492,26 +496,26 @@ export function buildApp() {
     res.json({ phones });
   }));
   // Main playbook (no campaign) or a campaign's (?campaign= / body.campaign); GET /playbooks lists the campaign ones
+  // Playbooks are the hub's rules (like settings), never filtered by the open campaign: ?campaign= picks a campaign's,
+  // none = the main playbook. (Express 5: req.query is read-only.)
   api.get('/playbook', wrap(async (req, res) => {
-    if (req.query.campaign) sameCampaign(req, req.query.campaign, 'That playbook');
-    if (!req.query.campaign && !req.focus) return res.json(await getPlaybook());
-    const campaign = req.query.campaign || req.focus; // (Express 5: req.query is read-only)
-    const { getCampaignPlaybook } = await import('./playbook.js');
-    res.json((await getCampaignPlaybook(campaign)) || { campaign, text: '', updatedAt: null });
+    const campaign = req.query.campaign;
+    if (!campaign) return res.json(await getPlaybook());
+    const { getCampaignPlaybook, includesOf } = await import('./playbook.js');
+    const p = (await getCampaignPlaybook(campaign)) || { campaign, text: '', updatedAt: null };
+    res.json({ ...p, includes: includesOf(p.text) });
   }));
   api.put('/playbook', wrap(async (req, res) => {
-    const campaign = req.body?.campaign || req.focus || null;
-    sameCampaign(req, campaign || '(main playbook)', 'That playbook');
+    const campaign = req.body?.campaign || null;
     const p = await savePlaybook(req.body?.text, campaign);
     await act(req, null, campaign ? `Updated the "${campaign}" campaign playbook` : 'Updated the playbook');
     res.json(p);
   }));
   api.get('/playbooks', wrap(async (req, res) => {
     const { listCampaignPlaybooks } = await import('./playbook.js');
-    res.json((await listCampaignPlaybooks()).filter((p) => !req.focus || scope.same(p.campaign, req.focus)));
+    res.json(await listCampaignPlaybooks());
   }));
   api.delete('/playbooks/:campaign', wrap(async (req, res) => {
-    sameCampaign(req, req.params.campaign, 'That playbook');
     const { deleteCampaignPlaybook } = await import('./playbook.js');
     await deleteCampaignPlaybook(req.params.campaign);
     await act(req, null, `Deleted the "${req.params.campaign}" campaign playbook`);

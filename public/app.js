@@ -181,13 +181,18 @@
     await loadAccounts(true); // the Drafts badge counts this campaign's drafts
     route();
   }
-  function newCampaign() {
+  async function newCampaign() {
     const done = () => back.remove();
+    const books = await api('/api/playbooks').catch(() => []);
+    const incBox = h('div', { class: 'row', style: 'flex-wrap:wrap;gap:4px 14px' }, books.length
+      ? books.map((p) => h('label', { class: 'switch', style: 'margin:0' }, h('input', { type: 'checkbox', name: 'inc', value: p.campaign }), h('span', {}, p.campaign)))
+      : h('span', { class: 'muted' }, 'No other playbooks yet.'));
     const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && done() },
       h('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'New campaign', onsubmit: guard(async (e) => {
         e.preventDefault();
         const f = e.target;
-        const r = await api('/api/campaigns', { body: { name: f.cname.value, playbook: f.playbook.value } });
+        const includes = [...f.querySelectorAll('input[name=inc]:checked')].map((i) => i.value);
+        const r = await api('/api/campaigns', { body: { name: f.cname.value, playbook: f.playbook.value, includes } });
         done();
         toast(r.created ? `Campaign "${r.name}" created — you are now working in it` : `"${r.name}" already exists — switched to it`);
         await switchCampaign(r.name);
@@ -197,6 +202,9 @@
         h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'cname', required: true, maxlength: 60, placeholder: 'e.g. Corporate sales, Diwali offer, Driver hiring' })),
         h('label', { class: 'field' }, h('span', {}, 'Rules for the AI (optional)'),
           h('textarea', { name: 'playbook', rows: 6, placeholder: 'Who to contact, what to say (and never say), how to follow up… This becomes the campaign\'s playbook.' })),
+        h('div', { class: 'field' }, h('span', { style: 'display:block;font-weight:550;margin-bottom:4px' }, 'Also follows these playbooks'),
+          h('p', { class: 'muted', style: 'margin:0 0 6px;font-size:12px' }, 'The main playbook always applies. Tick the shared ones this campaign needs too — e.g. "Hiring – all roles" for a hiring campaign.'),
+          incBox),
         h('div', { class: 'row', style: 'justify-content:flex-end;margin-top:10px' },
           h('button', { class: 'btn', type: 'button', onclick: done }, 'Cancel'),
           h('button', { class: 'btn primary', type: 'submit' }, 'Create'))));
@@ -346,7 +354,7 @@
           }
         }) }, 'Health check'),
         h('button', { class: 'btn small', title: 'Check the number with Meta again (registration, webhook, quality)', onclick: guard(async () => { await api(`/api/accounts/${a.id}/link`, { body: {} }); toast('Checked with Meta'); route(); }) }, 'Re-check with Meta'),
-        h('button', { class: 'btn small', onclick: () => { state.settingsFor = a.id; location.hash = 'settings'; } }, 'Settings'),
+        h('button', { class: 'btn small', onclick: () => numberModal(a) }, '⚙️ Edit'),
         !a.isDefault ? h('button', { class: 'btn small', onclick: guard(async () => { await api(`/api/accounts/${a.id}`, { method: 'PATCH', body: { isDefault: true } }); route(); }) }, 'Make default') : null,
       ),
     );
@@ -380,7 +388,7 @@
         a.status === 'open'
           ? h('button', { class: 'btn small', onclick: () => { state.inbox.account = a.id; location.hash = 'inbox'; } }, 'Open inbox')
           : h('button', { class: 'btn small primary', onclick: () => openLink(a) }, a.status === 'qr' ? 'Show QR' : 'Link number'),
-        h('button', { class: 'btn small', onclick: () => { state.settingsFor = a.id; location.hash = 'settings'; } }, 'Settings'),
+        h('button', { class: 'btn small', onclick: () => numberModal(a) }, '⚙️ Edit'),
         a.status === 'open' || a.status === 'elsewhere'
           ? (a.backfill && ['pending', 'running'].includes(a.backfill.status)
               ? h('button', { class: 'btn small', onclick: guard(async () => { await api(`/api/jobs/${a.backfill.id}/cancel`, { method: 'POST' }); route(); }) }, 'Stop deep history')
@@ -403,6 +411,46 @@
           : null,
       ),
     );
+  }
+
+  // ⚙️ Edit on a number: name, purpose, on/off and delete in a pop-up (saved as you change them). Limits, delays and
+  // hours are in Settings (they belong to the number, whatever campaign is open).
+  function numberModal(a) {
+    const status = h('span', { class: 'muted', style: 'font-size:13px' }, 'Changes save by themselves.');
+    let timer = null;
+    const save = async (body) => {
+      clearTimeout(timer);
+      status.textContent = 'Saving…';
+      try {
+        Object.assign(a, await api(`/api/accounts/${a.id}`, { method: 'PATCH', body }));
+        state.accountsAt = 0;
+        status.textContent = '✓ Saved';
+      } catch (err) { status.textContent = '⚠️ Not saved: ' + err.message; }
+    };
+    const text = (name, value) => h('input', { type: 'text', name, value: value || '', oninput: (e) => { status.textContent = 'Editing…'; clearTimeout(timer); timer = setTimeout(() => save({ [name]: e.target.value }), 800); },
+      onblur: (e) => { if (timer) save({ [name]: e.target.value }); } });
+    const done = () => { back.remove(); route(); };
+    const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && done() },
+      h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': `Edit ${a.label}` },
+        h('h2', {}, `⚙️ ${a.label}`),
+        h('p', { class: 'muted', style: 'margin-top:0;font-size:13px' }, `id "${a.id}"${a.phone ? ' · +' + a.phone : ''} · ${a.provider === 'cloud' ? 'Meta Cloud API' : 'linked phone'}. A number is shared by all campaigns: its settings don’t change with the campaign you have open.`),
+        h('label', { class: 'field' }, h('span', {}, 'Name'), text('label', a.label)),
+        h('label', { class: 'field' }, h('span', {}, 'Purpose'), text('purpose', a.purpose), h('em', {}, 'AI agents read this to understand what the number is for.')),
+        h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: a.enabled, onchange: (e) => {
+          if (!e.target.checked && !confirm(`Pause ${a.label}? It stops sending and receiving until you turn it back on.`)) { e.target.checked = true; return; }
+          save({ enabled: e.target.checked });
+        } }), h('span', {}, 'Active', h('em', {}, 'Off = paused completely (stays linked).'))),
+        h('div', { class: 'row', style: 'justify-content:space-between;flex-wrap:wrap;gap:6px;margin-top:10px' },
+          h('button', { class: 'btn small', onclick: () => { back.remove(); state.settingsFor = a.id; location.hash = 'settings'; } }, 'Limits, delays & hours →'),
+          h('button', { class: 'btn small danger', onclick: guard(async () => {
+            const typed = prompt(`Type "${a.id}" to delete ${a.label} and all its stored chats, contacts and messages. This cannot be undone.`);
+            if (typed !== a.id) return;
+            await api(`/api/accounts/${a.id}?confirm=${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+            toast(`Deleted ${a.label}`);
+            done();
+          }) }, '🗑 Delete number')),
+        h('div', { class: 'row', style: 'justify-content:space-between;align-items:center;margin-top:12px' }, status, h('button', { class: 'btn primary', onclick: done }, 'Done'))));
+    document.body.append(back);
   }
 
   async function viewAccounts() {
@@ -1720,6 +1768,12 @@
       viewOutbox({ keepScroll: true });
     };
     const later = (r) => r.scheduled_at && new Date(r.scheduled_at) - Date.now() > 60000;
+    // "All 9 of these are dated for later" / "3 of these 9 …" — the same messages, not more on top
+    const laterText = (list) => {
+      const l = list.filter(later);
+      const first = l.map((r) => r.scheduled_at).sort()[0];
+      return `${l.length === list.length ? `All ${l.length} of these are` : `${l.length} of these ${list.length} are`} dated for later (the first ${whenLong(first)}) — approving keeps their dates; ${l.length === list.length ? 'none goes out now' : `the other ${list.length - l.length} go out now`}.`;
+    };
     const whenLong = (t) => new Date(t).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', year: new Date(t).getFullYear() === new Date().getFullYear() ? undefined : 'numeric', hour: '2-digit', minute: '2-digit' });
     const etas = {};
     const risky = new Set();
@@ -1922,7 +1976,7 @@
         if (!list.length) return toast(sel.size ? 'Those are already approved — only drafts need approving' : 'Tick the drafts you want to approve');
         await Promise.all(list.map((x) => x.saveNow?.()));
         const nLater = list.filter(later).length;
-        if (!confirm(`Approve ${list.length} selected drafts?${nLater ? `\n\n${nLater} of them have a later date and wait until then.` : ''}\n\n${paceText(list)}${costText(list)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit.`)) return;
+        if (!confirm(`Approve ${list.length} selected drafts?${nLater ? `\n\n${laterText(list)}` : ''}\n\n${paceText(list)}${costText(list)}\n\nThey go out one by one with the random gap, the daily limit and the new-number limit.`)) return;
         const r = await api('/api/outbox/approve-selected', { body: { ids: list.map((x) => x.id) } });
         toast(`Approved ${r.approved} — queued`);
         after();
@@ -1967,7 +2021,7 @@ ${paceText(shown)}${costText(shown)}
 
 They go out one by one with the random gap, the daily limit and the new-number limit. Your edits are saved and used.${nLater ? `
 
-${nLater} have a later date (e.g. festival wishes) — they wait until then.` : ''}`)) return;
+${laterText(shown)}` : ''}`)) return;
         const r = await api('/api/outbox/approve-selected', { body: { ids: shown.map((x) => x.id) } });
         toast(`Approved ${r.approved} — queued`);
         viewOutbox({ keepScroll: true });
@@ -2048,7 +2102,7 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
     storeGroups: 'Store groups', autosaveImages: 'Save images', autosaveDocuments: 'Save documents', autosaveKnownOnly: 'Only known people', autosaveMaxMb: 'Max file size',
     optOutWords: 'Opt-out words', webhookUrl: 'Notify URL' };
   async function viewSettings() {
-    await loadAccounts();
+    await loadAccounts(true);
     const [pb, al, pr, dflt, dg] = await Promise.all([
       api('/api/playbook').catch(() => ({ text: '' })),
       api('/api/alerts').catch(() => ({ phones: [] })),
@@ -2090,20 +2144,39 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
       optOutWords: fd.optOutWords.value,
       webhookUrl: fd.webhookUrl.value.trim(),
     });
-    const form = h('form', { onsubmit: guard(async (e) => {
-      e.preventDefault();
-      const fd = e.target;
-      if (allMode) {
-        const r = await api('/api/settings/defaults', { method: 'PUT', body: collect(fd) });
-        const changed = r.numbers.filter((n) => n.changed.length).map((n) => n.label);
-        const kept = r.numbers.filter((n) => n.own.length).map((n) => n.label);
-        toast(`Saved for all numbers${changed.length ? ' — updated ' + changed.join(', ') : ''}${kept.length ? '. Own values kept on ' + kept.join(', ') : ''}`);
-      } else {
-        await api(`/api/accounts/${id}`, { method: 'PATCH', body: { label: fd.label.value, purpose: fd.purpose.value, enabled: fd.enabled.checked, settings: collect(fd) } });
-        toast('Settings saved');
+    // Every change is saved at once (text after a short pause); the status line says when it is saved or why not.
+    const status = h('span', { class: 'muted', style: 'font-size:13px' }, 'Changes save by themselves.');
+    let saveTimer = null;
+    const saveNow = async (fd) => {
+      clearTimeout(saveTimer);
+      status.textContent = 'Saving…';
+      try {
+        if (allMode) {
+          const r = await api('/api/settings/defaults', { method: 'PUT', body: collect(fd) });
+          const kept = r.numbers.filter((n) => n.own.length).map((n) => n.label);
+          status.textContent = `✓ Saved for all numbers${kept.length ? ' (own values kept on ' + kept.join(', ') + ')' : ''}`;
+        } else {
+          const r = await api(`/api/accounts/${id}`, { method: 'PATCH', body: { label: fd.label.value, purpose: fd.purpose.value, enabled: fd.enabled.checked, settings: collect(fd) } });
+          Object.assign(a, r);
+          state.accountsAt = 0; // the next page loads the numbers fresh
+          status.textContent = `✓ Saved ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+        }
+      } catch (err) {
+        status.textContent = '⚠️ Not saved: ' + err.message;
+        status.style.color = 'var(--bad)';
       }
-      viewSettings();
-    }) },
+    };
+    const form = h('form', { onsubmit: (e) => { e.preventDefault(); saveNow(e.target); },
+      onchange: (e) => {
+        // sending without approval is a big step: ask before it is saved
+        if (e.target.name === 'aiMode' && e.target.value === 'auto' && !confirm('Send AI and campaign messages from this number WITHOUT your approval?')) {
+          e.currentTarget.querySelector('input[name=aiMode][value=approve]').checked = true;
+          return;
+        }
+        if (e.target.name === 'enabled' && !e.target.checked && !confirm('Pause this number? It stops sending and receiving until you turn it back on.')) { e.target.checked = true; return; }
+        saveNow(e.currentTarget);
+      },
+      oninput: (e) => { if (e.target.matches('input[type=text], input[type=url], input[type=number], textarea')) { status.textContent = 'Editing…'; clearTimeout(saveTimer); const fd = e.currentTarget; saveTimer = setTimeout(() => saveNow(fd), 900); } } },
       h('div', { class: 'settings-grid' },
         allMode ? null : h('div', { class: 'card' },
           h('h2', {}, '📱 Number'),
@@ -2157,7 +2230,7 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
           f('optOutWords', 'Opt-out words', h('input', { type: 'text', name: 'optOutWords', value: s.optOutWords.join(', ') }), 'A reply containing one of these tags the contact "opted-out"; campaigns skip them.'),
           f('webhookUrl', 'Notify URL for new messages (optional)', h('input', { type: 'url', name: 'webhookUrl', value: s.webhookUrl, placeholder: 'https://script.google.com/macros/s/…/exec' }), 'Each incoming message is POSTed here as JSON.')),
       ),
-      h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'btn primary', type: 'submit' }, allMode ? 'Save for all numbers' : `Save for ${a.label}`)),
+      h('div', { class: 'row', style: 'margin-top:12px' }, status),
     );
     const followers = allMode && dflt
       ? h('div', { class: 'card', style: 'margin-bottom:12px' },
@@ -2201,6 +2274,34 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
     // Main playbook + one per campaign (the AI reads the main one always, a campaign's when it works on it)
     const pbList = await api('/api/playbooks').catch(() => []);
     const pbText = h('textarea', { name: 'text', rows: 16, value: pb.text || '' });
+    const pbStatus = h('span', { class: 'muted', style: 'font-size:13px' }, 'Saves by itself as you type.');
+    const pbInc = h('div', { class: 'row', style: 'flex-wrap:wrap;gap:4px 14px;margin-bottom:8px' });
+    const incLine = /^\s*INCLUDE:\s*(.+?)\s*$/i;
+    const showIncludes = () => {
+      const c = state.pbCampaign;
+      if (!c) { pbInc.replaceChildren(h('span', { class: 'muted', style: 'font-size:12px' }, 'The main playbook applies to every campaign and to the AI always.')); return; }
+      const have = pbText.value.split('\n').map((l) => l.match(incLine)?.[1]).filter(Boolean).map((x) => x.toLowerCase());
+      const others = pbList.filter((p) => p.campaign.toLowerCase() !== c.toLowerCase());
+      pbInc.replaceChildren(h('span', { class: 'muted', style: 'font-size:12px' }, 'Main playbook (always) + also follows:'),
+        ...others.map((p) => h('label', { class: 'switch', style: 'margin:0' },
+          h('input', { type: 'checkbox', checked: have.includes(p.campaign.toLowerCase()), onchange: (e) => {
+            const lines = pbText.value.split('\n').filter((l) => (l.match(incLine)?.[1] || '').toLowerCase() !== p.campaign.toLowerCase());
+            pbText.value = (e.target.checked ? [`INCLUDE: ${p.campaign}`, ...lines] : lines).join('\n');
+            savePb();
+          } }), h('span', {}, p.campaign))));
+    };
+    let pbTimer = null;
+    const savePb = async () => {
+      clearTimeout(pbTimer);
+      if (!pbText.value.trim()) { pbStatus.textContent = 'Empty — not saved'; return; }
+      pbStatus.textContent = 'Saving…';
+      try {
+        await api('/api/playbook', { method: 'PUT', body: { text: pbText.value, campaign: state.pbCampaign || undefined } });
+        pbStatus.textContent = `✓ Saved — ${state.pbCampaign ? `the AI reads it when working on "${state.pbCampaign}"` : 'every AI using the hub follows it'}`;
+      } catch (err) { pbStatus.textContent = '⚠️ Not saved: ' + err.message; }
+    };
+    pbText.addEventListener('input', () => { pbStatus.textContent = 'Editing…'; clearTimeout(pbTimer); pbTimer = setTimeout(savePb, 1200); });
+    pbText.addEventListener('blur', () => { if (pbTimer) savePb(); });
     const pbPick = h('select', { 'aria-label': 'Which playbook', style: 'max-width:320px', onchange: guard(async (e) => {
       let c = e.target.value;
       if (c === '+') {
@@ -2209,22 +2310,23 @@ ${nLater} have a later date (e.g. festival wishes) — they wait until then.` : 
         e.target.append(h('option', { value: c }, `🎯 ${c}`));
         e.target.value = c;
       }
+      if (pbTimer) await savePb(); // finish saving the one being left
       state.pbCampaign = c;
       pbText.value = (await api(`/api/playbook${c ? `?campaign=${encodeURIComponent(c)}` : ''}`)).text || '';
+      pbStatus.textContent = 'Saves by itself as you type.';
+      showIncludes();
     }) },
       h('option', { value: '' }, '📘 Main playbook (always read)'),
       pbList.map((p) => h('option', { value: p.campaign }, `🎯 ${p.campaign}`)),
       h('option', { value: '+' }, '＋ New campaign playbook…'));
     state.pbCampaign = '';
-    const playbookForm = h('form', { onsubmit: guard(async (e) => {
-      e.preventDefault();
-      await api('/api/playbook', { method: 'PUT', body: { text: pbText.value, campaign: state.pbCampaign || undefined } });
-      toast(state.pbCampaign ? `"${state.pbCampaign}" playbook saved — the AI reads it when working on that campaign` : 'Playbook saved — every AI using the hub now follows it');
-    }) },
-      h('p', { class: 'muted', style: 'margin-top:0' }, 'Sent to every AI that connects to the hub (Claude Code, regular Claude, others). The main playbook holds rules for everything; each campaign (Chef, Reception, Corporate sales…) can have its own, which the AI reads when it works on that campaign. Write in plain words.'),
+    showIncludes();
+    const playbookForm = h('form', { onsubmit: (e) => { e.preventDefault(); savePb(); } },
+      h('p', { class: 'muted', style: 'margin-top:0' }, 'Sent to every AI that connects to the hub (Claude Code, regular Claude, others). The main playbook holds rules for everything and is always read; each campaign (Chef, Reception, Corporate sales…) can have its own and can also follow shared ones (e.g. "Hiring – all roles"). The AI reads the main playbook plus the open campaign\'s (with what it follows). Every playbook is listed here, whichever campaign is open. Write in plain words.'),
       h('div', { style: 'margin-bottom:8px' }, pbPick),
+      pbInc,
       pbText,
-      h('div', { style: 'margin-top:8px' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save playbook')));
+      h('div', { style: 'margin-top:8px' }, pbStatus));
     shell([
       h('div', { class: 'row', style: 'margin-bottom:6px' }, h('h1', { class: 'grow', style: 'margin:0' }, '⚙️ Settings'),
         h('select', { style: 'max-width:300px', 'aria-label': 'Settings for', onchange: (e) => { state.settingsFor = e.target.value; viewSettings(); } },
