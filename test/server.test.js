@@ -1694,6 +1694,12 @@ test('send order and limits (25 Oct): "send by" first, then people who wrote bef
   const f2 = await outbox.capacityForecast('pr2');
   assert.equal(f2.atRisk.length, 0, 'the wish fits');
   assert.ok(new Date(f2.etas[outreach.id]) > new Date(f2.etas[wish.id]), 'the forecast shows the outreach after the wish');
+  // a wish months away (New Year) is estimated too, not reported as missing its deadline
+  const far = await outbox.enqueue({ account: 'pr2', to: '919811100013', payload: { text: 'Happy New Year' }, source: 'campaign',
+    scheduledAt: new Date(Date.now() + 70 * 86400e3).toISOString(), expiresAt: new Date(Date.now() + 70 * 86400e3 + 8 * 3600e3).toISOString() });
+  const f3 = await outbox.capacityForecast('pr2');
+  assert.ok(f3.etas[far.id], 'estimated');
+  assert.ok(!f3.atRisk.some((m) => m.id === far.id), 'not at risk');
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'pr2' AND status IN ('draft','queued')`);
   await manager.remove('pr2');
 });

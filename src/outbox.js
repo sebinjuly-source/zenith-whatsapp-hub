@@ -869,7 +869,9 @@ export async function capacityForecast(accountId, { settings } = {}) {
   const pending = rows.map((m) => ({ ...m, ready: Math.max(now, new Date(m.scheduled_at).getTime(), m.is_new ? blockedUntil : 0) }));
   const eta = new Map();
   let T = Math.max(now, workers.get(accountId)?.nextAt?.() || 0);
-  for (let guard = 0; pending.length && guard < 20000 && T < now + 30 * DAY; guard++) {
+  // look far enough to reach every dated message (a New Year wish is months away), at most a year and a bit
+  const horizon = Math.min(now + 400 * DAY, Math.max(now + 30 * DAY, ...pending.map((m) => m.ready + 3 * DAY)));
+  for (let guard = 0; pending.length && guard < 20000 && T < horizon; guard++) {
     T = nextSendingTime(s, new Date(T)).getTime();
     let pick = -1;
     let soonest = Infinity;
