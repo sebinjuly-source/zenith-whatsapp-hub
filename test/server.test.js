@@ -2418,3 +2418,15 @@ test('Board notes: the same note sent twice at once (blur + Save note, double ta
   assert.equal((await call('GET', `/api/tasks/${t.id}/log`)).data.filter((l) => l.kind === 'note').length, 2, 'a different note is kept');
   await call('POST', `/api/tasks/${t.id}/cancel`);
 });
+
+test('a new job role from an import (WorkIndia batch) becomes a campaign with hiring stages that follows the shared hiring playbook', async () => {
+  await call('PUT', '/api/playbook', { text: 'NEVER PAY BEFORE JOINING', campaign: 'Hiring – all roles' });
+  const out = await mcp('import_list', { account: 'hiring', name: 'Driver candidates – Batch 1', role: 'Driver', members: [{ phone: '9855500001', name: 'Raju' }], campaign: 'all' });
+  assert.match(out, /NEW CAMPAIGN "Driver" set up by the hub: hiring stages, playbook following "Hiring – all roles"/);
+  assert.match(await mcp('get_playbook', { campaign: 'Driver' }), /NEVER PAY BEFORE JOINING/);
+  assert.match(await mcp('list_campaigns', {}), /Driver[^\n]*\n\s+stages: Interested/);
+  // a second batch of the same role does nothing new; a guest/sales role gets no hiring set-up
+  assert.doesNotMatch(await mcp('import_list', { account: 'hiring', name: 'Driver candidates – Batch 2', role: 'Driver', members: [{ phone: '9855500002', name: 'Ravi' }], campaign: 'all' }), /NEW CAMPAIGN/);
+  assert.doesNotMatch(await mcp('import_list', { account: 'hotel', name: 'Diwali offer guests', role: 'Diwali offer', members: [{ phone: '9855500003', name: 'Asha' }], campaign: 'all' }), /NEW CAMPAIGN/);
+  for (const c of ['Driver', 'Hiring – all roles']) await call('DELETE', `/api/playbooks/${encodeURIComponent(c)}`);
+});

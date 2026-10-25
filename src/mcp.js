@@ -1166,6 +1166,7 @@ function buildServer(playbook = '', focus = '') {
       r.added.length ? `New: ${names(r.added)}` : null,
       r.updated.length ? `Updated: ${names(r.updated)}` : null,
       r.skipped.length ? `Skipped (not added): ${r.skipped.map((x) => `${x.row}${x.phone ? ' +' + x.phone : ''} — ${x.reason}`).join('; ')}` : null,
+      r.campaignSetup ? `NEW CAMPAIGN "${r.campaignSetup.campaign}" set up by the hub: ${r.campaignSetup.set.join(', ')}. Ask the owner for this role's own rules (offer, salary range, must-haves) and add them with save_playbook(campaign="${r.campaignSetup.campaign}", includes kept).` : null,
     ].filter(Boolean).join('\n');
   });
 

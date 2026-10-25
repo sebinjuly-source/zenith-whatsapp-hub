@@ -116,10 +116,33 @@ export async function knownPeople(role, account) {
   );
 }
 
+/**
+ * The first list of a new job role (e.g. a WorkIndia "Driver" batch) starts a new campaign. A hiring role is set up the
+ * way the owner's hiring campaigns are: the hiring funnel stages, and a playbook that follows the shared
+ * "Hiring – all roles" rules (no money before joining, replies first …) — so those rules apply from the first message,
+ * whichever AI or skill imported the batch. Anything already set (stages, a playbook) is left alone.
+ */
+async function setupNewCampaign(role, accountId) {
+  const { isHiringName, stagesInfo, setStages } = await import('./stages.js');
+  if (!isHiringName(role)) return null;
+  const done = [];
+  if (!(await stagesInfo(role)).own) { await setStages(role, 'hiring'); done.push('hiring stages'); }
+  const pb = await import('./playbook.js');
+  const shared = (await pb.listCampaignPlaybooks()).find((p) => /^hiring/i.test(p.campaign) && p.campaign.toLowerCase() !== role.toLowerCase());
+  if (shared && !(await pb.getCampaignPlaybook(role))) {
+    await pb.savePlaybook(`INCLUDE: ${shared.campaign}\n\n${role.toUpperCase()} (list role "${role}") — set up by the hub for a new hiring role. Add this role's own rules here: the offer, salary range, must-have skills, deal-breakers.`, role, { actor: 'hub' });
+    done.push(`playbook following "${shared.campaign}"`);
+  }
+  if (done.length) await logEvent(accountId, 'info', `New campaign "${role}" from an import: ${done.join(', ')}`, 'system', role);
+  return done.length ? { campaign: role, set: done } : null;
+}
+
 export async function importList({ account, name, role, since, source, members, followup, skipKnown = true }) {
   const s = await manager.resolve(account);
   if (!name?.trim()) throw new Error('A list needs a name');
   role = (role || roleFromName(name) || 'General').trim();
+  const scope = await import('./scope.js');
+  const newCampaign = !(await scope.campaignExists(role));
   const [list] = await query(
     `INSERT INTO lists (account_id, name, source, since, followup, role, pipeline) VALUES ($1,$2,$3,COALESCE($4::timestamptz, now()),$5,$6,$7)
      ON CONFLICT (account_id, name) DO UPDATE SET source = COALESCE(EXCLUDED.source, lists.source),
@@ -130,6 +153,7 @@ export async function importList({ account, name, role, since, source, members, 
     [s.id, name.trim(), source || null, since || null, JSON.stringify({ ...DEFAULT_FOLLOWUP, ...(followup || {}) }), role,
       JSON.stringify(HIRING_ROLES.includes(String(role).toLowerCase()) ? {} : { enabled: false })],
   );
+  const campaignSetup = newCampaign ? await setupNewCampaign(role, s.id).catch(() => null) : null;
   // People already on ANOTHER list of the same role are not added again (never re-message a past batch).
   const known = new Map();
   if (skipKnown) {
@@ -174,7 +198,7 @@ export async function importList({ account, name, role, since, source, members, 
          row_ref = COALESCE(EXCLUDED.row_ref, list_members.row_ref), updated_at = now()`);
   }
   await refreshList(list.id);
-  return { list, imported: rows.length, added, updated, skipped: bad };
+  return { list, imported: rows.length, added, updated, skipped: bad, campaignSetup };
 }
 
 /** Archive (or bring back) a list: an archived list never sends, and its unsent drafts/queued messages are cancelled. */

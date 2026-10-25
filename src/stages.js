@@ -23,6 +23,8 @@ export const PRESETS = {
 };
 export const PRESET_LABELS = { hiring: 'Hiring (candidates)', sales: 'Sales / corporate', winback: 'Win-back (past guests)' };
 const HIRING = /chef|cook|front office|reception|housekeep|service|driver|security|steward|waiter|hiring|staff|general|^test/i;
+/** Does this campaign name look like a hiring campaign (a job role)? */
+export const isHiringName = (name) => HIRING.test(String(name || ''));
 const defaultFor = (campaign) => (!campaign || HIRING.test(campaign) ? PRESETS.hiring : PRESETS.sales);
 
 const BUILTIN_CLOSED = ['joined', 'not_interested', 'rejected'];
