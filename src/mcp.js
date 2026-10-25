@@ -80,6 +80,39 @@ const helpFor = (err) => {
   const todo = code && metaHelpFn ? metaHelpFn(code).todo : null;
   return todo ? ` | what to do: ${todo}` : '';
 };
+/**
+ * The inbox at a glance, across numbers: chats with messages since `since` (unix s), newest first — who wrote last,
+ * how many of their messages are unanswered, the campaign / list / stage, and whether a Board card or a draft already
+ * covers it. People who are on no list get no "Reply to" card, so this is how the AI sees them.
+ */
+async function inboxRows({ since, account, campaign, waitingOnly = true, limit = 40 }) {
+  const p = [since];
+  const where = [];
+  if (account) { p.push(account); where.push(`ib.account_id = $${p.length}`); }
+  if (campaign) { p.push(campaign); where.push(roleFilter(roleOf('ib.account_id', 'ib.chat_jid'), p.length)); }
+  if (waitingOnly) where.push('NOT ib.from_me');
+  p.push(limit);
+  return query(
+    `WITH ib AS (
+       SELECT DISTINCT ON (account_id, chat_jid) account_id, chat_jid, from_me, ts, body, type FROM messages
+       WHERE ts > $1 AND chat_jid NOT LIKE '%@g.us' AND chat_jid NOT LIKE '%broadcast%' AND chat_jid NOT LIKE '%@newsletter'
+       ORDER BY account_id, chat_jid, ts DESC)
+     SELECT ib.*, ${roleOf('ib.account_id', 'ib.chat_jid')} AS campaign,
+       COALESCE(NULLIF(ct.name, ''), NULLIF(ch.name, ''), ct.notify) AS name,
+       (SELECT count(*)::int FROM messages y WHERE y.account_id = ib.account_id AND y.chat_jid = ib.chat_jid AND NOT y.from_me
+          AND y.ts > COALESCE((SELECT max(z.ts) FROM messages z WHERE z.account_id = ib.account_id AND z.chat_jid = ib.chat_jid AND z.from_me), 0)) AS unanswered,
+       (SELECT m.stage FROM list_members m JOIN lists li ON li.id = m.list_id WHERE m.jid = ib.chat_jid ORDER BY (li.account_id = ib.account_id) DESC, li.id DESC LIMIT 1) AS stage,
+       (SELECT li.name FROM list_members m JOIN lists li ON li.id = m.list_id WHERE m.jid = ib.chat_jid ORDER BY (li.account_id = ib.account_id) DESC, li.id DESC LIMIT 1) AS list_name,
+       (SELECT t.id FROM tasks t WHERE t.status NOT IN ('done','cancelled') AND t.ref = 'reply:' || ib.account_id || ':' || ib.chat_jid LIMIT 1) AS card,
+       (SELECT o.id FROM outbox o WHERE o.account_id = ib.account_id AND o.to_jid = ib.chat_jid AND o.status IN ('draft','queued') ORDER BY o.id DESC LIMIT 1) AS waiting_msg
+     FROM ib LEFT JOIN contacts ct ON ct.account_id = ib.account_id AND ct.jid = ib.chat_jid
+     LEFT JOIN chats ch ON ch.account_id = ib.account_id AND ch.jid = ib.chat_jid
+     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY ib.ts DESC LIMIT $${p.length}`,
+    p,
+  );
+}
+
 /** " | sending: … | today: … | Meta budget …" for one number (why messages wait, what's left, what it cost). */
 async function sendingLine(a) {
   try {
@@ -231,7 +264,7 @@ function buildServer(playbook = '', focus = '') {
 
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who have written to us before (interested candidates, interview follow-ups) → first messages to new people → nudges to non-repliers. Only messages to people who never wrote count toward a linked number's daily limit. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). The Board only has cards for people on lists; inbox_summary shows every chat waiting for an answer on every number (new guests, enquiries) — look at it before deciding, and read the chat (get_messages) before drafting. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who have written to us before (interested candidates, interview follow-ups) → first messages to new people → nudges to non-repliers. Only messages to people who never wrote count toward a linked number's daily limit. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
   const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter for this call: a campaign name, "none" (hotel / no campaign) or "all". Default: ${focus ? `"${focus}" (the campaign the owner has open)` : 'all campaigns'}.`);
   const tool = (name, description, inputSchema, fn) => {
@@ -293,6 +326,12 @@ function buildServer(playbook = '', focus = '') {
       out.push(`   OWNER NOTES TO ACT ON (${pendingNotes.length}) → list_tasks(owner_notes=true), do what each says, then add_task_note:`);
       for (const t of pendingNotes.slice(0, 8)) out.push(`   - #${t.id} ${trim(t.title, 60)} — "${trim(t.last_note, 120)}"`);
     }
+    // the inbox: who is waiting for an answer — including people on no list, who get no "Reply to" card
+    const waiting = await inboxRows({ since: Math.floor(Date.now() / 1000) - 3 * 86400, campaign: a.campaign, limit: 200 }).catch(() => []);
+    const unanswered = waiting.filter((w) => !w.waiting_msg);
+    const noCard = unanswered.filter((w) => !w.card);
+    out.push(`   INBOX: ${unanswered.length} chat(s) waiting for an answer (last 3 days, no draft yet); ${noCard.length} of them have no Board card (people on no list, e.g. new guests) → inbox_summary`);
+    for (const w of noCard.slice(0, 6)) out.push(`   - ${w.account_id}: ${w.name || '+' + w.chat_jid.split('@')[0]}${w.campaign ? ` · ${w.campaign}` : ' · no campaign'} — "${trim(w.body || '[' + w.type + ']', 80)}"`);
     const [fb] = await query(`SELECT count(*)::int n FROM outbox WHERE status = 'rejected' AND error LIKE 'Rejected:%' AND created_at > now() - interval '3 days'`);
     if (fb.n) out.push(`   OWNER FEEDBACK: ${fb.n} draft(s) rejected with a reason in the last 3 days → owner_feedback (some reasons are instructions, e.g. "wish him on festivals")`);
     const upcomingVisits = later.filter((t) => t.kind === 'visit').slice(0, 5);
@@ -722,6 +761,30 @@ function buildServer(playbook = '', focus = '') {
     return `Changed ${r.changed.length} (${what}).${r.skipped.length ? ` Skipped ${r.skipped.length}: ${r.skipped.slice(0, 20).map((x) => `#${x.id} ${x.why}`).join('; ')}` : ''}`;
   });
 
+  tool('inbox_summary', 'The INBOX at a glance across all numbers (big picture before drafting): chats with new messages, newest first — who wrote, how many of their messages are still unanswered, their campaign / list / stage, the last message, and whether a Board card or a waiting draft already covers it. People on no list (new guests, enquiries, businesses) get no "Reply to" card — this is where you see them. Then read a chat with get_messages(full_text) before answering. Skip spam, ads and businesses selling to us.', {
+    since: z.string().optional().describe('From when: "YYYY-MM-DD HH:MM" (owner time) or ISO; default the last 24 hours'),
+    account: z.string().optional().describe('One number; default all'),
+    waiting_only: z.boolean().optional().describe('Only chats where they spoke last (default true); false = every chat with activity'),
+    limit: z.number().int().min(1).max(200).optional(),
+  }, async (a) => {
+    const since = a.since ? Math.floor(new Date(localTime(a.since)).getTime() / 1000) : Math.floor(Date.now() / 1000) - 86400;
+    if (!since) throw new Error('Could not read since');
+    const rows = await inboxRows({ since, account: a.account ? (await manager.resolve(a.account)).id : null, campaign: a._c, waitingOnly: a.waiting_only !== false, limit: a.limit || 60 });
+    if (!rows.length) return `Nothing ${a.waiting_only === false ? 'new' : 'waiting'} since ${d(new Date(since * 1000))}.`;
+    const byAcc = {};
+    for (const r of rows) (byAcc[r.account_id] ||= []).push(r);
+    const out = [`INBOX since ${d(new Date(since * 1000))} — ${rows.length} chat(s)${a.waiting_only === false ? '' : ' waiting for us'}:`];
+    for (const [acc, list] of Object.entries(byAcc)) {
+      out.push(`\n${acc} (${list.length}):`);
+      for (const r of list) {
+        out.push(`- ${r.name || '+' + r.chat_jid.split('@')[0]} (${r.chat_jid.split('@')[0]})${r.campaign ? ` · ${r.campaign}` : ' · no campaign'}${r.list_name ? ` · ${r.list_name}${r.stage ? ` [${r.stage}]` : ''}` : ' · not on a list'}`
+          + ` · ${r.from_me ? 'we wrote last' : `${r.unanswered} unanswered`} · ${d(new Date(Number(r.ts) * 1000))}: "${trim(r.body || '[' + r.type + ']', 120)}"`
+          + `${r.card ? ` · card #${r.card}` : r.from_me ? '' : ' · NO CARD'}${r.waiting_msg ? ` · our #${r.waiting_msg} waiting` : ''}`);
+      }
+    }
+    return out.join('\n');
+  });
+
   tool('owner_feedback', 'Everything the owner told the AI lately, in one place: notes on Board cards (call notes, instructions — newest first, marked DONE when the AI wrote a note after), reasons given when rejecting drafts, and Drafts-page notes ("Owner: …" cards). Read it at the start of a session and act on what is still open.', {
     days: z.number().int().min(1).max(60).optional().describe('How far back (default 7)'),
   }, async (a) => {
@@ -1127,9 +1190,9 @@ function buildServer(playbook = '', focus = '') {
     return `Follow-ups for "${l.name}": ${u.followup.enabled ? `on — after ${u.followup.afterDays} day(s) without reply, up to ${u.followup.max}` : 'off'}.`;
   });
 
-  tool('update_list_member', 'Move a person through the funnel: stage (interested, date_given, visited, trial, selected, joined, no_show, not_interested, rejected), the date/time they will come (visit_at → automatic reminder before it and a board task), outcome (short reason) and notes. Stages joined / not_interested / rejected close the person (no more sends or follow-ups). Owner rule: anyone asking for money before joining → stage rejected.', {
+  tool('update_list_member', 'Move a person through their campaign\'s funnel: stage (a key of that campaign\'s stages — list_campaigns shows each campaign\'s; hiring: interested, date_given, visited, trial, selected, joined, no_show, not_interested, rejected), the date/time they will come (visit_at → automatic reminder before it and a board task), outcome (short reason) and notes. Stages joined / not_interested / rejected close the person (no more sends or follow-ups). Owner rule: anyone asking for money before joining → stage rejected.', {
     list: listArg, phone: z.string(),
-    stage: z.enum(['interested', 'date_given', 'visited', 'trial', 'selected', 'joined', 'no_show', 'not_interested', 'rejected', '']).optional().describe('Funnel stage ("" clears it)'),
+    stage: z.string().optional().describe('Funnel stage KEY of the list\'s campaign ("" clears it). Each campaign has its own stages (list_campaigns shows them): hiring = interested, date_given, visited, trial, selected, joined, no_show, not_interested, rejected; sales/corporate and win-back have their own (e.g. contact_shared, rates_shared, first_booking, booked, not_now)'),
     visit_at: z.string().optional().describe('When they will come (ISO or "YYYY-MM-DD HH:MM", your timezone if no offset); sets stage date_given; "" clears'),
     outcome: z.string().optional().describe('Short reason/summary, e.g. "rejected – asked for money before joining"'),
     notes: z.string().optional(),
@@ -1309,13 +1372,21 @@ function buildServer(playbook = '', focus = '') {
        FROM unnest($1::text[]) AS r(role) ORDER BY lower(r.role)`, [names]);
     const open = await scope.getFocus();
     const pbs = new Set((await listCampaignPlaybooks()).map((p) => p.campaign.toLowerCase()));
+    const { stagesInfo, stagesText } = await import('./stages.js');
+    const lines = [];
+    for (const r of rows) {
+      const si = await stagesInfo(r.role);
+      lines.push(`${r.role}${scope.same(r.role, open) ? ' (open)' : ''} | ${r.lists} lists | ${r.cards} open cards | ${r.drafts} drafts | playbook: ${pbs.has(r.role.toLowerCase()) ? 'yes' : 'no'}\n   stages${si.own ? '' : ' (default)'}: ${stagesText(si.stages)}`);
+    }
     return [`Open in the dashboard: ${open ? scope.label(open) : 'all campaigns'}`,
-      ...rows.map((r) => `${r.role}${scope.same(r.role, open) ? ' (open)' : ''} | ${r.lists} lists | ${r.cards} open cards | ${r.drafts} drafts | playbook: ${pbs.has(r.role.toLowerCase()) ? 'yes' : 'no'}`),
+      ...lines,
       'none = Hotel / no campaign (people on no list)'].join('\n');
   });
   tool('create_campaign', 'Create a campaign when the owner asks (e.g. "Diwali offer", "Driver hiring"), optionally with its playbook (rules: who to contact, what to say and never say). Then add people with import_list(role=<campaign>). It does not switch the owner\'s dashboard unless open=true.', {
     name: z.string(), playbook: z.string().optional().describe('The campaign\'s own rules'),
     includes: z.array(z.string()).optional().describe('Other playbooks it also follows, e.g. ["Hiring – all roles"] for a hiring campaign'),
+    stages: z.union([z.enum(['hiring', 'sales', 'winback']), z.array(z.union([z.string(), z.object({ key: z.string().optional(), label: z.string(), closed: z.boolean().optional() })]))]).optional()
+      .describe('Funnel stages: a preset ("hiring", "sales" = corporate/B2B, "winback" = past guests) or your own list in order, e.g. ["Replied","Meeting fixed","Proposal sent","Won","Lost (closed)"]. "(closed)" = no more messages to that person. Default: hiring for hiring campaigns, else sales'),
     open: z.boolean().optional().describe('Also open it in the dashboard (switch_campaign)'),
   }, async (a) => {
     const r = await scope.createCampaign(a.name);
@@ -1323,9 +1394,19 @@ function buildServer(playbook = '', focus = '') {
       const { withIncludes } = await import('./playbook.js');
       await savePlaybook(withIncludes(a.playbook || '', a.includes || []), r.name, { actor: 'ai' });
     }
+    if (a.stages) await (await import('./stages.js')).setStages(r.name, a.stages);
     if (a.open) await scope.setFocus(r.name);
     await ai(null, `${r.created ? 'Created' : 'Found'} campaign "${r.name}"${a.playbook ? ' with its playbook' : ''}${a.open ? ' and opened it' : ''}`, r.name);
     return `Campaign "${r.name}" ${r.created ? 'created' : 'already existed'}${a.playbook ? ', playbook saved' : ''}${a.open ? ' — now open in the dashboard' : ''}.`;
+  });
+  tool('set_campaign_stages', 'Set a campaign\'s funnel stages when the owner asks (or when you set up a campaign): a preset ("hiring", "sales" = corporate/B2B, "winback" = past guests) or your own list in order. Keys with built-in meaning: interested; date_given = a dated visit/meeting (reminders + an owner card); not_interested (always added, closed). Mark stages that end all messages with "(closed)". People already at a stage that no longer exists keep it until moved.', {
+    name: z.string().describe('Campaign name'),
+    stages: z.union([z.enum(['hiring', 'sales', 'winback']), z.array(z.union([z.string(), z.object({ key: z.string().optional(), label: z.string(), closed: z.boolean().optional() })]))]),
+  }, async (a) => {
+    const { setStages, stagesText } = await import('./stages.js');
+    const stages = await setStages(a.name, a.stages);
+    await ai(null, `Set the stages of "${a.name}": ${stagesText(stages)}`, a.name);
+    return `Stages of "${a.name}": ${stagesText(stages)}`;
   });
   tool('switch_campaign', 'Open another campaign for the owner\'s dashboard and the default of every tool ("all" = all campaigns, "none" = hotel / no campaign). Only when the owner asks — they see the dashboard change. To just look at another campaign, pass campaign="<name>" to a tool instead.', {
     campaign: z.string().describe('Campaign name, "all" or "none"'),

@@ -181,9 +181,42 @@
     await loadAccounts(true); // the Drafts badge counts this campaign's drafts
     route();
   }
+  // Funnel stages of a campaign: a preset or one stage per line; "(closed)" = no more messages to that person.
+  const stagesToText = (stages) => stages.map((x) => `${x.label}${x.closed ? ' (closed)' : ''}`).join('\n');
+  async function stagesEditor(current) {
+    const presets = await api('/api/stage-presets').catch(() => []);
+    const ta = h('textarea', { name: 'stages', rows: 9, value: stagesToText(current || presets[0]?.stages || []) });
+    const box = h('div', { class: 'field' },
+      h('span', { style: 'display:block;font-weight:550;margin-bottom:4px' }, 'Funnel stages'),
+      h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;margin-bottom:6px' }, presets.map((p) =>
+        h('button', { class: 'btn small', type: 'button', onclick: () => { ta.focus(); ta.select(); if (!document.execCommand?.('insertText', false, stagesToText(p.stages))) ta.value = stagesToText(p.stages); } }, p.label))),
+      ta,
+      h('em', {}, 'One stage per line, in order. Add "(closed)" to stages that end all messages to that person. "Not interested" is always added. A stage with "fixed" meaning a dated visit or meeting: use the preset\'s line (it keeps reminders and an owner card).'));
+    return { box, value: () => ta.value.split('\n').map((x) => x.trim()).filter(Boolean), presets };
+  }
+  async function editStages(campaign, current, after) {
+    const ed = await stagesEditor(current);
+    const done = () => back.remove();
+    const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && done() },
+      h('form', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Funnel stages', onsubmit: guard(async (e) => {
+        e.preventDefault();
+        await api(`/api/campaigns/${encodeURIComponent(campaign)}`.concat('/stages'), { method: 'PUT', body: { stages: ed.value() } });
+        done();
+        toast(`Stages of "${campaign}" saved`);
+        after?.();
+      }) },
+        h('h2', {}, `Stages — ${campaign}`),
+        h('p', { class: 'muted', style: 'margin-top:0;font-size:13px' }, 'People already at a stage you remove keep it until you move them.'),
+        ed.box,
+        h('div', { class: 'row', style: 'justify-content:flex-end;gap:6px;margin-top:10px' },
+          h('button', { class: 'btn', type: 'button', onclick: done }, 'Cancel'),
+          h('button', { class: 'btn primary', type: 'submit' }, 'Save stages'))));
+    document.body.append(back);
+  }
   async function newCampaign() {
     const done = () => back.remove();
     const books = await api('/api/playbooks').catch(() => []);
+    const stagesEd = await stagesEditor(null);
     const incBox = h('div', { class: 'row', style: 'flex-wrap:wrap;gap:4px 14px' }, books.length
       ? books.map((p) => h('label', { class: 'switch', style: 'margin:0' }, h('input', { type: 'checkbox', name: 'inc', value: p.campaign }), h('span', {}, p.campaign)))
       : h('span', { class: 'muted' }, 'No other playbooks yet.'));
@@ -192,7 +225,7 @@
         e.preventDefault();
         const f = e.target;
         const includes = [...f.querySelectorAll('input[name=inc]:checked')].map((i) => i.value);
-        const r = await api('/api/campaigns', { body: { name: f.cname.value, playbook: f.playbook.value, includes } });
+        const r = await api('/api/campaigns', { body: { name: f.cname.value, playbook: f.playbook.value, includes, stages: stagesEd.value() } });
         done();
         toast(r.created ? `Campaign "${r.name}" created — you are now working in it` : `"${r.name}" already exists — switched to it`);
         await switchCampaign(r.name);
@@ -205,6 +238,7 @@
         h('div', { class: 'field' }, h('span', { style: 'display:block;font-weight:550;margin-bottom:4px' }, 'Also follows these playbooks'),
           h('p', { class: 'muted', style: 'margin:0 0 6px;font-size:12px' }, 'The main playbook always applies. Tick the shared ones this campaign needs too — e.g. "Hiring – all roles" for a hiring campaign.'),
           incBox),
+        h('details', { class: 'fold', style: 'margin-top:8px' }, h('summary', {}, 'Funnel stages (hiring, sales, win-back or your own)'), stagesEd.box),
         h('div', { class: 'row', style: 'justify-content:flex-end;margin-top:10px' },
           h('button', { class: 'btn', type: 'button', onclick: done }, 'Cancel'),
           h('button', { class: 'btn primary', type: 'submit' }, 'Create'))));
@@ -1449,11 +1483,13 @@
       fuWa,
       h('button', { class: 'btn primary', type: 'submit' }, 'Save follow-ups'));
     // ---- funnel strip + upcoming visits
-    const STAGE_LABEL = { interested: 'Interested', date_given: 'Date given', visited: 'Visited', trial: 'Trial', selected: 'Selected', joined: 'Joined', no_show: 'No-show', not_interested: 'Not interested', rejected: 'Rejected' };
+    // the stages of this list's campaign (hiring, sales, win-back or its own); a stage no longer in it still shows
+    const STAGE_LABEL = Object.fromEntries((sel.stages || []).map((x) => [x.key, x.label]));
     const stageCount = {};
-    for (const m of members) if (m.stage) stageCount[m.stage] = (stageCount[m.stage] || 0) + 1;
+    for (const m of members) if (m.stage) { stageCount[m.stage] = (stageCount[m.stage] || 0) + 1; STAGE_LABEL[m.stage] ||= m.stage; }
     const funnel = h('div', { class: 'funnel' }, Object.keys(STAGE_LABEL).filter((k) => stageCount[k]).map((k) =>
-      h('button', { class: 'tag' + (state.stageFilter === k ? ' on' : ''), onclick: () => { state.stageFilter = state.stageFilter === k ? '' : k; viewLists(); } }, `${STAGE_LABEL[k]} ${stageCount[k]}`)));
+      h('button', { class: 'tag' + (state.stageFilter === k ? ' on' : ''), onclick: () => { state.stageFilter = state.stageFilter === k ? '' : k; viewLists(); } }, `${STAGE_LABEL[k]} ${stageCount[k]}`)),
+      sel.role ? h('button', { class: 'btn small', title: `The funnel stages of the "${sel.role}" campaign`, onclick: () => editStages(sel.role, sel.stages, viewLists) }, '✏️ Stages') : null);
     const visits = members.filter((m) => m.stage === 'date_given' && m.visit_at).sort((a, b) => new Date(a.visit_at) - new Date(b.visit_at));
     const shown = state.stageFilter ? members.filter((m) => m.stage === state.stageFilter) : members;
     const toLocalInput = (t) => { if (!t) return ''; const d = new Date(t); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
@@ -1520,7 +1556,7 @@
           viewLists();
         }) }, '🗄 Archive')),
       visits.length ? h('div', { class: 'card', style: 'margin:12px 0' }, h('b', {}, '📅 Visits'), visits.map((m) => h('div', { style: 'font-size:13px;margin-top:4px' }, `${new Date(m.visit_at).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })} — ${m.name || m.phone}`, new Date(m.visit_at) < new Date() ? h('span', { style: 'color:var(--bad)' }, ' · passed, update stage') : ''))) : null,
-      Object.keys(stageCount).length ? funnel : null,
+      funnel,
       tabs,
       people,
       h('details', { class: 'section', style: 'margin-top:16px' }, h('summary', {}, h('span', { class: 'sec-title' }, '⚙️ Automation for this list'), h('span', { class: 'muted sec-hint' }, `pipeline ${p.enabled !== false ? 'on' : 'off'} · follow-ups ${f.enabled ? 'on' : 'off'}`)),

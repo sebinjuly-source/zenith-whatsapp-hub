@@ -383,7 +383,11 @@ export function buildApp() {
     // ?archived=1 includes archived lists
     for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND ($2 OR archived IS NULL)', [req.query.account || null, req.query.archived === '1'])) await lists.refreshList(l.id);
     const role = roleQ(req);
-    res.json(await lists.listLists(req.query.account, role && !scope.same(role, 'none') ? role : role ? '(no list belongs to Hotel / no campaign)' : undefined, { includeArchived: req.query.archived === '1' }));
+    const rows = await lists.listLists(req.query.account, role && !scope.same(role, 'none') ? role : role ? '(no list belongs to Hotel / no campaign)' : undefined, { includeArchived: req.query.archived === '1' });
+    // each list carries its campaign's funnel stages (the Lists page shows those, not the hiring ones)
+    const { stagesFor } = await import('./stages.js');
+    for (const l of rows) l.stages = await stagesFor(l.role);
+    res.json(rows);
   }));
   // Create/extend a list: { account, name, since?, source?, members: [{ phone, name, message?, ...fields }], followup? }
   api.post('/lists/import', wrap(async (req, res) => {
@@ -433,13 +437,27 @@ export function buildApp() {
   // Campaigns (job roles) with what is open in each: drafts, open cards, lists — for the campaign picker
   api.get('/campaigns', wrap(async (req, res) => {
     const names = await scope.campaignNames();
-    res.json(await query(
+    const { stagesInfo } = await import('./stages.js');
+    const rows = await query(
       `SELECT r.role,
          (SELECT count(*)::int FROM lists l WHERE l.role = r.role AND l.archived IS NULL) AS lists,
          (SELECT count(*)::int FROM outbox o WHERE o.status = 'draft' AND COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')}) = r.role) AS drafts,
          (SELECT count(*)::int FROM tasks t WHERE t.status NOT IN ('done','cancelled') AND t.role = r.role) AS cards
        FROM unnest($1::text[]) AS r(role) ORDER BY lower(r.role)`, [names],
-    ));
+    );
+    for (const r of rows) Object.assign(r, await stagesInfo(r.role).then((x) => ({ stages: x.stages, ownStages: x.own })));
+    res.json(rows);
+  }));
+  // A campaign's funnel stages: { stages: [{ key?, label, closed? }] | "hiring" | "sales" | "winback" }
+  api.get('/stage-presets', wrap(async (req, res) => {
+    const { PRESETS, PRESET_LABELS } = await import('./stages.js');
+    res.json(Object.entries(PRESETS).map(([id, stages]) => ({ id, label: PRESET_LABELS[id], stages })));
+  }));
+  api.put('/campaigns/:name/stages', wrap(async (req, res) => {
+    const { setStages, stagesText } = await import('./stages.js');
+    const stages = await setStages(req.params.name, req.body?.stages ?? req.body?.preset);
+    await act(req, null, `Set the stages of "${req.params.name}": ${stagesText(stages)}`, req.params.name);
+    res.json({ campaign: req.params.name, stages });
   }));
   // A new campaign: { name, playbook? } — then pick it at the top; the AI reads its playbook
   api.post('/campaigns', wrap(async (req, res) => {
@@ -449,6 +467,7 @@ export function buildApp() {
       const { withIncludes } = await import('./playbook.js');
       await savePlaybook(withIncludes(req.body?.playbook || '', inc), r.name);
     }
+    if (req.body?.stages || req.body?.preset) await (await import('./stages.js')).setStages(r.name, req.body.stages ?? req.body.preset);
     if (r.created) await act(req, null, `Created campaign "${r.name}"`, r.name);
     res.json(r);
   }));

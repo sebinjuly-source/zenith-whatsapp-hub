@@ -11,9 +11,10 @@ import { query } from './db.js';
 import { upsertRefTask, closeRefTasks, logTask } from './tasks.js';
 import config from './config.js';
 
-const CLOSED_STAGES = ['joined', 'not_interested', 'rejected'];
+import { isClosedStage } from './stages.js';
 const CLOSED_OUTCOME = /^\s*(rejected|not[\s-]?interested|hired|joined|do[\s-]?not[\s-]?contact)/i;
-const isClosed = (m) => CLOSED_STAGES.includes(m.stage) || CLOSED_OUTCOME.test(m.outcome || '');
+// closed = a closed stage of any campaign (joined, not_interested, rejected, wrong_contact …) or a closing outcome
+const isClosed = (m) => isClosedStage(m.stage) || CLOSED_OUTCOME.test(m.outcome || '');
 /** An interview is planned: a visit date and they haven't come yet (stage interested/date_given or none) and aren't closed. */
 export const hasVisit = (m) => !!m?.visit_at && !isClosed(m) && (!m.stage || ['interested', 'date_given'].includes(m.stage));
 const when = (t) => new Date(t).toLocaleString('en-IN', { timeZone: config.tz, weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
@@ -48,6 +49,7 @@ async function replyCard(accountId, jid, m, last) {
 
 /** A message came in: if it's a candidate on a list (not closed), put "Reply to …" on the board. */
 export async function noteIncoming(accountId, r) {
+  await (await import('./stages.js')).refreshStages();
   if (!r?.chatJid || r.fromMe || r.chatJid.endsWith('@g.us')) return;
   const m = await memberOf(accountId, r.chatJid);
   if (!m || isClosed(m)) return;
@@ -188,6 +190,7 @@ export async function catchForgotten() {
  * 7 days, not closed) has a "Reply to" card; answered ones are closed; every set visit date has a card; reminders too.
  */
 export async function syncBoard() {
+  await (await import('./stages.js')).refreshStages();
   const since = Math.floor(Date.now() / 1000) - 7 * 86400;
   const last = await query(
     `SELECT DISTINCT ON (x.account_id, x.chat_jid) x.account_id, x.chat_jid, x.from_me, x.ts, x.body, x.type

@@ -54,9 +54,9 @@ async function payloadFor(session, jid, text, waTemplate, vars, extra = {}) {
   return { payload: { text, ...extra } };
 }
 
-/** Funnel stages (set by you or the AI). Closed ones are never messaged again from the list. */
-export const STAGES = ['interested', 'date_given', 'visited', 'trial', 'selected', 'joined', 'no_show', 'not_interested', 'rejected'];
-export const CLOSED_STAGES = ['joined', 'not_interested', 'rejected'];
+/** Funnel stages: each campaign has its own (stages.js). Closed ones are never messaged again from the list. */
+import { stagesFor, isClosedStage, closedSqlList, refreshStages } from './stages.js';
+export const STAGES = ['interested', 'date_given', 'visited', 'trial', 'selected', 'joined', 'no_show', 'not_interested', 'rejected']; // hiring (the default)
 /** Roles whose lists get the candidate pipeline by default (anything else — sales, guests — starts with it off). */
 const HIRING_ROLES = ['chef', 'front office', 'housekeeping', 'service', 'driver', 'security', 'general', 'test'];
 const DEFAULT_PIPELINE = {
@@ -72,7 +72,7 @@ const DEFAULT_PIPELINE = {
 
 /** Outcomes that close a person: never messaged again from the list (no sends, no follow-ups). */
 export const CLOSED_OUTCOME = /^\s*(rejected|not[\s-]?interested|hired|joined|do[\s-]?not[\s-]?contact)/i;
-const CLOSED_SQL = `COALESCE(m.stage, '') NOT IN ('joined','not_interested','rejected') AND COALESCE(m.outcome, '') !~* '^\\s*(rejected|not[\\s-]?interested|hired|joined|do[\\s-]?not[\\s-]?contact)'`;
+const closedSql = () => `COALESCE(m.stage, '') NOT IN (${closedSqlList()}) AND COALESCE(m.outcome, '') !~* '^\\s*(rejected|not[\\s-]?interested|hired|joined|do[\\s-]?not[\\s-]?contact)'`;
 
 export async function getList(ref, account) {
   const isId = /^\d+$/.test(String(ref));
@@ -341,8 +341,12 @@ export function followupBefore(availableFrom) {
 
 export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, visitAt, followupAt, followupNote, availableFrom }) {
   const jid = toJid(phoneOrJid);
-  if (stage !== undefined && stage !== null && stage !== '' && !STAGES.includes(stage)) {
-    throw new Error(`Stage must be one of: ${STAGES.join(', ')}`);
+  if (stage !== undefined && stage !== null && stage !== '') {
+    const [lr] = await query('SELECT role FROM lists WHERE id = $1', [listId]);
+    const allowed = await stagesFor(lr?.role);
+    if (!allowed.some((s) => s.key === stage)) {
+      throw new Error(`Stage must be one of this campaign's stages: ${allowed.map((s) => `${s.key} (${s.label})`).join(', ')}`);
+    }
   }
   let visit = visitAt === undefined ? undefined : visitAt ? new Date(visitAt) : null;
   if (visit && isNaN(visit)) throw new Error('Could not read the visit date');
@@ -378,7 +382,7 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
   const board = await import('./board.js');
   await board.syncVisit(l, m).catch(() => {});
   await board.syncFollowup(l, m).catch(() => {});
-  if (['joined', 'not_interested', 'rejected'].includes(m.stage) || /^\s*(rejected|not[\s-]?interested|hired|joined|do[\s-]?not[\s-]?contact)/i.test(m.outcome || '')) {
+  if (isClosedStage(m.stage) || /^\s*(rejected|not[\s-]?interested|hired|joined|do[\s-]?not[\s-]?contact)/i.test(m.outcome || '')) {
     const { closeRefTasks } = await import('./tasks.js');
     const accs = await query(`SELECT DISTINCT account_id FROM messages WHERE chat_jid = $1`, [jid]);
     await closeRefTasks(accs.map((a) => `reply:${a.account_id}:${jid}`), 'done', `candidate closed (${m.stage || m.outcome})`).catch(() => {});
@@ -581,6 +585,7 @@ export async function setFollowup(listId, settings) {
 export async function sendToList(listId, { statuses = ['new', 'failed'], text, template, waTemplate, onlyPhones, attachment, createdBy = 'you', source = 'campaign', scheduledAt, expiresAt } = {}) {
   const at = scheduledAt ? new Date(scheduledAt) : null;
   if (at && isNaN(at)) throw new Error('scheduledAt is not a valid date/time');
+  await refreshStages();
   const until = expiresAt ? new Date(expiresAt) : null;
   if (until && (isNaN(until) || until <= (at || new Date()))) throw new Error('expiresAt ("send by") must be a valid time after the send time');
   const list = await getList(listId);
@@ -598,7 +603,7 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
   const plan = [];
   const skipped = [];
   for (const m of members) {
-    if (CLOSED_STAGES.includes(m.stage) || CLOSED_OUTCOME.test(m.outcome || '')) {
+    if (isClosedStage(m.stage) || CLOSED_OUTCOME.test(m.outcome || '')) {
       skipped.push({ to: m.phone, reason: `closed: ${m.stage || m.outcome}` });
       continue;
     }
@@ -639,6 +644,7 @@ export async function sendToList(listId, { statuses = ['new', 'failed'], text, t
  * Uses the number's approval mode, delay, daily cap and sending hours like any automated message.
  */
 export async function runFollowups() {
+  await refreshStages();
   const lists = await query(`SELECT * FROM lists WHERE (followup->>'enabled')::boolean AND archived IS NULL`);
   const tz = config.tz;
   // Per number (shared by all lists): may it send follow-ups now, and how many more today?
@@ -676,7 +682,7 @@ export async function runFollowups() {
         `SELECT m.* FROM list_members m WHERE m.list_id = $1 AND m.status = 'sent' AND m.followups_sent < $2
            AND m.last_sent_at <= now() - ($3 || ' days')::interval
            AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.list_id = m.list_id AND o.to_jid = m.jid AND o.status IN ('draft','queued','sending'))
-           AND ${CLOSED_SQL}
+           AND ${closedSql()}
          ORDER BY CASE WHEN m.row_ref ~ '^[0-9]+$' THEN m.row_ref::int END NULLS LAST, m.last_sent_at
          LIMIT 500`,
         [list.id, f.max, String(f.afterDays)],

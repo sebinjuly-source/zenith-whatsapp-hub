@@ -1809,6 +1809,43 @@ test('playbook edits are versioned (one version per sitting), logged once, resto
   for (const c of ['Hiring – all roles', 'Cook test', 'Sales test']) await call('DELETE', `/api/playbooks/${encodeURIComponent(c)}`);
 });
 
+test('funnel stages per campaign (hiring, sales, win-back, own); closed custom stages stop messages; the AI sees the inbox incl. people on no list', async () => {
+  await manager.create({ id: 'stg', label: 'Stages' });
+  await manager.update('stg', { settings: { aiMode: 'approve' } });
+  fake('stg');
+  // the owner creates a sales campaign with the sales preset; the AI one with its own stages
+  const c1 = await call('POST', '/api/campaigns', { name: 'Corp test', stages: 'sales' });
+  assert.equal(c1.status, 200);
+  assert.match(await mcp('create_campaign', { name: 'Gift test', stages: ['Replied', 'Sample sent', 'Ordered', 'Lost (closed)'] }), /created/);
+  const camps = (await call('GET', '/api/campaigns')).data;
+  assert.ok(camps.find((c) => c.role === 'Corp test').stages.some((s) => s.key === 'rates_shared'));
+  const gift = camps.find((c) => c.role === 'Gift test').stages;
+  assert.deepEqual(gift.map((s) => s.key), ['replied', 'sample_sent', 'ordered', 'lost', 'not_interested']);
+  assert.ok(gift.find((s) => s.key === 'lost').closed);
+  // a list of that campaign takes its stages, not the hiring ones
+  const imp = await call('POST', '/api/lists/import', { account: 'stg', name: 'Gift buyers', role: 'Gift test', members: [{ phone: '9833300001', name: 'Asha' }, { phone: '9833300002', name: 'Bala' }] });
+  const listId = imp.data.list.id;
+  assert.ok((await call('GET', '/api/lists?account=stg')).data.find((l) => l.id === listId).stages.some((s) => s.key === 'sample_sent'));
+  assert.match(await mcp('update_list_member', { list: 'Gift buyers', phone: '9833300001', stage: 'visited', campaign: 'all' }), /this campaign's stages/);
+  assert.match(await mcp('update_list_member', { list: 'Gift buyers', phone: '9833300001', stage: 'sample_sent', campaign: 'all' }), /sample_sent/);
+  // a closed custom stage ends messages: a list send skips them
+  await mcp('update_list_member', { list: 'Gift buyers', phone: '9833300002', stage: 'lost', campaign: 'all' });
+  const send = await call('POST', `/api/lists/${listId}/send`, { statuses: ['new', 'failed'], text: 'Hello {first_name}' });
+  assert.equal(send.data.queued, 1);
+  assert.ok(send.data.skipped.some((x) => /closed: lost/.test(x.reason)));
+  // the AI changes stages later
+  assert.match(await mcp('set_campaign_stages', { name: 'Gift test', stages: 'winback' }), /Booked again/);
+  assert.match(await mcp('list_campaigns', {}), /Gift test.*\n\s+stages: .*Booked again/);
+  // the inbox: someone on no list wrote — no Board card, but the AI sees them
+  const now = Math.floor(Date.now() / 1000);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300099@s.whatsapp.net','IN1',false,$1,'text','Do you have a room for 2 nights from Friday?')`, [now - 600]);
+  const inbox = await mcp('inbox_summary', { campaign: 'all' });
+  assert.match(inbox, /919833300099.*not on a list.*1 unanswered.*room for 2 nights.*NO CARD/);
+  assert.match(await mcp('hub_overview', { campaign: 'all' }), /INBOX: \d+ chat\(s\) waiting for an answer.*no Board card.*inbox_summary/);
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'stg' AND status IN ('draft','queued')`);
+  await manager.remove('stg');
+});
+
 test('MCP: every tool answers without an error (whole AI toolbox, in the order a session would use it)', async () => {
   const post = (body) => fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify(body) });
   const raw = async (name, args = {}) => {
@@ -1874,6 +1911,8 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('reschedule_messages', { ids: [idOf(d2)], at: '2026-12-10 10:00' });
   await run('edit_messages', { ids: [idOf(d1)], find: 'Mr Ravi', replace: 'Ravi ji', attachment_url: 'https://example.com/premium-room.jpg' });
   await run('owner_feedback', {});
+  await run('inbox_summary', { waiting_only: false });
+  await run('set_campaign_stages', { name: 'Toolbox sales', stages: 'sales' });
   await run('describe_data', { table: 'outbox' });
   await run('inspect_data', { sql: `SELECT status, count(*) AS n FROM outbox GROUP BY status` });
   await run('approve_draft', { id: idOf(d1) });

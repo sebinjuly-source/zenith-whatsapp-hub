@@ -365,6 +365,7 @@ CREATE TABLE IF NOT EXISTS playbook_versions (
   actor TEXT NOT NULL DEFAULT 'you',
   at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS stages JSONB; -- [{ key, label, closed? }] (stages.js)
 CREATE INDEX IF NOT EXISTS playbook_versions_key ON playbook_versions (lower(key), id DESC);
 -- NULL = shared by all campaigns
 ALTER TABLE templates ADD COLUMN IF NOT EXISTS role TEXT;
