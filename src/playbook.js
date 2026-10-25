@@ -36,14 +36,53 @@ export async function getPlaybook() {
  */
 const keyOf = (campaign) => (campaign ? `playbook:${String(campaign).trim()}` : 'playbook');
 
-export async function savePlaybook(text, campaign = null) {
+/**
+ * Save a playbook and keep its history. Every save is a version; typing in one sitting (same person, within
+ * EDIT_SESSION_MIN minutes) updates that sitting's version instead of adding one per keystroke. The text that was
+ * there before the first recorded edit is kept as a version too, so every change can be undone.
+ * Returns the playbook plus { changed, newVersion } — newVersion = a new sitting began (log it once).
+ */
+const EDIT_SESSION_MIN = 10;
+export async function savePlaybook(text, campaign = null, { actor = 'you' } = {}) {
   if (!String(text || '').trim()) throw new Error('The playbook is empty');
   if (campaign !== null && campaign !== undefined && !String(campaign).trim()) throw new Error('Name the campaign');
-  await query(
-    `INSERT INTO config (key, value) VALUES ($2, $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-    [JSON.stringify({ text: String(text) }), keyOf(campaign)],
-  );
-  return campaign ? getCampaignPlaybook(campaign) : getPlaybook();
+  const key = keyOf(campaign);
+  const [cur] = await query(`SELECT key, value FROM config WHERE lower(key) = lower($1)`, [key]);
+  const before = cur ? String(cur.value?.text ?? '') : campaign ? null : DEFAULT_PLAYBOOK;
+  const realKey = cur?.key || key;
+  let newVersion = false;
+  if (before !== String(text)) {
+    const [last] = await query(`SELECT id, actor, at FROM playbook_versions WHERE lower(key) = lower($1) ORDER BY id DESC LIMIT 1`, [realKey]);
+    if (!last && before !== null) await query(`INSERT INTO playbook_versions (key, text, actor) VALUES ($1, $2, 'before history')`, [realKey, before]);
+    if (last && last.actor === actor && new Date(last.at) > new Date(Date.now() - EDIT_SESSION_MIN * 60e3)) {
+      await query(`UPDATE playbook_versions SET text = $2, at = now() WHERE id = $1`, [last.id, String(text)]);
+    } else {
+      await query(`INSERT INTO playbook_versions (key, text, actor) VALUES ($1, $2, $3)`, [realKey, String(text), actor]);
+      newVersion = true;
+    }
+    await query(
+      `INSERT INTO config (key, value) VALUES ($2, $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [JSON.stringify({ text: String(text) }), realKey],
+    );
+  }
+  const p = campaign ? await getCampaignPlaybook(campaign) : await getPlaybook();
+  return { ...p, changed: before !== String(text), newVersion };
+}
+
+/** A playbook's saved versions, newest first: [{ id, at, actor, chars, text }]. */
+export async function playbookHistory(campaign = null, limit = 50) {
+  const rows = await query(`SELECT id, at, actor, text FROM playbook_versions WHERE lower(key) = lower($1) ORDER BY id DESC LIMIT $2`, [keyOf(campaign), limit]);
+  return rows.map((r) => ({ id: Number(r.id), at: r.at, actor: r.actor, chars: r.text.length, text: r.text }));
+}
+
+/** Put an earlier version back (saved as a new version, so the restore itself can be undone). */
+export async function restorePlaybook(versionId, { actor = 'you' } = {}) {
+  const [v] = await query(`SELECT key, text, at FROM playbook_versions WHERE id = $1`, [versionId]);
+  if (!v) throw new Error('No such version');
+  const campaign = v.key === 'playbook' ? null : v.key.slice('playbook:'.length);
+  await query(`UPDATE playbook_versions SET at = at - interval '1 day' WHERE id = (SELECT max(id) FROM playbook_versions WHERE lower(key) = lower($1))`, [v.key]); // a restore is always its own version
+  const p = await savePlaybook(v.text, campaign, { actor });
+  return { ...p, campaign, restoredFrom: v.at };
 }
 
 /** One campaign's playbook ({ campaign, text, updatedAt }) or null. Name match ignores case. */

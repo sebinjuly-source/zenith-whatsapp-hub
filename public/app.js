@@ -257,7 +257,8 @@
           tab('inbox', '💬', 'Inbox'),
           tab('outbox', '✉️', 'Drafts', state.draftsCount ? h('span', { class: 'badge' }, state.draftsCount) : null)),
         h('div', { class: 'spacer' }),
-        campaignPicker()),
+        // Settings and Numbers belong to the numbers / the whole hub, not to a campaign: no campaign menu there
+        ['settings', 'accounts'].includes(state.route) ? h('span', { class: 'muted', style: 'font-size:12px', title: 'Numbers and their settings are shared by all campaigns' }, 'Shared by all campaigns') : campaignPicker()),
       h('main', { class: flush ? 'flush' : '' }, content),
       scrim, drawer);
     document.onkeydown = (e) => { if (e.key === 'Escape' && app.classList.contains('drawer-open')) { close(); menuBtn.focus(); } };
@@ -2277,6 +2278,12 @@ ${laterText(shown)}` : ''}`)) return;
     const pbStatus = h('span', { class: 'muted', style: 'font-size:13px' }, 'Saves by itself as you type.');
     const pbInc = h('div', { class: 'row', style: 'flex-wrap:wrap;gap:4px 14px;margin-bottom:8px' });
     const incLine = /^\s*INCLUDE:\s*(.+?)\s*$/i;
+    // Change the text the way typing does, so Ctrl+Z (Cmd+Z) in the box undoes it too
+    const setUndoable = (v) => {
+      pbText.focus();
+      pbText.select();
+      if (!document.execCommand?.('insertText', false, v)) pbText.value = v;
+    };
     const showIncludes = () => {
       const c = state.pbCampaign;
       if (!c) { pbInc.replaceChildren(h('span', { class: 'muted', style: 'font-size:12px' }, 'The main playbook applies to every campaign and to the AI always.')); return; }
@@ -2286,7 +2293,7 @@ ${laterText(shown)}` : ''}`)) return;
         ...others.map((p) => h('label', { class: 'switch', style: 'margin:0' },
           h('input', { type: 'checkbox', checked: have.includes(p.campaign.toLowerCase()), onchange: (e) => {
             const lines = pbText.value.split('\n').filter((l) => (l.match(incLine)?.[1] || '').toLowerCase() !== p.campaign.toLowerCase());
-            pbText.value = (e.target.checked ? [`INCLUDE: ${p.campaign}`, ...lines] : lines).join('\n');
+            setUndoable((e.target.checked ? [`INCLUDE: ${p.campaign}`, ...lines] : lines).join('\n'));
             savePb();
           } }), h('span', {}, p.campaign))));
     };
@@ -2302,6 +2309,33 @@ ${laterText(shown)}` : ''}`)) return;
     };
     pbText.addEventListener('input', () => { pbStatus.textContent = 'Editing…'; clearTimeout(pbTimer); pbTimer = setTimeout(savePb, 1200); });
     pbText.addEventListener('blur', () => { if (pbTimer) savePb(); });
+    const pbHist = h('div', {});
+    const loadHistory = async () => {
+      const rows = await api(`/api/playbook/history${state.pbCampaign ? `?campaign=${encodeURIComponent(state.pbCampaign)}` : ''}`).catch(() => []);
+      const who = { you: 'you', ai: 'AI', script: 'script', 'before history': 'before history began' };
+      pbHist.replaceChildren(rows.length ? h('div', {}, rows.map((r, i) => h('div', { class: 'row', style: 'align-items:center;gap:8px;padding:4px 0;border-top:1px solid var(--line);font-size:13px' },
+        h('span', { class: 'grow' }, `${new Date(r.at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} · ${who[r.actor] || r.actor} · ${r.chars} characters${i === 0 ? ' · current' : ''}`),
+        h('button', { class: 'btn small', type: 'button', onclick: () => {
+          const back = h('div', { class: 'modal-back', onclick: (e) => e.target === back && back.remove() },
+            h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Playbook version' },
+              h('h2', {}, `Version of ${new Date(r.at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`),
+              h('pre', { class: 'mono', style: 'white-space:pre-wrap;max-height:55vh;overflow:auto;font-size:12px' }, r.text),
+              h('div', { class: 'row', style: 'justify-content:flex-end;gap:6px;margin-top:10px' },
+                h('button', { class: 'btn', onclick: () => back.remove() }, 'Close'),
+                i === 0 ? null : h('button', { class: 'btn primary', onclick: guard(async () => {
+                  await api('/api/playbook/restore', { body: { id: r.id } });
+                  back.remove();
+                  setUndoable(r.text); // the box shows it; Ctrl+Z there goes back to what you had
+                  clearTimeout(pbTimer);
+                  pbStatus.textContent = '✓ Restored that version (Ctrl+Z in the box undoes it)';
+                  loadHistory();
+                }) }, 'Restore this version'))));
+          document.body.append(back);
+        } }, i === 0 ? 'View' : 'View / restore'))))
+        : h('p', { class: 'muted', style: 'font-size:13px' }, 'No saved versions yet — every change from now on is kept here.'));
+    };
+    const pbHistFold = h('details', { style: 'margin-top:10px', ontoggle: (e) => e.target.open && loadHistory() },
+      h('summary', {}, '🕘 History — every saved version (restore any)'), pbHist);
     const pbPick = h('select', { 'aria-label': 'Which playbook', style: 'max-width:320px', onchange: guard(async (e) => {
       let c = e.target.value;
       if (c === '+') {
@@ -2315,6 +2349,7 @@ ${laterText(shown)}` : ''}`)) return;
       pbText.value = (await api(`/api/playbook${c ? `?campaign=${encodeURIComponent(c)}` : ''}`)).text || '';
       pbStatus.textContent = 'Saves by itself as you type.';
       showIncludes();
+      if (pbHistFold.open) loadHistory();
     }) },
       h('option', { value: '' }, '📘 Main playbook (always read)'),
       pbList.map((p) => h('option', { value: p.campaign }, `🎯 ${p.campaign}`)),
@@ -2326,7 +2361,8 @@ ${laterText(shown)}` : ''}`)) return;
       h('div', { style: 'margin-bottom:8px' }, pbPick),
       pbInc,
       pbText,
-      h('div', { style: 'margin-top:8px' }, pbStatus));
+      h('div', { style: 'margin-top:8px' }, pbStatus, h('span', { class: 'muted', style: 'font-size:12px' }, ' · Ctrl+Z undoes while typing; History keeps every saved version.')),
+      pbHistFold);
     shell([
       h('div', { class: 'row', style: 'margin-bottom:6px' }, h('h1', { class: 'grow', style: 'margin:0' }, '⚙️ Settings'),
         h('select', { style: 'max-width:300px', 'aria-label': 'Settings for', onchange: (e) => { state.settingsFor = e.target.value; viewSettings(); } },

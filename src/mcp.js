@@ -1201,15 +1201,18 @@ function buildServer(playbook = '', focus = '') {
     return `${rows.length} people already on ${a.role} lists:\n${Object.entries(per).map(([k, n]) => `- ${k}: ${n}`).join('\n')}\nPass query="names, numbers or places" to check specific people (or all=true for everyone).`;
   });
 
-  tool('get_playbook', "The owner's standing rules. Without campaign: the main playbook (how to use the hub, rules for everything) plus the list of campaign playbooks. With campaign (e.g. \"Chef\", \"Corporate sales\", \"Win-back\"): that campaign's own rules — offer, wording, who to target. Read the campaign's before working on it; the main rules still apply.", {
+  tool('get_playbook', "The owner's standing rules. Inside a campaign (the open one by default): the main playbook plus that campaign's, with the shared playbooks it follows — only the ones that apply. campaign=\"all\": the main playbook plus the names of the campaign playbooks. With campaign (e.g. \"Chef\", \"Corporate sales\", \"Win-back\"): that campaign's own rules — offer, wording, who to target. Read the campaign's before working on it; the main rules still apply.", {
     campaign: z.string().optional().describe('Campaign name; omit for the main playbook'),
   }, async (a) => {
     const list = await listCampaignPlaybooks();
     const main = (await getPlaybook()).text;
-    if (a.campaign) {
+    // inside a campaign (the open one, or one named on purpose) only the playbooks that apply to it are shown: the
+    // main one + that campaign's (with what it follows). campaign="all" = the main one + the names of the others.
+    const camp = a._c && !scope.same(a._c, 'none') ? a._c : null;
+    if (camp) {
       // every campaign works under the main rules too; hiring campaigns include the shared hiring playbook (INCLUDE)
-      const p = await getCampaignPlaybook(a.campaign);
-      if (!p) return `MAIN PLAYBOOK:\n${main}\n\n(No playbook for campaign "${a.campaign}" yet — follow the main rules. Campaign playbooks: ${list.map((c) => c.campaign).join(', ') || 'none'}; the owner can add one: save_playbook with campaign.)`;
+      const p = await getCampaignPlaybook(camp);
+      if (!p) return `MAIN PLAYBOOK:\n${main}\n\n(No playbook for campaign "${camp}" yet — follow the main rules; the owner can add one: save_playbook with campaign.)`;
       return `MAIN PLAYBOOK (applies to every campaign):\n${main}\n\n=== CAMPAIGN PLAYBOOK — ${p.campaign}${p.text.includes('--- included:') ? ' (with the playbooks it follows, included below)' : ''} ===\n${p.text}`;
     }
     return list.length ? `${main}\n\nCAMPAIGN PLAYBOOKS: ${list.map((c) => `${c.campaign}${c.includes?.length ? ` (also follows ${c.includes.join(', ')})` : ''}`).join('; ')} — get_playbook(campaign=…) for one.` : main;
@@ -1292,7 +1295,7 @@ function buildServer(playbook = '', focus = '') {
   }, async (a) => {
     const camp = a.campaign && !/^all$/i.test(a.campaign) ? a.campaign : null;
     const { withIncludes } = await import('./playbook.js');
-    await savePlaybook(camp && a.includes ? withIncludes(a.text, a.includes) : a.text, camp);
+    await savePlaybook(camp && a.includes ? withIncludes(a.text, a.includes) : a.text, camp, { actor: 'ai' });
     await ai(null, camp ? `Updated the "${camp}" campaign playbook` : 'Updated the playbook');
     return camp ? `Campaign playbook "${camp}" saved.` : 'Main playbook saved.';
   });
@@ -1318,7 +1321,7 @@ function buildServer(playbook = '', focus = '') {
     const r = await scope.createCampaign(a.name);
     if (a.playbook?.trim() || a.includes?.length) {
       const { withIncludes } = await import('./playbook.js');
-      await savePlaybook(withIncludes(a.playbook || '', a.includes || []), r.name);
+      await savePlaybook(withIncludes(a.playbook || '', a.includes || []), r.name, { actor: 'ai' });
     }
     if (a.open) await scope.setFocus(r.name);
     await ai(null, `${r.created ? 'Created' : 'Found'} campaign "${r.name}"${a.playbook ? ' with its playbook' : ''}${a.open ? ' and opened it' : ''}`, r.name);

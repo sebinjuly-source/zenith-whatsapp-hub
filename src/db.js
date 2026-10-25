@@ -357,6 +357,15 @@ CREATE TABLE IF NOT EXISTS campaigns (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   archived TIMESTAMPTZ
 );
+-- every saved version of a playbook (main = key 'playbook', campaign = 'playbook:<name>'): history + restore
+CREATE TABLE IF NOT EXISTS playbook_versions (
+  id BIGSERIAL PRIMARY KEY,
+  key TEXT NOT NULL,
+  text TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT 'you',
+  at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS playbook_versions_key ON playbook_versions (lower(key), id DESC);
 -- NULL = shared by all campaigns
 ALTER TABLE templates ADD COLUMN IF NOT EXISTS role TEXT;
 ALTER TABLE directory ADD COLUMN IF NOT EXISTS role TEXT;

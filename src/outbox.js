@@ -297,6 +297,7 @@ export async function reschedule(ids, at, { expiresAt } = {}) {
  */
 export async function noteRejection(rows, { reason = '', actor = 'you' } = {}) {
   const { logTask } = await import('./tasks.js');
+  const uncarded = []; // rows whose person has no open card to carry the reason
   for (const r of rows) {
     const cards = await query(
       `SELECT id FROM tasks WHERE status NOT IN ('done','cancelled')
@@ -305,8 +306,37 @@ export async function noteRejection(rows, { reason = '', actor = 'you' } = {}) {
     ).catch(() => []);
     const text = `${actor === 'ai' ? 'AI' : 'Owner'} rejected draft #${r.id}${reason ? ` — reason: ${reason}` : ' (no reason given — do not draft the same again; ask the owner if unsure)'}: "${String(r.payload?.text || r.payload?.waTemplate?.name || '').replace(/\s+/g, ' ').slice(0, 160)}"`;
     for (const c of cards) await logTask(c.id, text, { actor, kind: 'note' });
+    if (!cards.length) uncarded.push(r);
     if (reason) await query('UPDATE outbox SET error = $2 WHERE id = $1', [r.id, `${actor === 'ai' ? 'Rejected by AI' : 'Rejected'}: ${reason}`]).catch(() => {});
   }
+  return uncarded;
+}
+
+/**
+ * The owner's reason for rejecting is often an instruction ("just wish him on festivals", "follow up near the date").
+ * When the person has no open card to carry it (win-back, corporate, a bulk reject), put one AI card on the Board
+ * with the reason and the drafts, so the AI (and the routine that works the Board) acts on it.
+ */
+async function reasonCard(rows, reason) {
+  if (!rows.length || !String(reason || '').trim()) return null;
+  const { createTask } = await import('./tasks.js');
+  const named = await query(
+    `SELECT o.id, o.account_id, o.to_jid, o.payload, COALESCE(o.role, ${roleOf('o.account_id', 'o.to_jid')}) AS campaign,
+            COALESCE(NULLIF(ct.name, ''), NULLIF(lm.name, ''), ch.name) AS name
+     FROM outbox o LEFT JOIN contacts ct ON ct.account_id = o.account_id AND ct.jid = o.to_jid
+     LEFT JOIN list_members lm ON lm.list_id = o.list_id AND lm.jid = o.to_jid
+     LEFT JOIN chats ch ON ch.account_id = o.account_id AND ch.jid = o.to_jid
+     WHERE o.id = ANY($1::bigint[]) ORDER BY o.id`,
+    [rows.map((r) => r.id)],
+  );
+  const camps = [...new Set(named.map((r) => r.campaign).filter(Boolean))];
+  const who = named.length === 1 ? (named[0].name || '+' + named[0].to_jid.split('@')[0]) : `${named.length} people`;
+  const lines = named.map((r) => `- draft #${r.id} on ${r.account_id} to ${r.to_jid.split('@')[0]}${r.name ? ` (${r.name})` : ''}${r.campaign ? ` · ${r.campaign}` : ''}: "${String(r.payload?.text || r.payload?.attachment?.caption || r.payload?.waTemplate?.name || '').replace(/\s+/g, ' ').slice(0, 120)}…"`);
+  return createTask({
+    account: named[0].account_id, kind: 'todo', assignee: 'ai', dueAt: new Date().toISOString(), createdBy: 'you', role: camps.length === 1 ? camps[0] : null,
+    title: `Owner: rejected the draft for ${who} — "${String(reason).replace(/\s+/g, ' ').slice(0, 70)}"`,
+    details: `Owner rejected ${named.length > 1 ? 'these drafts' : 'this draft'} with the reason: "${reason}"\n\n${lines.join('\n')}\n\nDo what the reason asks for each person (e.g. new drafts — festival wishes with expires_at, a follow-up near the date they gave — on the same number), or nothing if it says so. Then add_task_note with what you did and mark this card done.`,
+  });
 }
 
 export async function rejectMany(ids, { reason = '', actor = 'you' } = {}) {
@@ -314,10 +344,11 @@ export async function rejectMany(ids, { reason = '', actor = 'you' } = {}) {
     `UPDATE outbox SET status = 'rejected' WHERE id = ANY($1::bigint[]) AND status IN ('draft','queued') RETURNING id, account_id, task_id, list_id, to_jid, payload, source`,
     [ids.map(Number)],
   );
-  await noteRejection(rows.filter((r) => r.source !== 'campaign'), { reason, actor });
+  const uncarded = await noteRejection(rows.filter((r) => r.source !== 'campaign'), { reason, actor });
   // campaign messages get no card note, but the reason is still kept on each (the AI reads it in owner_feedback)
-  const camp = rows.filter((r) => r.source === 'campaign').map((r) => r.id);
-  if (reason && camp.length) await query('UPDATE outbox SET error = $2 WHERE id = ANY($1::bigint[])', [camp, `${actor === 'ai' ? 'Rejected by AI' : 'Rejected'}: ${reason}`]);
+  const camp = rows.filter((r) => r.source === 'campaign');
+  if (reason && camp.length) await query('UPDATE outbox SET error = $2 WHERE id = ANY($1::bigint[])', [camp.map((r) => r.id), `${actor === 'ai' ? 'Rejected by AI' : 'Rejected'}: ${reason}`]);
+  if (actor !== 'ai') await reasonCard([...uncarded, ...camp], reason).catch(() => {});
   await afterBatchChange(rows);
   return { rejected: rows.length, perAccount: countBy(rows, 'account_id') };
 }
@@ -473,7 +504,8 @@ export async function reject(id, { reason = '', actor = 'you' } = {}) {
     [id],
   );
   if (!row) throw new Error('Nothing to reject (already sent?)');
-  await noteRejection([row], { reason, actor });
+  const uncarded = await noteRejection([row], { reason, actor });
+  if (actor !== 'ai') await reasonCard(uncarded, reason).catch(() => {});
   await afterBatchChange([row]); // its task and list show the change at once
   return row;
 }

@@ -507,8 +507,20 @@ export function buildApp() {
   }));
   api.put('/playbook', wrap(async (req, res) => {
     const campaign = req.body?.campaign || null;
-    const p = await savePlaybook(req.body?.text, campaign);
-    await act(req, null, campaign ? `Updated the "${campaign}" campaign playbook` : 'Updated the playbook');
+    const p = await savePlaybook(req.body?.text, campaign, { actor: actorOf(req) });
+    // autosave sends every pause in typing: one Activity entry per editing sitting (history keeps every version)
+    if (p.newVersion) await act(req, null, campaign ? `Edited the "${campaign}" campaign playbook` : 'Edited the main playbook');
+    res.json(p);
+  }));
+  // Every saved version of a playbook (?campaign=, none = main) and putting one back: { id }
+  api.get('/playbook/history', wrap(async (req, res) => {
+    const { playbookHistory } = await import('./playbook.js');
+    res.json(await playbookHistory(req.query.campaign || null));
+  }));
+  api.post('/playbook/restore', wrap(async (req, res) => {
+    const { restorePlaybook } = await import('./playbook.js');
+    const p = await restorePlaybook(Number(req.body?.id), { actor: actorOf(req) });
+    await act(req, null, `Restored the ${p.campaign ? `"${p.campaign}" campaign` : 'main'} playbook to the version of ${new Date(p.restoredFrom).toLocaleString('en-GB', { timeZone: config.tz, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`);
     res.json(p);
   }));
   api.get('/playbooks', wrap(async (req, res) => {

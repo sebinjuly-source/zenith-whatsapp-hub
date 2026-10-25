@@ -846,7 +846,7 @@ test('playbook: stored in the hub, editable, and given to every AI client', asyn
   assert.equal(await mcp('get_playbook'), DEFAULT_PLAYBOOK);
   await call('PUT', '/api/playbook', { text: 'RULE: always be polite.' });
   assert.equal(await mcp('get_playbook'), 'RULE: always be polite.');
-  assert.match(await mcp('recent_activity', { who: 'script' }), /Updated the playbook/);
+  assert.match(await mcp('recent_activity', { who: 'script' }), /Edited the main playbook/);
 });
 
 test('changing one follow-up setting keeps the saved message', async () => {
@@ -1742,6 +1742,11 @@ test('owner requests 25 Oct: playbooks are not hidden by the open campaign; camp
   const m2 = await outbox.enqueue({ account: 'fb', to: '919822200002', payload: { text: 'win-back' }, source: 'campaign' });
   await outbox.reject(m2.id, { reason: 'Just wish him on festivals' });
   assert.match(await mcp('owner_feedback', {}), /Just wish him on festivals/);
+  // the person had no card: the reason becomes an AI card on the Board (the routine works the Board)
+  const [rc] = await query(`SELECT assignee, title, details FROM tasks WHERE title LIKE 'Owner: rejected the draft%' AND details LIKE $1`, [`%#${m2.id}%`]);
+  assert.ok(rc, 'a card carries the reason');
+  assert.equal(rc.assignee, 'ai');
+  assert.match(rc.title, /Just wish him on festivals/);
   // several campaign drafts rejected at once keep the reason too; the AI's own rejections are labelled as the AI's
   const m3 = await outbox.enqueue({ account: 'fb', to: '919822200003', payload: { text: 'a' }, source: 'campaign' });
   const m4 = await outbox.enqueue({ account: 'fb', to: '919822200004', payload: { text: 'b' }, source: 'campaign' });
@@ -1763,6 +1768,39 @@ test('owner requests 25 Oct: playbooks are not hidden by the open campaign; camp
   assert.equal(manager.get('fb').account.settings.dailyCap, 20);
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'fb' AND status IN ('draft','queued')`);
   await manager.remove('fb');
+});
+
+test('playbook edits are versioned (one version per sitting), logged once, restorable; the AI sees only the playbooks of the open campaign', async () => {
+  await call('PUT', '/api/playbook', { text: 'V1 main rules' });
+  await call('PUT', '/api/playbook', { text: 'V1 main rules, typing more' }); // same sitting → same version
+  let hist = (await call('GET', '/api/playbook/history')).data;
+  const v1 = hist[0];
+  assert.equal(v1.text, 'V1 main rules, typing more');
+  // a later sitting (or another person) is a new version
+  await query(`UPDATE playbook_versions SET at = at - interval '1 hour' WHERE id = $1`, [v1.id]);
+  await call('PUT', '/api/playbook', { text: 'V2 main rules' });
+  hist = (await call('GET', '/api/playbook/history')).data;
+  assert.equal(hist[0].text, 'V2 main rules');
+  assert.ok(hist.some((h) => h.id === v1.id));
+  // restore the earlier one (itself a new version, so it can be undone too)
+  const r = await call('POST', '/api/playbook/restore', { id: v1.id });
+  assert.equal(r.status, 200);
+  assert.equal((await call('GET', '/api/playbook')).data.text, 'V1 main rules, typing more');
+  assert.equal((await call('GET', '/api/playbook/history')).data[0].text, 'V1 main rules, typing more');
+  assert.match(await mcp('recent_activity', { limit: 10 }), /Restored the main playbook/);
+  // the AI: inside a campaign only the playbooks that apply; "all" = main + names
+  await call('PUT', '/api/playbook', { text: 'HIRING SHARED', campaign: 'Hiring – all roles' });
+  await call('PUT', '/api/playbook', { text: 'INCLUDE: Hiring – all roles\nCOOK RULES', campaign: 'Cook test' });
+  await call('PUT', '/api/playbook', { text: 'SALES RULES', campaign: 'Sales test' });
+  await call('POST', '/api/campaigns', { name: 'Cook test' });
+  await call('PUT', '/api/focus', { campaign: 'Cook test' });
+  const inCamp = await mcp('get_playbook', {});
+  assert.match(inCamp, /COOK RULES/);
+  assert.match(inCamp, /HIRING SHARED/);
+  assert.doesNotMatch(inCamp, /SALES RULES|Sales test/, 'other campaigns are not shown');
+  assert.match(await mcp('get_playbook', { campaign: 'all' }), /Sales test/);
+  await call('PUT', '/api/focus', { campaign: '' });
+  for (const c of ['Hiring – all roles', 'Cook test', 'Sales test']) await call('DELETE', `/api/playbooks/${encodeURIComponent(c)}`);
 });
 
 test('MCP: every tool answers without an error (whole AI toolbox, in the order a session would use it)', async () => {
