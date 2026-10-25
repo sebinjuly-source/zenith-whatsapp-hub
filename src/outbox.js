@@ -16,6 +16,7 @@ import { MIN_DELAY_SEC, NEW_CHATS_HARD_MAX, CLOUD_NEW_CHATS_MAX, randomDelayMs, 
 import { createTask, refreshTask, fillTemplate, planRecipients } from './tasks.js';
 import { hasAuthState } from './wa/auth-state.js';
 import { getTemplate, contactFields, fieldsIn } from './templates.js';
+import { localDate } from './util.js';
 
 // Automated = random delay, daily cap, typing. Drafts (approval) only for AI and bulk; your rules are pre-approved.
 const AUTOMATED = ['mcp', 'campaign', 'rule'];
@@ -758,7 +759,8 @@ export async function queueStatus(accountId) {
             count(*) FILTER (WHERE status = 'draft')::int AS drafts,
             count(*) FILTER (WHERE status = 'queued' AND source = ANY($2) AND NOT ${IS_REPLY('$1', 'o.to_jid')})::int AS queued_automated,
             count(*) FILTER (WHERE status = 'queued' AND source = ANY($2) AND NOT ${IS_REPLY('$1', 'o.to_jid')} AND ($3::boolean OR NOT ${IS_WARM('$1', 'o.to_jid')}))::int AS queued_cold,
-            count(*) FILTER (WHERE status = 'queued' AND to_jid NOT LIKE '%@g.us' AND ${IS_NEW_CHAT('$1', 'o.to_jid')})::int AS queued_new
+            count(*) FILTER (WHERE status = 'queued' AND to_jid NOT LIKE '%@g.us' AND ${IS_NEW_CHAT('$1', 'o.to_jid')})::int AS queued_new,
+            count(*) FILTER (WHERE status = 'queued' AND note = 'follow-up')::int AS queued_followup
      FROM outbox o WHERE account_id = $1 AND status IN ('queued','draft')`,
     [accountId, AUTOMATED, !!session.isCloud],
   );
@@ -778,6 +780,9 @@ export async function queueStatus(accountId) {
   else if (q.queued_cold && q.queued_cold === q.queued && a.n >= s.dailyCap) { state = 'held'; reason = `Daily limit for people who never wrote to us reached: ${a.n} of ${s.dailyCap} in the last 24 hours`; until = capFreeAt; }
   else if (q.queued_new && blocked) { state = 'held'; reason = 'WhatsApp blocks messages to new numbers for now'; until = session.reachout.timeEnforcementEnds ? new Date(session.reachout.timeEnforcementEnds) : null; }
   else if (q.queued_new && q.queued_new === q.queued && nc.count >= nc.limit) { state = 'held'; reason = `New-number limit reached: ${nc.count} of ${nc.limit} in the last 24 hours`; until = nc.nextFreeAt; }
+  else if (q.queued_followup && q.queued_followup === q.queued && !afterTime(s.followupStart)) { state = 'held'; reason = `Follow-ups to people who never replied wait until ${s.followupStart} (Settings)`; until = localDate(`${new Date().toLocaleDateString('en-CA', { timeZone: config.tz })} ${s.followupStart}`); }
+  else if (q.queued_followup && q.queued_followup === q.queued && (await newOutreachToday(accountId))) { state = 'held'; reason = 'Follow-ups wait for a day with no first messages to new people (new outreach gets the limited capacity first)'; }
+  else if (q.queued_followup && q.queued_followup === q.queued && (await followupsToday(accountId)) >= s.followupDailyMax) { state = 'held'; reason = `Today's follow-up maximum (${s.followupDailyMax}) is reached — the rest go tomorrow`; }
   else if (nextAt > Date.now()) { reason = 'Waiting the random gap between messages'; until = new Date(nextAt); }
   // Rough finish time for the cold messages (the ones the daily cap holds back): what each rolling 24 h allows.
   const perDay = Math.max(1, Math.min(s.dailyCap, q.queued_new ? nc.limit : Infinity));

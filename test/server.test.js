@@ -2394,3 +2394,17 @@ test('opt-out words: only about themselves — a referrer saying his friend is n
   for (const t of ['Not interested', 'stop', 'Sorry not interested sir', 'I am not interested', 'please stop messaging']) assert.equal(isOptOut(t, w), true, t);
   for (const t of ["So he's not interested may be", 'wo not interested hai', 'Stop the follow up for him', 'Hi ma\'am jagdish bol rahe hai salary aur duty off nahi hai, not interested']) assert.equal(isOptOut(t, w), false, t);
 });
+
+test('queue status says why follow-ups to non-repliers wait (they showed "sending" with no reason, 25 Oct)', async () => {
+  await manager.create({ id: 'fuq', label: 'FollowQ' });
+  await manager.update('fuq', { settings: { aiMode: 'auto', followupStart: '23:59' } });
+  const s = fake('fuq');
+  s.status = 'connecting';
+  await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note) VALUES ('fuq','919844400001@s.whatsapp.net','{"text":"x"}','campaign','queued',-1,'follow-up')`);
+  s.status = 'open';
+  const st = await outbox.queueStatus('fuq');
+  assert.equal(st.state, 'held');
+  assert.match(st.reason, /Follow-ups to people who never replied wait until 23:59/);
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'fuq'`);
+  await manager.remove('fuq');
+});
