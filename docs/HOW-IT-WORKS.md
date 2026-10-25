@@ -221,7 +221,7 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
   number and campaign — the incident that led to this rule).
 - A campaign never leaks into another: the dashboard refuses actions outside the open campaign; the AI must name another
   campaign on purpose (`campaign="…"` / `"all"`).
-- Tests: `npm test` (109 end-to-end tests, one of which calls every one of the 64 AI tools, including a fake Meta server;
+- Tests: `npm test` (110 end-to-end tests, one of which calls every one of the 64 AI tools, including a fake Meta server;
   one checks that the dashboard script parses — a syntax error there blanks the whole dashboard).
 
 ---
@@ -380,6 +380,10 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
   "Send automatically" or pausing it asks first. Bug fixed: after a save the page re-read a 15-second cached copy of
   the numbers, so the old values came back; Settings now always loads fresh (`loadAccounts(true)`). The live log
   showed none of the owner's earlier edits had reached the server — the Save button sat at the very bottom.
+- Settings and Numbers show "Shared by all campaigns" instead of the campaign menu (numbers and the hub's rules are not campaign things); every other page has the menu.
+- **Playbook history**: table `playbook_versions` keeps every save (one version per editing sitting of 10 min per person; the text before the first recorded edit is kept as "before history began"). Settings → Playbook → 🕘 History: view / restore any version (a restore is itself a version). Activity logs one "Edited the … playbook" per sitting and every restore. Ctrl+Z works in the editor (the "also follows" ticks and restores go through the browser's undo too). `GET /api/playbook/history?campaign=`, `POST /api/playbook/restore {id}`.
+- **The AI sees only the playbooks that apply**: MCP instructions and `get_playbook` inside a campaign = main + that campaign's (+ what it follows); with campaign="all" = main + the names of the others. Settings (the owner) shows them all.
+- **Rejection reasons reach the Board**: a reject with a reason for someone with no open reply/follow-up card creates an AI card "Owner: rejected the draft for X — <reason>" listing the drafts (bulk rejects: one card). Before, win-back/corporate reasons ("just wish him on festivals") were stored only on the rejected message and the routine, which works the Board, never saw them. The routine prompt now covers guests/win-back/corporate too and starts with owner_feedback.
 - **Numbers → ⚙️ Edit**: a pop-up for name, purpose, Active (pause) and 🗑 Delete, saved as you type; "Limits,
   delays & hours →" opens Settings for that number.
 - **Playbooks**: `GET /api/playbook` = main unless `?campaign=`; `PUT` saves the main one unless `campaign` is given;
