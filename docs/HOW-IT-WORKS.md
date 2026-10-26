@@ -17,9 +17,10 @@ cost. Live at **https://zenith-whatsapp-hub.onrender.com** (dashboard, REST API,
 
 **Linked phone** = the hub is a "linked device" of a normal WhatsApp/WhatsApp Business app (like WhatsApp Web).
 Free, keeps the phone working, full history — but WhatsApp blocks numbers that message too many new people, so the
-hub holds them to **≤ 42 new numbers a day (hard max 45), 35 automated messages a day to people who never wrote to
-that number, random 45–120 s gaps**. Messages to people who have written before (interested candidates, interview
-follow-ups, guests who replied) don't use the 35 — they have their own ceiling of 150 a day.
+hub holds them to **≤ 42 new numbers a day (hard max 45), 35 automated messages a day to people who haven't written in
+the last 30 days, 30 a day to people who wrote in the last 30 days, at most 10 automated messages an hour, random
+45–120 s gaps**. (26 Oct: the hotel number was logged out after 76 messages in under 2 hours to mostly stale contacts
+that then counted as "warm" — warm now means a conversation in the last 30 days.)
 
 **Send order and "send by" times (25 Oct).** Each number sends, whatever the campaign, in this order: replies to people
 who wrote in the last 24 h → your own sends → messages with a **⌛ send by** time (soonest first: festival wishes,
