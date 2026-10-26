@@ -2150,7 +2150,7 @@ ${laterText(shown)}` : ''}`)) return;
         q.state === 'held' ? q.reason : (q.reason ? `${q.reason} (next about ${when(q.until)}). ` : 'next message any moment. '),
         q.state === 'held' && q.until ? ` — continues about ${when(q.until)}.` : '') : null,
       q.queued ? h('p', { class: 'muted', style: 'margin:4px 0 0;font-size:12px' },
-        `One every ${q.gapSec[0]}–${q.gapSec[1]} s · last 24 h: to people who never wrote ${q.automated24h}/${q.dailyCap}${q.warmDailyCap != null ? `, to people who wrote before ${q.warm24h}/${q.warmDailyCap}` : ''}, new numbers ${q.newChats.count}/${q.newChats.limit}${q.queuedCold ? ` · ${q.queuedCold} of these wait for the daily limit (${q.perDay} a day → about ${q.days} day${q.days === 1 ? '' : 's'})` : ' · none of these use the daily limit'}.`) : null));
+        `One every ${q.gapSec[0]}–${q.gapSec[1]} s · last 24 h: to people not talking to us ${q.automated24h}/${q.dailyCap}${q.warmDailyCap != null ? `, to people who wrote in 30 days ${q.warm24h}/${q.warmDailyCap}, last hour ${q.lastHour ?? 0}/${q.hourlyCap}` : ''}, new numbers ${q.newChats.count}/${q.newChats.limit}${q.queuedCold ? ` · ${q.queuedCold} of these wait for the daily limit (${q.perDay} a day → about ${q.days} day${q.days === 1 ? '' : 's'})` : ' · none of these use the daily limit'}.`) : null));
     shell([
       h('h1', {}, 'Drafts & outbox'),
       state.outboxTask ? h('p', {}, `Showing messages of task #${state.outboxTask} · `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); state.outboxTask = null; viewOutbox(); } }, 'show all')) : null,
@@ -2176,7 +2176,7 @@ ${laterText(shown)}` : ''}`)) return;
 
   // ---------- settings ----------
   // "All numbers" = the defaults every number follows, except settings a number has changed itself (marked "own").
-  const SETTING_LABEL = { aiMode: 'Approval', delayMinSec: 'Delay from', delayMaxSec: 'Delay to', typing: 'Typing', anytime: 'Any time', dailyCap: 'To new / never-replied per 24 h', warmDailyCap: 'To people who wrote per 24 h',
+  const SETTING_LABEL = { aiMode: 'Approval', delayMinSec: 'Delay from', delayMaxSec: 'Delay to', typing: 'Typing', anytime: 'Any time', dailyCap: 'To people not talking to us per 24 h', warmDailyCap: 'To people who wrote in 30 days per 24 h', hourlyCap: 'Per hour',
     newChatsPer24h: 'New numbers per 24 h', sendStart: 'Send from', sendEnd: 'Send until', sendDays: 'Days', followupStart: 'Follow-ups from', followupDailyMax: 'Follow-ups per day',
     storeGroups: 'Store groups', autosaveImages: 'Save images', autosaveDocuments: 'Save documents', autosaveKnownOnly: 'Only known people', autosaveMaxMb: 'Max file size',
     optOutWords: 'Opt-out words', webhookUrl: 'Notify URL' };
@@ -2209,6 +2209,7 @@ ${laterText(shown)}` : ''}`)) return;
       anytime: fd.anytime.checked,
       dailyCap: +fd.dailyCap.value,
       ...(fd.warmDailyCap ? { warmDailyCap: +fd.warmDailyCap.value } : {}),
+      ...(fd.hourlyCap ? { hourlyCap: +fd.hourlyCap.value } : {}),
       newChatsPer24h: +fd.newChatsPer24h.value,
       followupStart: fd.followupStart.value,
       followupDailyMax: +fd.followupDailyMax.value,
@@ -2281,8 +2282,9 @@ ${laterText(shown)}` : ''}`)) return;
             : f('newChatsPer24h', 'New numbers per 24 hours (safety limit)', h('input', { type: 'number', name: 'newChatsPer24h', min: 0, max: 45, value: s.newChatsPer24h }), 'Hard maximum 45 for linked phones (a number was blocked by WhatsApp after 48 in one day).'),
           f('dailyCap', 'Daily limit: AI/campaign messages to people who never wrote to this number (per 24 hours)', h('input', { type: 'number', name: 'dailyCap', min: 0, value: s.dailyCap }), cloud
             ? 'Meta number: every message outside the 24 h reply window counts here (Meta counts them all). 0 pauses automated sending. Your own sends are not counted.'
-            : 'Cold outreach only — follow-ups to people who have written to you use the limit below. 0 pauses it. Your own sends are not counted.'),
-          cloud ? null : f('warmDailyCap', 'AI/campaign messages to people who have written to this number (per 24 hours)', h('input', { type: 'number', name: 'warmDailyCap', min: 0, max: 1000, value: s.warmDailyCap ?? 150 }), 'Interested candidates, interview follow-ups, guests who replied. A safety ceiling — rarely reached.'),
+            : 'People who haven\x27t written to this number in the last 30 days (or never). 0 pauses it. Your own sends are not counted.'),
+          cloud ? null : f('warmDailyCap', 'AI/campaign messages to people who wrote to this number in the last 30 days (per 24 hours)', h('input', { type: 'number', name: 'warmDailyCap', min: 0, max: 200, value: s.warmDailyCap ?? 30 }), 'People talking to you now: interested candidates, interview follow-ups, guests who wrote recently. Someone who last wrote months ago counts as cold (the limit above).'),
+          cloud ? null : f('hourlyCap', 'AI/campaign messages per hour (all kinds, not replies)', h('input', { type: 'number', name: 'hourlyCap', min: 1, max: 60, value: s.hourlyCap ?? 10 }), 'Spreads a batch over the day. WhatsApp logged the hotel number out after 76 messages in under 2 hours (26 Oct). Keep it at 10 or lower.'),
           sw('anytime', 'Send at any time', 'Day and night, every day. Turn off to use the hours below.'),
           h('details', { class: 'fold' }, h('summary', {}, 'Delay, hours, days, follow-ups'),
             h('div', { class: 'row', style: 'margin-top:8px' },

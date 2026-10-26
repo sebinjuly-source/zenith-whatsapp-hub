@@ -26,13 +26,18 @@ export const DEFAULT_SETTINGS = {
   // Show "typing…" for a few seconds before each automated message.
   typing: true,
   // Max automated messages (campaign + AI) per rolling 24 h to people who have never written to this number (cold
-  // outreach). On a linked phone, messages to people who have written before don't use it (they have warmDailyCap);
+  // outreach). On a linked phone, messages to people who wrote to this number in the last WARM_DAYS (30) days don't
+  // use it (they have warmDailyCap); someone who last wrote months ago is cold again (26 Oct: 76 messages to mostly
+  // stale contacts in under 2 hours got the hotel number logged out);
   // on a Meta number everything outside the 24 h reply window counts (Meta's own limit counts them all).
   // Your own dashboard/API sends are not capped.
   dailyCap: 35,
-  // Linked phones: automated messages per rolling 24 h to people who have written to this number before (interested
-  // candidates, interview follow-ups, guests who replied). Separate from dailyCap; a safety ceiling, rarely reached.
-  warmDailyCap: 150,
+  // Linked phones: automated messages per rolling 24 h to people who wrote to this number in the last 30 days
+  // (interested candidates, interview follow-ups, guests talking to us now). Separate from dailyCap.
+  warmDailyCap: 30,
+  // Linked phones: automated messages (cold + warm, not replies) per rolling hour — spreads a batch over the day
+  // instead of a burst (WhatsApp logs a number out for bursts to many people).
+  hourlyCap: 10,
   // First messages to NEW numbers (never chatted before) in any rolling 24 h, from every source — including you,
   // scripts and the phone itself. Never above NEW_CHATS_HARD_MAX.
   newChatsPer24h: NEW_CHATS_DEFAULT,
@@ -76,7 +81,8 @@ export function normalizeSettings(input = {}) {
     typing: !!s.typing,
     anytime: s.anytime !== false,
     dailyCap: clampInt(s.dailyCap, 0, 1000, DEFAULT_SETTINGS.dailyCap),
-    warmDailyCap: clampInt(s.warmDailyCap, 0, 1000, DEFAULT_SETTINGS.warmDailyCap),
+    warmDailyCap: clampInt(s.warmDailyCap, 0, 200, DEFAULT_SETTINGS.warmDailyCap),
+    hourlyCap: clampInt(s.hourlyCap, 1, 60, DEFAULT_SETTINGS.hourlyCap),
     // Stored up to Meta's own tiers; linked phones are still held to NEW_CHATS_HARD_MAX where it's applied (outbox).
     newChatsPer24h: clampInt(s.newChatsPer24h, 0, CLOUD_NEW_CHATS_MAX, NEW_CHATS_DEFAULT),
     sendStart: isTime(s.sendStart) ? s.sendStart : DEFAULT_SETTINGS.sendStart,

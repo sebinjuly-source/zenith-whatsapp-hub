@@ -1076,7 +1076,7 @@ test('queue status explains what waits, why and until when; drafts show the list
   [st] = (await call('GET', '/api/outbox/status?account=qs')).data;
   assert.equal(st.queued, 2);
   assert.equal(st.state, 'held');
-  assert.match(st.reason, /Daily limit for people who never wrote to us reached: 0 of 0/);
+  assert.match(st.reason, /Daily limit for people who haven't written in 30 days reached: 0 of 0/);
   await manager.update('qs', { settings: { dailyCap: 35 } });
   manager.get('qs').status = 'stopped';
   [st] = (await call('GET', '/api/outbox/status?account=qs')).data;
@@ -2429,4 +2429,38 @@ test('a new job role from an import (WorkIndia batch) becomes a campaign with hi
   assert.doesNotMatch(await mcp('import_list', { account: 'hiring', name: 'Driver candidates – Batch 2', role: 'Driver', members: [{ phone: '9855500002', name: 'Ravi' }], campaign: 'all' }), /NEW CAMPAIGN/);
   assert.doesNotMatch(await mcp('import_list', { account: 'hotel', name: 'Diwali offer guests', role: 'Diwali offer', members: [{ phone: '9855500003', name: 'Asha' }], campaign: 'all' }), /NEW CAMPAIGN/);
   for (const c of ['Driver', 'Hiring – all roles']) await call('DELETE', `/api/playbooks/${encodeURIComponent(c)}`);
+});
+
+test('linked numbers: someone who last wrote months ago is cold again; at most hourlyCap automated messages an hour (hotel number logged out, 26 Oct)', async () => {
+  await manager.create({ id: 'hrc', label: 'HourCap' });
+  await manager.update('hrc', { settings: { aiMode: 'auto', dailyCap: 1, hourlyCap: 2, delayMinSec: 5, delayMaxSec: 5, typing: false } });
+  const s = fake('hrc');
+  s.status = 'connecting';
+  const now = Math.floor(Date.now() / 1000);
+  // A wrote 200 days ago (stale → cold), B and C wrote this week (warm)
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
+    ('hrc','919866600001@s.whatsapp.net','H1',false,$1,'text','old enquiry'),
+    ('hrc','919866600002@s.whatsapp.net','H2',false,$2,'text','hi'),
+    ('hrc','919866600003@s.whatsapp.net','H3',false,$2,'text','hi'),
+    ('hrc','919866600004@s.whatsapp.net','H4',false,$2,'text','hi')`, [now - 200 * 86400, now - 3 * 86400]);
+  for (const n of ['919866600002', '919866600003', '919866600004', '919866600001', '919866600005']) await outbox.enqueue({ account: 'hrc', to: n, payload: { text: 'win-back' }, source: 'campaign' });
+  s.status = 'open';
+  outbox.wakeAccount('hrc');
+  await sleep(1500);
+  const rows = await query(`SELECT to_jid, status, is_warm FROM outbox WHERE account_id = 'hrc' ORDER BY id`);
+  assert.equal(rows.filter((r) => r.status === 'sent').length, 2, 'only 2 in the hour (hourlyCap)');
+  const st = await outbox.queueStatus('hrc');
+  assert.match(st.reason, /Hourly limit reached: 2 of 2/);
+  // the stale contact counts as cold
+  await query(`UPDATE outbox SET sent_at = now() - interval '2 hours' WHERE account_id = 'hrc' AND status = 'sent'`);
+  await manager.update('hrc', { settings: { hourlyCap: 60 } });
+  outbox.wakeAccount('hrc');
+  await until(async () => (await query(`SELECT count(*)::int n FROM outbox WHERE account_id = 'hrc' AND status = 'sent'`))[0].n >= 4, 8000);
+  await sleep(500);
+  const after = await query(`SELECT to_jid, status, is_warm FROM outbox WHERE account_id = 'hrc' ORDER BY id`);
+  const old = after.find((r) => r.to_jid.startsWith('919866600001'));
+  assert.ok(!old.is_warm || old.status !== 'sent', 'a contact who last wrote 200 days ago is not warm');
+  assert.equal(after.filter((r) => r.status === 'sent' && !r.is_warm).length, 1, 'cold ones held to dailyCap 1');
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'hrc' AND status IN ('draft','queued')`);
+  await manager.remove('hrc');
 });

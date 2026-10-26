@@ -600,7 +600,8 @@ async function sent24h(accountId) {
   const [r] = await query(
     `SELECT ${cloud ? 'count(DISTINCT to_jid)' : 'count(*) FILTER (WHERE NOT is_warm)'}::int AS cold,
             min(sent_at) FILTER (WHERE $3::boolean OR NOT is_warm) AS cold_oldest,
-            count(*) FILTER (WHERE is_warm AND NOT $3::boolean)::int AS warm
+            count(*) FILTER (WHERE is_warm AND NOT $3::boolean)::int AS warm,
+            count(*) FILTER (WHERE sent_at > now() - interval '1 hour')::int AS last_hour
      FROM outbox WHERE account_id = $1 AND source = ANY($2) AND status IN ('sent','sending') AND NOT is_reply AND sent_at > now() - interval '24 hours'`,
     [accountId, AUTOMATED, cloud],
   );
@@ -614,7 +615,10 @@ const IS_NEW_CHAT = (acc, jid) => `NOT EXISTS (SELECT 1 FROM messages x WHERE x.
 const IS_REPLY = (acc, jid) => `EXISTS (SELECT 1 FROM messages y WHERE y.account_id = ${acc} AND y.chat_jid = ${jid} AND NOT y.from_me
   AND y.ts > extract(epoch FROM now())::bigint - 86400)`;
 // They have written to this number at some time: a conversation exists, so our message is not cold outreach.
-const IS_WARM = (acc, jid) => `EXISTS (SELECT 1 FROM messages w WHERE w.account_id = ${acc} AND w.chat_jid = ${jid} AND NOT w.from_me)`;
+// Only RECENT conversations count: someone who last wrote months ago is cold again for WhatsApp's spam checks.
+export const WARM_DAYS = 30;
+const IS_WARM = (acc, jid) => `EXISTS (SELECT 1 FROM messages w WHERE w.account_id = ${acc} AND w.chat_jid = ${jid} AND NOT w.from_me
+  AND w.ts > extract(epoch FROM now())::bigint - ${WARM_DAYS * 86400})`;
 /**
  * Send order on one number, whatever the campaign — the message most likely to pay off goes first:
  *  1 replies to people who wrote in the last 24 h · 2 your own sends · 3 messages with a "send by" time (soonest
@@ -777,7 +781,8 @@ export async function queueStatus(accountId) {
   else if (!session.account.enabled) { state = 'held'; reason = 'Number is paused (Settings)'; }
   else if (session.status !== 'open') { state = 'held'; reason = `Number is not connected (${session.status}) — messages go out once it is`; }
   else if (q.queued_automated && !insideSendingWindow(s)) { state = 'held'; reason = `Outside sending hours (${s.sendStart}–${s.sendEnd})`; }
-  else if (q.queued_cold && q.queued_cold === q.queued && a.n >= s.dailyCap) { state = 'held'; reason = `Daily limit for people who never wrote to us reached: ${a.n} of ${s.dailyCap} in the last 24 hours`; until = capFreeAt; }
+  else if (q.queued_cold && q.queued_cold === q.queued && a.n >= s.dailyCap) { state = 'held'; reason = `Daily limit for people who haven't written in ${WARM_DAYS} days reached: ${a.n} of ${s.dailyCap} in the last 24 hours`; until = capFreeAt; }
+  else if (!session.isCloud && q.queued_automated && sent.last_hour >= s.hourlyCap) { state = 'held'; reason = `Hourly limit reached: ${sent.last_hour} of ${s.hourlyCap} in the last hour (spreads batches over the day)`; until = new Date(Date.now() + 10 * 60e3); }
   else if (q.queued_new && blocked) { state = 'held'; reason = 'WhatsApp blocks messages to new numbers for now'; until = session.reachout.timeEnforcementEnds ? new Date(session.reachout.timeEnforcementEnds) : null; }
   else if (q.queued_new && q.queued_new === q.queued && nc.count >= nc.limit) { state = 'held'; reason = `New-number limit reached: ${nc.count} of ${nc.limit} in the last 24 hours`; until = nc.nextFreeAt; }
   else if (q.queued_followup && q.queued_followup === q.queued && !afterTime(s.followupStart)) { state = 'held'; reason = `Follow-ups to people who never replied wait until ${s.followupStart} (Settings)`; until = localDate(`${new Date().toLocaleDateString('en-CA', { timeZone: config.tz })} ${s.followupStart}`); }
@@ -790,7 +795,7 @@ export async function queueStatus(accountId) {
   return {
     account: accountId, label: session.account.label, connection: session.status, state, reason, until,
     queued: q.queued, drafts: q.drafts, queuedNew: q.queued_new, queuedCold: q.queued_cold, queuedWarm: q.queued_automated - q.queued_cold,
-    automated24h: a.n, dailyCap: s.dailyCap, warm24h: sent.warm, warmDailyCap: session.isCloud ? null : s.warmDailyCap, newChats: nc, perDay, days,
+    automated24h: a.n, dailyCap: s.dailyCap, warm24h: sent.warm, warmDailyCap: session.isCloud ? null : s.warmDailyCap, lastHour: sent.last_hour, hourlyCap: s.hourlyCap, newChats: nc, perDay, days,
     gapSec: [s.delayMinSec, s.delayMaxSec],
   };
 }
@@ -852,7 +857,7 @@ export async function capacityForecast(accountId, { settings } = {}) {
   const ncLimit = Math.min(cloud ? CLOUD_NEW_CHATS_MAX : NEW_CHATS_HARD_MAX, s.newChatsPer24h ?? NEW_CHATS_HARD_MAX);
   const blockedUntil = whatsappBlocksNewChats(session)
     ? (session.reachout.timeEnforcementEnds ? new Date(session.reachout.timeEnforcementEnds).getTime() : Infinity) : 0;
-  const gap = cloud ? 250 : ((s.delayMinSec + s.delayMaxSec) / 2) * 1000;
+  const gap = cloud ? 250 : Math.max(((s.delayMinSec + s.delayMaxSec) / 2) * 1000, 3600e3 / (s.hourlyCap || 10));
   // the limits one message uses: [timestamps in the window, cap]
   // reserved = slots held for cold messages with an earlier "send by" time that become due within 24 h (see RESERVED)
   const limitsOf = (m, reserved = 0) => {
@@ -1002,8 +1007,10 @@ function startWorker(accountId) {
     const cloud = !!session.isCloud;
     const used = await sent24h(accountId);
     // cold = people who never wrote to this number (the daily cap); warm = they did (linked phones: warmDailyCap)
-    const automatedAllowed = gapOver && insideSendingWindow(s) && used.cold < s.dailyCap;
-    const warmAllowed = cloud ? automatedAllowed : gapOver && insideSendingWindow(s) && used.warm < s.warmDailyCap;
+    // linked phones: never more than hourlyCap automated messages in any hour (a burst got a number logged out, 26 Oct)
+    const hourOk = cloud || used.last_hour < s.hourlyCap;
+    const automatedAllowed = gapOver && hourOk && insideSendingWindow(s) && used.cold < s.dailyCap;
+    const warmAllowed = cloud ? automatedAllowed : gapOver && hourOk && insideSendingWindow(s) && used.warm < s.warmDailyCap;
     // Follow-ups only go out on days with no new outreach (new candidates get the limited capacity first).
     const followupsAllowed = automatedAllowed && afterTime(s.followupStart) && !(await newOutreachToday(accountId))
       && (await followupsToday(accountId)) < s.followupDailyMax;
