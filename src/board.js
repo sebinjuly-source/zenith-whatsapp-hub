@@ -65,7 +65,8 @@ export async function noteSent(accountId, jids) {
   if (!uniq.length) return n;
   // A follow-up counts as done when we message them from 12 h before it is due (an earlier chat doesn't close it)
   const due = await query(
-    `SELECT t.id, t.ref FROM tasks t WHERE t.kind = 'followup' AND t.status NOT IN ('done','cancelled') AND t.due_at <= now() + interval '12 hours'
+    `SELECT t.id, t.ref FROM tasks t WHERE t.kind = 'followup' AND t.ref LIKE 'followup:%' -- not "Next step missing" (closes only when recorded)
+       AND t.status NOT IN ('done','cancelled') AND t.due_at <= now() + interval '12 hours'
        AND split_part(t.ref, ':', 3) = ANY($1::text[])
        -- only a message sent from 12 h before it was due counts (not an older one seen again by the re-check)
        AND EXISTS (SELECT 1 FROM messages x WHERE x.chat_jid = split_part(t.ref, ':', 3) AND x.from_me

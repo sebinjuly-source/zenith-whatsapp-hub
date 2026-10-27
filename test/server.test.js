@@ -2486,6 +2486,7 @@ test('replied but nothing recorded (owner answered by hand) → "Next step missi
   assert.match(card.details, /owner answered by hand/);
   assert.ok(!(await query(`SELECT 1 FROM tasks WHERE ref LIKE 'nextstep:%:919800005002@s.whatsapp.net'`)).length, 'a chat active in the last 2 h is left alone (Reply card covers it)');
   await board.syncBoard();
+  assert.equal((await query(`SELECT status FROM tasks WHERE ref = $1`, [ref]))[0].status, 'upcoming', 'our earlier message does not close it (only a record does)');
   assert.equal((await query(`SELECT count(*)::int n FROM tasks WHERE ref = $1`, [ref]))[0].n, 1, 'not added twice');
   // the AI records the date → the hub closes the card
   await call('PATCH', `/api/lists/${listId}/members/9800005001`, { stage: 'interested', availableFrom: '2099-11-10' });
