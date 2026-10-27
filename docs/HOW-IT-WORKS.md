@@ -131,10 +131,21 @@ http --scope user whatsapp-hub <url>`; claude.ai: Settings → Connectors). Ever
 and failures with what to do. The playbook begins with "How to use the hub" (tool order and the rules that prevent mistakes:
 never type candidate data by hand, never conclude something is missing after filtering by one number).
 
+**What the AI can do by itself (27 Oct).** The rule: whatever the owner can do in the dashboard, the AI can do
+through MCP — an AI saying "I can't, please do it yourself" is a gap to fix, not an answer.
+- *Files out*: `send_message(attachment_base64, file_name)` sends a PDF/image it has or made; `upload_file` gives a
+  reusable hub link for bulk sends, lists, templates and Meta numbers. No Drive, no public link.
+- *Files in*: `open_file` shows a photo / screenshot / ID as the picture itself and a PDF (resume, bill) as text;
+  `save_media` and `open_file` also return a link to forward the file to anyone (e.g. a resume to the owner).
+- *Mistakes*: `unsend_message` deletes for everyone a message we sent by mistake (linked numbers, within 2 days).
+- *Reports to the owner*: messages to "Send without approval to" phones (default: the alert phones) skip Drafts.
+- *Still not possible*: hearing voice notes or watching videos (needs a paid speech-to-text key — not added),
+  making PDFs inside the hub (the AI makes them in its own workspace and sends them), phone calls.
+
 Useful asks: "who replied today?", "draft replies to the chefs who wrote", "move X to date_given Sunday 11 am",
 "run a health check on the Meta number", "what happened to the message to 98xxxxxxx?", "schedule batch 8 for 9 am".
 
-AI tools: `list_accounts, list_chats, get_messages, search_messages, get_contact, update_contact, find_person,
+AI tools: `upload_file, open_file, unsend_message, list_accounts, list_chats, get_messages, search_messages, get_contact, update_contact, find_person,
 send_message (text, files, buttons, wa_template, schedule_at), bulk_send, list_outbox, approve_draft, reject_draft, edit_draft (new wording, keeps picture and date), reschedule_messages (ids, at), move_messages,
 approve_task, list_tasks (kind=reply|followup|visit|scheduled|reminder, for=you|ai, due_now), create_task / update_task (for, priority), add_task_note, task_history, list_lists, list_members, import_list,
 send_to_list (wa_template, schedule_at, attachment_url — one image for everyone, each person's message as its caption), set_followup, update_list_member (visit_at, available_from, follow_up_at), pipeline, set_pipeline, known_candidates,
