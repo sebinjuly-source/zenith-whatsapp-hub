@@ -183,6 +183,13 @@ either way for 3 days gets a "Follow up" card due now (history: "Added by the sa
 send. Scripts: `curl -H "x-api-key: …" --data-binary @file.pdf "<hub>/api/files?name=file.pdf"` → `{ url }`. The send
 queue reads hub links straight from the database (`files.js`, `media.js loadOutgoing`).
 
+**Daily check-ins (staff photo reports).** Settings → "📋 Daily check-ins": a staff member (e.g. Mallesh: the room
+checklist + the front desk checklist) must send N photos a day with a word (default "checklist" — in the caption or a
+message within 15 min; spaces ignored), to ANY hub number. If fewer have come by the time (default 21:00), ONE reminder
+goes to him from the chosen number WITHOUT approval and outside that number's sending hours (it is the owner's own
+message), and the owner gets a Board card that closes when the photos come. Checked every minute (`checkins.js`,
+config key `checkins`, idempotency key `checkin:<id>:<date>`); MCP `daily_checkins` (changes need owner_asked).
+
 **Send without approval to (trusted recipients).** Settings → "✅ Send without approval to": AI, routine and
 campaign messages TO these phones skip Drafts on every number (e.g. the owner's own phone, so a routine can send a
 report). Until saved it is the alert phones; only the owner changes it (`PUT /api/trusted-recipients`), never the AI.
