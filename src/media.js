@@ -80,6 +80,14 @@ export async function loadOutgoing({ url, base64, mimetype, fileName }) {
     return { buffer, mimetype: mimetype || mime.lookup(fileName || '') || 'application/octet-stream', fileName };
   }
   if (!url) throw new Error('Attachment needs a url or base64');
+  // a file handed to the hub (upload_file / POST /api/files): read it straight from the database
+  const { tokenOf, getFile } = await import('./files.js');
+  const tok = tokenOf(url);
+  if (tok) {
+    const f = await getFile(tok);
+    if (!f) throw new Error('That hub file link has expired or does not exist — upload the file again');
+    return { buffer: f.buffer, mimetype: mimetype || f.mimetype, fileName: fileName || f.fileName };
+  }
   // Google Drive share links (…/file/d/ID/view, open?id=ID) → the direct file. Use export=view:
   // export=download sometimes stalls for a minute before redirecting.
   const drive = url.match(/drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?(?:export=\w+&)?id=)([\w-]+)/);

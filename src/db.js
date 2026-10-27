@@ -114,6 +114,17 @@ CREATE TABLE IF NOT EXISTS media_files (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Files the AI / scripts hand over to send (no Drive link needed): link /f/<token>/<name>
+CREATE TABLE IF NOT EXISTS hub_files (
+  token TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  mimetype TEXT,
+  data BYTEA NOT NULL,
+  size INTEGER,
+  created_by TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS outbox (
   id BIGSERIAL PRIMARY KEY,
   account_id TEXT NOT NULL,

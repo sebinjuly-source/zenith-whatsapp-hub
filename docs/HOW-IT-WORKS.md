@@ -167,6 +167,11 @@ notes needed" card and the AI drafts the reply from it. AI: `add_task_note`, `ta
 **Safety net.** An "interested" candidate with no interview date, no follow-up date, no open card and no message
 either way for 3 days gets a "Follow up" card due now (history: "Added by the safety net"), at most 20 per check.
 
+**Sending a file without Drive.** The AI passes the file itself: `send_message(attachment_base64, file_name)`, or
+`upload_file` once and reuse the returned link (`/f/<token>/<name>`, unguessable, kept 90 days, table `hub_files`) in any
+send. Scripts: `curl -H "x-api-key: …" --data-binary @file.pdf "<hub>/api/files?name=file.pdf"` → `{ url }`. The send
+queue reads hub links straight from the database (`files.js`, `media.js loadOutgoing`).
+
 **Send without approval to (trusted recipients).** Settings → "✅ Send without approval to": AI, routine and
 campaign messages TO these phones skip Drafts on every number (e.g. the owner's own phone, so a routine can send a
 report). Until saved it is the alert phones; only the owner changes it (`PUT /api/trusted-recipients`), never the AI.

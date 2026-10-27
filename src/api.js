@@ -68,6 +68,16 @@ export function buildApp() {
   app.use(express.json({ limit: '30mb', verify: (req, res, buf) => { if (req.url.startsWith('/meta/')) req.rawBody = buf; } }));
   app.use(cookieParser());
 
+  // A file handed to the hub (unguessable link, so WhatsApp / Meta and the person can fetch it)
+  app.get(['/f/:token', '/f/:token/:name'], async (req, res) => {
+    const { getFile } = await import('./files.js');
+    const f = /^[0-9a-f]{32}$/.test(req.params.token) ? await getFile(req.params.token).catch(() => null) : null;
+    if (!f) return res.status(404).send('Not found');
+    res.set('Content-Type', f.mimetype || 'application/octet-stream');
+    res.set('Content-Disposition', `inline; filename="${f.fileName.replace(/"/g, '')}"`);
+    res.send(f.buffer);
+  });
+
   // Always 200 (Render restarts on a failing health check); problems are reported in the body
   app.get('/health', async (req, res) => {
     const { lastSync } = await import('./board.js');
@@ -507,6 +517,17 @@ export function buildApp() {
     const r = await recordCallResult(req.params.id, req.body || {});
     await act(req, null, `Call result for card #${req.params.id}: ${r.note.replace(/^📞 Call: /, '')}`);
     res.json(r);
+  }));
+  // Hand the hub a file to send: JSON { base64, fileName, mimetype } or the raw file (?name=…), e.g.
+  // curl -H "x-api-key: …" --data-binary @letter.pdf "<hub>/api/files?name=letter.pdf" → { url } for attachment.url
+  api.post('/files', express.raw({ type: () => true, limit: '30mb' }), wrap(async (req, res) => {
+    const { saveFile } = await import('./files.js');
+    const raw = Buffer.isBuffer(req.body) && req.body.length && !req.is('application/json');
+    const body = raw ? null : Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8') || '{}') : req.body || {};
+    const f = raw
+      ? await saveFile({ buffer: req.body, fileName: req.query.name, mimetype: req.query.mimetype, by: actorOf(req) })
+      : await saveFile({ base64: body.base64, fileName: body.fileName || body.name, mimetype: body.mimetype, by: actorOf(req) });
+    res.json(f);
   }));
   api.get('/trusted-recipients', wrap(async (req, res) => res.json({ phones: await notify.trustedPhones() })));
   api.put('/trusted-recipients', wrap(async (req, res) => {

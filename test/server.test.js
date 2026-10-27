@@ -1923,6 +1923,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('save_template', { name: 'Toolbox ask', body: 'Namaste {first_name}, kab aa sakte hain?' });
   const d1 = await run('send_message', { account: 'mcpall', to: P, template: 'Toolbox ask', note: 'ask the day' });
   const d2 = await run('send_message', { account: 'mcpall', to: P, text: 'Kal 11 baje aaiye', schedule_at: '2026-12-09 10:00' });
+  await run('upload_file', { base64: Buffer.from('%PDF-1.4 toolbox').toString('base64'), file_name: 'Toolbox.pdf' });
   await run('list_outbox', { account: 'mcpall', status: 'draft' });
   await run('edit_draft', { id: idOf(d1), text: 'Namaste Mr Ravi, kab aa sakte hain?' });
   await run('reschedule_messages', { ids: [idOf(d2)], at: '2026-12-10 10:00' });
@@ -2520,4 +2521,37 @@ test('trusted recipients (Settings → Send without approval to): AI / routine m
   await query(`DELETE FROM config WHERE key = 'trusted_recipients'`);
   await call('PUT', '/api/alerts', { phones: '' });
   await manager.remove('trs');
+});
+
+test('files: the AI sends a PDF it has (base64) without Drive or a link; upload_file gives a reusable link; scripts upload the raw file', async () => {
+  await manager.create({ id: 'fil', label: 'Files' });
+  fake('fil');
+  await call('PUT', '/api/trusted-recipients', { phones: '9833300222' });
+  const pdf = Buffer.from('%PDF-1.4\n% test certificate\n%%EOF\n');
+  const before = sent.length;
+  const r = await mcp('send_message', { account: 'fil', to: '919833300222', text: 'Your certificate', attachment_base64: pdf.toString('base64'), file_name: 'Certificate_of_Stay.pdf' });
+  assert.match(r, /Queued|#\d+/, r);
+  const out = await until(() => sent.slice(before).find((x) => x.account === 'fil'), 8000);
+  assert.ok(out, 'the file went out');
+  const doc = out.content.document;
+  assert.ok(doc && Buffer.from(doc).equals(pdf), 'sent the same bytes as a document: ' + JSON.stringify(Object.keys(out.content)));
+  assert.equal(out.content.fileName, 'Certificate_of_Stay.pdf');
+  assert.equal(out.content.mimetype, 'application/pdf');
+  // upload once, reuse the link (public, unguessable)
+  const up = await mcp('upload_file', { base64: pdf.toString('base64'), file_name: 'Poster.pdf' });
+  const link = up.match(/attachment_url: (\S+)/)[1];
+  const path = link.replace(/^https?:\/\/[^/]+/, '');
+  const got = await fetch(base + path);
+  assert.equal(got.status, 200);
+  assert.ok(Buffer.from(await got.arrayBuffer()).equals(pdf));
+  assert.equal((await fetch(base + '/f/' + '0'.repeat(32) + '/x.pdf')).status, 404);
+  // scripts: raw upload
+  const raw = await fetch(base + '/api/files?name=Invoice.pdf', { method: 'POST', headers: { 'x-api-key': 'k', 'content-type': 'application/pdf' }, body: pdf });
+  const rj = await raw.json();
+  assert.equal(rj.name, 'Invoice.pdf');
+  assert.equal(rj.size, pdf.length);
+  assert.equal((await fetch(base + '/api/files?name=x.pdf', { method: 'POST', body: pdf })).status, 401, 'upload needs the key');
+  await call('PUT', '/api/trusted-recipients', { phones: '' });
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'fil' AND status IN ('draft','queued')`);
+  await manager.remove('fil');
 });
