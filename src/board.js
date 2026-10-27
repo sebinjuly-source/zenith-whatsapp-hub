@@ -5,6 +5,7 @@
  *  - "Follow up: X"   — AI: they said when they'll be free; due the day before (closes when we message them then)
  *  - "Scheduled: X"   — AI: a single message waiting to go out later (closes when it is sent or cancelled)
  *  - "Reminder"       — YOU: a chat snoozed with "Remind me" (due on that date; closes when the chat is reopened/done)
+ *  - "Next step missing" — AI: they replied but no date / follow-up / stage was recorded (catchNoNextStep)
  * Updated instantly on each event, and re-checked every 10 minutes (syncBoard) so a missed event can't hide anything.
  */
 import { query } from './db.js';
@@ -166,7 +167,7 @@ export async function catchForgotten() {
      FROM list_members m JOIN lists l ON l.id = m.list_id
      WHERE m.stage = 'interested' AND m.followup_at IS NULL AND m.visit_at IS NULL
        AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.status NOT IN ('done','cancelled')
-                       AND t.ref IN ('reply:' || l.account_id || ':' || m.jid, 'followup:' || m.list_id || ':' || m.jid))
+                       AND t.ref IN ('reply:' || l.account_id || ':' || m.jid, 'followup:' || m.list_id || ':' || m.jid, 'nextstep:' || m.list_id || ':' || m.jid))
        AND COALESCE((SELECT max(x.ts) FROM messages x WHERE x.chat_jid = m.jid), 0) < extract(epoch FROM now())::bigint - $1::bigint * 86400
        AND COALESCE(m.stage_at, now() - interval '30 days') < now() - ($1 || ' days')::interval
      LIMIT 20`,
@@ -183,6 +184,63 @@ export async function catchForgotten() {
     await logTask(t?.id, 'Added by the safety net: interested candidate with nothing planned');
   }
   return rows.length;
+}
+
+export const NEXT_STEP_HOURS = 2;
+/**
+ * Safety net: someone on a list replied (last 30 days), the chat has been quiet NEXT_STEP_HOURS, and nothing is
+ * planned — no stage beyond "interested", no interview date, no follow-up date, no open card, no draft waiting.
+ * Typical case: the owner answered by hand ("No problem, come on the 10th"), which closed the "Reply to" card, and
+ * nobody recorded the date (27 Oct: a chef coming on 10 Nov had no card). An AI card asks for the chat to be read and
+ * what was agreed recorded. Closed by the hub once a date / follow-up / closed stage is set; if the AI closes it
+ * without one, it comes back only after a new message. At most 10 per run.
+ */
+export async function catchNoNextStep() {
+  const rows = await query(
+    `SELECT * FROM (
+       SELECT DISTINCT ON (m.jid) m.list_id, m.jid, m.name, m.stage, m.outcome, l.account_id, l.name AS list_name, l.role,
+         (SELECT max(x.ts) FROM messages x WHERE x.account_id = l.account_id AND x.chat_jid = m.jid) AS last_ts,
+         (SELECT x.from_me FROM messages x WHERE x.account_id = l.account_id AND x.chat_jid = m.jid ORDER BY x.ts DESC LIMIT 1) AS ours_last
+       FROM list_members m JOIN lists l ON l.id = m.list_id
+       WHERE m.last_reply_at > now() - interval '30 days' AND l.archived IS NULL
+         AND COALESCE(m.stage, 'interested') = 'interested'
+         AND m.followup_at IS NULL AND (m.visit_at IS NULL OR m.visit_at < now())
+       ORDER BY m.jid, l.id DESC) c
+     WHERE c.last_ts < extract(epoch FROM now())::bigint - $1::bigint * 3600
+       AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.status NOT IN ('done','cancelled') AND t.ref LIKE '%:' || c.jid)
+       AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.ref = 'nextstep:' || c.list_id || ':' || c.jid AND t.completed_at >= to_timestamp(c.last_ts))
+       AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.to_jid = c.jid AND o.status IN ('draft','queued','sending'))
+     ORDER BY c.last_ts DESC LIMIT 10`,
+    [NEXT_STEP_HOURS],
+  );
+  let n = 0;
+  for (const r of rows) {
+    if (isClosed(r)) continue;
+    const t = await upsertRefTask(`nextstep:${r.list_id}:${r.jid}`, {
+      account: r.account_id, kind: 'followup', role: r.role, assignee: 'ai', dueAt: new Date().toISOString(),
+      title: `Next step missing: ${r.name || phone(r.jid)} — read the chat and record it`,
+      details: `${r.list_name} · +${phone(r.jid)}. They replied, but nothing is planned (stage ${r.stage || 'not set'}, no interview date, no follow-up date). `
+        + `Last message ${when(Number(r.last_ts) * 1000)}, ${r.ours_last ? 'from us — maybe the owner answered by hand' : 'from them'}. `
+        + 'Read the whole chat. A day agreed (even "come on the 10th") → visit_at with the time, or available_from if no time yet. '
+        + 'Interested, no day → stage interested + follow_up_at. Waiting on our answer → draft the reply. Not interested → that stage. '
+        + 'The hub closes this card once one of those is recorded.',
+    });
+    await logTask(t?.id, 'Added by the safety net: replied but nothing recorded');
+    n++;
+  }
+  // close the ones that now have a plan (or the person is closed)
+  const open = await query(
+    `SELECT t.ref, m.jid, m.stage, m.outcome, m.followup_at, m.visit_at FROM tasks t
+     LEFT JOIN list_members m ON m.list_id = split_part(t.ref, ':', 2)::bigint AND m.jid = split_part(t.ref, ':', 3)
+     WHERE t.ref LIKE 'nextstep:%' AND t.status NOT IN ('done','cancelled')`,
+  );
+  for (const o of open) {
+    if (!o.jid) { await closeRefTasks([o.ref], 'cancelled', 'no longer on the list'); continue; }
+    if (isClosed(o)) { await closeRefTasks([o.ref], 'done', `stage ${o.stage || o.outcome}`); continue; }
+    const planned = o.followup_at || (o.visit_at && new Date(o.visit_at) > new Date()) || (o.stage && o.stage !== 'interested');
+    if (planned) await closeRefTasks([o.ref], 'done', 'next step recorded');
+  }
+  return n;
 }
 
 /**
@@ -252,6 +310,7 @@ export async function syncBoard() {
   // campaign tags: messages added to a list after they were queued get the list's role
   await query(`UPDATE outbox o SET role = l.role FROM lists l WHERE o.list_id = l.id AND o.role IS NULL AND l.role IS NOT NULL`).catch(() => {});
   const forgotten = await catchForgotten();
+  const nextSteps = await catchNoNextStep();
   // chat reminders
   const snoozed = await query(`SELECT account_id, jid, snoozed_until, snooze_note FROM chats WHERE state = 'snoozed' AND snoozed_until IS NOT NULL`);
   for (const c of snoozed) await syncReminder(c.account_id, c.jid, { state: 'snoozed', until: c.snoozed_until, note: c.snooze_note });
@@ -261,7 +320,7 @@ export async function syncBoard() {
     const [c] = await query(`SELECT state FROM chats WHERE account_id = $1 AND jid = $2`, [acc, jid]);
     if (c?.state !== 'snoozed') await closeRefTasks([t.ref], 'done', 'chat reopened');
   }
-  const result = { replyCards: opened, visits: visits.length, followups: fus.length, scheduled, forgotten, reminders: snoozed.length };
+  const result = { replyCards: opened, visits: visits.length, followups: fus.length, scheduled, forgotten, nextSteps, reminders: snoozed.length };
   Object.assign(lastSync, { at: new Date().toISOString(), ok: true, error: null, result });
   return result;
 }

@@ -2464,3 +2464,36 @@ test('linked numbers: someone who last wrote months ago is cold again; at most h
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'hrc' AND status IN ('draft','queued')`);
   await manager.remove('hrc');
 });
+
+test('replied but nothing recorded (owner answered by hand) → "Next step missing" AI card; closes once a date is set', async () => {
+  const store = await import('../src/store.js');
+  const board = await import('../src/board.js');
+  const imp = await call('POST', '/api/lists/import', { account: 'hiring', name: 'Next step batch', role: 'Chef', members: [{ phone: '9800005001', name: 'Kino N' }, { phone: '9800005002', name: 'Fresh N' }] });
+  const listId = imp.data.list.id;
+  const jid = '919800005001@s.whatsapp.net';
+  const now = Math.floor(Date.now() / 1000);
+  await store.insertMessages('hiring', [
+    { id: 'NS1', fromMe: false, ts: now - 3 * 3600 - 60, chatJid: jid, type: 'text', body: 'If possible i will join on date 10', forwarded: false },
+    { id: 'NS2', fromMe: true, ts: now - 3 * 3600, chatJid: jid, type: 'text', body: 'No problem you can come by the 10th.', forwarded: false },
+    { id: 'NS3', fromMe: false, ts: now - 600, chatJid: '919800005002@s.whatsapp.net', type: 'text', body: 'Haan', forwarded: false },
+  ]);
+  await query(`UPDATE list_members SET last_reply_at = now() - interval '3 hours', status = 'replied' WHERE list_id = $1`, [listId]);
+  const r = await board.syncBoard();
+  assert.ok(r.nextSteps >= 1, JSON.stringify(r));
+  const ref = `nextstep:${listId}:${jid}`;
+  const card = (await call('GET', '/api/tasks?for=ai&due_now=1')).data.find((t) => t.ref === ref);
+  assert.ok(card, 'owner-answered candidate with nothing recorded is on the board');
+  assert.match(card.details, /owner answered by hand/);
+  assert.ok(!(await query(`SELECT 1 FROM tasks WHERE ref LIKE 'nextstep:%:919800005002@s.whatsapp.net'`)).length, 'a chat active in the last 2 h is left alone (Reply card covers it)');
+  await board.syncBoard();
+  assert.equal((await query(`SELECT count(*)::int n FROM tasks WHERE ref = $1`, [ref]))[0].n, 1, 'not added twice');
+  // the AI records the date → the hub closes the card
+  await call('PATCH', `/api/lists/${listId}/members/9800005001`, { stage: 'interested', availableFrom: '2099-11-10' });
+  await board.syncBoard();
+  const [t] = await query(`SELECT status FROM tasks WHERE ref = $1`, [ref]);
+  assert.equal(t.status, 'done');
+  // closed by hand without recording → not re-added until a new message
+  await call('PATCH', `/api/lists/${listId}/members/9800005001`, { followupAt: '' , stage: '' });
+  await board.syncBoard();
+  assert.equal((await query(`SELECT count(*)::int n FROM tasks WHERE ref = $1`, [ref]))[0].n, 1, 'closed card not reopened without a new message');
+});

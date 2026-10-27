@@ -167,6 +167,13 @@ notes needed" card and the AI drafts the reply from it. AI: `add_task_note`, `ta
 **Safety net.** An "interested" candidate with no interview date, no follow-up date, no open card and no message
 either way for 3 days gets a "Follow up" card due now (history: "Added by the safety net"), at most 20 per check.
 
+**Next step missing.** Anyone on a list who replied in the last 30 days, whose chat has been quiet 2 hours, with no
+stage beyond "interested", no interview date, no follow-up date, no open card and no draft waiting, gets an AI card
+"Next step missing: X — read the chat and record it" (at most 10 per check). It catches the owner answering by hand
+("No problem, come on the 10th"): that reply closes the "Reply to" card, but nothing recorded the date — on 27 Oct a
+chef coming on 10 Nov had no card. The hub closes the card when a date, follow-up or other stage is set; if it is
+closed without one it comes back only after a new message (`catchNoNextStep` in `board.js`).
+
 **Messages for later.** `send_message(schedule_at="YYYY-MM-DD HH:MM")`, `POST /api/send` with `scheduleAt`, or ⏰ in
 the inbox composer. Each shows on the Board as "Scheduled: …" until it is sent (drafts still need your approval).
 
@@ -307,7 +314,7 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
   `visit:<list>:<jid>`, `remind:<acc>:<jid>`, `sched:<outboxId>`. `upsertRefTask` updates the open one;
   `closeRefTasks` closes it with a reason (visible in History).
 - Events update cards at once (incoming message, reply sent, stage/date changed, scheduled send). `syncBoard`
-  re-derives all of them every 10 min, tags cards with their campaign, and runs the safety net (`catchForgotten`).
+  re-derives all of them every 10 min, tags cards with their campaign, and runs the safety nets (`catchForgotten`, `catchNoNextStep`).
 - `task_log` = each card's history and notes. "Owner note to act on" = the latest note/AI entry is the owner's.
 
 ### 10.7 Campaigns (`campaign.js`, `scope.js`)
