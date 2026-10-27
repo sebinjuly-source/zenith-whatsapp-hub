@@ -27,6 +27,14 @@ export async function saveFile({ base64, buffer, fileName, mimetype, by = 'ai' }
 /** A hub file link (/f/<token>/…) → its token, else null. */
 export const tokenOf = (url) => String(url || '').match(/\/f\/([0-9a-f]{32})(?:\/|$)/)?.[1] || null;
 
+/** Text inside a PDF (for the AI to read a resume, an ID, a bill). Empty when it is a scan with no text layer. */
+export async function pdfText(buffer, max = 20000) {
+  const { extractText, getDocumentProxy } = await import('unpdf');
+  const pdf = await getDocumentProxy(new Uint8Array(buffer));
+  const { totalPages, text } = await extractText(pdf, { mergePages: true });
+  return { pages: totalPages, text: String(text || '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, max) };
+}
+
 export async function getFile(token) {
   const [f] = await query(`SELECT name, mimetype, data FROM hub_files WHERE token = $1`, [token]);
   return f ? { fileName: f.name, mimetype: f.mimetype, buffer: Buffer.from(f.data) } : null;

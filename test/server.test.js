@@ -1882,6 +1882,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body, media) VALUES ('mcpall',$1,'M2',false,$2,'document','cv.pdf','{"kind":"documentMessage","mimetype":"application/pdf","fileName":"cv.pdf"}')`, [J, now - 500]);
   await (await import('../src/store.js')).upsertChats('mcpall', [{ jid: J, name: 'Toolbox Ravi' }]);
   manager.get('mcpall').saveMedia = async () => 'db:test';
+  await query(`INSERT INTO media_files (path, mimetype, data) VALUES ('test', 'application/pdf', $1) ON CONFLICT DO NOTHING`, [Buffer.from('%PDF-1.4 not a real pdf')]);
   manager.get('mcpall').fetchOlder = async () => 'requested'; // the fake has no phone behind it
   const done = {};
   const run = async (name, args) => {
@@ -1952,6 +1953,8 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('save_rule', { account: 'mcpall', name: 'Toolbox rule', words: ['resume'], add_tags: ['cv'] });
   await run('set_chat_state', { account: 'mcpall', chat: P, state: 'snoozed', until: '2026-12-09 09:00', note: 'check' });
   await run('save_media', { account: 'mcpall', chat: P, message_id: 'M2' });
+  await run('open_file', { account: 'mcpall', chat: P, message_id: 'M2' });
+  await run('unsend_message', { account: 'mcpall', chat: P, message_id: 'M1', reason: 'toolbox' });
   await run('fetch_older_messages', { account: 'mcpall', chat: P, count: 10 });
   await run('backfill_history', { account: 'mcpall', since: '2026-01-01' });
   await run('recent_activity', { who: 'ai' });
@@ -2554,4 +2557,48 @@ test('files: the AI sends a PDF it has (base64) without Drive or a link; upload_
   await call('PUT', '/api/trusted-recipients', { phones: '' });
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'fil' AND status IN ('draft','queued')`);
   await manager.remove('fil');
+});
+
+test('files someone sent: open_file shows a photo as the picture and a PDF as text; the link forwards it; unsend_message takes back our own message', async () => {
+  await manager.create({ id: 'see', label: 'See' });
+  const s = fake('see');
+  const now = Math.floor(Date.now() / 1000);
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  // a tiny real PDF with the text "Ravi Kumar Chef 8 years"
+  const pdf = Buffer.from('JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveFswIDAgMzAwIDEwMF0vQ29udGVudHMgNCAwIFIvUmVzb3VyY2VzPDwvRm9udDw8L0YxIDUgMCBSPj4+Pj4+ZW5kb2JqCjQgMCBvYmo8PC9MZW5ndGggNDY+PnN0cmVhbQpCVCAvRjEgMTIgVGYgMTAgNTAgVGQgKFJhdmkgS3VtYXIgQ2hlZiA4IHllYXJzKSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmo8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+PmVuZG9iagp0cmFpbGVyPDwvUm9vdCAxIDAgUj4+CiUlRU9G', 'base64');
+  s.downloadMedia = async (row) => (row.id === 'IMG1' ? png : pdf);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body, media) VALUES
+    ('see','919811100001@s.whatsapp.net','IMG1',false,$1,'image','payment done','{"kind":"imageMessage","mimetype":"image/png"}'),
+    ('see','919811100001@s.whatsapp.net','PDF1',false,$1,'document','resume.pdf','{"kind":"documentMessage","mimetype":"application/pdf","fileName":"resume.pdf"}'),
+    ('see','919811100001@s.whatsapp.net','OUR1',true,$1,'text','wrong price',NULL)`, [now - 60]);
+  // the image comes back as an image the AI can look at
+  const res = await fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 9901, method: 'tools/call', params: { name: 'open_file', arguments: { account: 'see', chat: '919811100001', message_id: 'IMG1' } } }) });
+  const content = (await res.json()).result.content;
+  assert.equal(content[1].type, 'image');
+  assert.equal(content[1].mimeType, 'image/png');
+  assert.ok(Buffer.from(content[1].data, 'base64').equals(png));
+  assert.match(content[0].text, /caption: "payment done"/);
+  // the PDF comes back as text
+  const t = await mcp('open_file', { account: 'see', chat: '919811100001', message_id: 'PDF1' });
+  assert.match(t, /Ravi Kumar Chef 8 years/, t);
+  // the link forwards the same file
+  const link = t.match(/attachment_url to send it on: (\S+)/)[1];
+  const before = sent.length;
+  await mcp('send_message', { account: 'see', to: '919811100002', text: 'Resume', attachment_url: link });
+  await query(`UPDATE outbox SET status = 'queued' WHERE account_id = 'see' AND status = 'draft'`);
+  (await import('../src/outbox.js')).wakeAccount('see');
+  const out = await until(() => sent.slice(before).find((x) => x.account === 'see' && x.content.document), 8000);
+  assert.ok(out && Buffer.from(out.content.document).equals(pdf), 'forwarded the same PDF');
+  assert.equal(out.content.fileName, 'resume.pdf');
+  // unsend: only our own, recent messages
+  const calls = [];
+  s.sock = { sendMessage: async (jid, c) => { calls.push({ jid, c }); return {}; } };
+  assert.match(await mcp('unsend_message', { account: 'see', chat: '919811100001', message_id: 'IMG1', reason: 'x' }), /only our own/);
+  assert.match(await mcp('unsend_message', { account: 'see', chat: '919811100001', message_id: 'OUR1', reason: 'wrong price' }), /Deleted for everyone/);
+  assert.deepEqual(calls[0].c, { delete: { remoteJid: '919811100001@s.whatsapp.net', fromMe: true, id: 'OUR1' } });
+  assert.equal((await query(`SELECT deleted FROM messages WHERE account_id = 'see' AND id = 'OUR1'`))[0].deleted, true);
+  s.sock = null;
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'see' AND status IN ('draft','queued')`);
+  await manager.remove('see');
 });

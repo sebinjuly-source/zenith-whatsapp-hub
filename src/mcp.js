@@ -57,7 +57,9 @@ export function budget(out, max = RESPONSE_BUDGET) {
 }
 const safe = (fn, max = RESPONSE_BUDGET) => async (args) => {
   try {
-    return text(budget(await fn(args), max));
+    const r = await fn(args);
+    if (r && typeof r === 'object' && Array.isArray(r.content)) return r; // e.g. open_file: text + the picture itself
+    return text(budget(r, max));
   } catch (err) {
     return fail(err);
   }
@@ -198,7 +200,7 @@ const msgLine = (m, maxLen) => {
   const who = m.from_me ? 'me' : m.sender_name || (m.sender_jid || '').split('@')[0] || 'them';
   let body = m.deleted ? '[deleted]' : trim(m.body, maxLen) || `[${m.type}]`;
   if (m.type !== 'text' && m.type !== 'contact' && m.body) body = `[${m.type}] ${body}`;
-  if (m.has_media) body += ` (media id:${m.id}${m.media_saved ? ', saved' : ''})`;
+  if (m.has_media) body += ` (media id:${m.id}${m.media_saved ? ', saved' : ''} — open_file to see/read it)`;
   const q = m.quoted_body ? ` ↪"${trim(m.quoted_body, 50)}"` : '';
   return `[${fmtTime(m.ts)}] ${who}: ${body}${q}`;
 };
@@ -272,7 +274,7 @@ function buildServer(playbook = '', focus = '') {
 
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). Work only with people on campaign lists: they get "Reply to" cards, and inbox_summary shows every one of them waiting for an answer (also those whose card was closed before a new message) — look at it before deciding and read the chat (get_messages) before drafting. Chats of people on no list are the staff's everyday chats: leave them alone unless the owner asks; never answer the hub's own numbers or the owner's phones. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. EVERY REPLY ENDS IN A RECORD: after any conversation (yours or the owner's own reply by hand) record what was agreed — a day → update_list_member visit_at (with time) or available_from; interested, no day → stage interested + follow_up_at; not interested → that stage. "Next step missing: X" cards are the hub's safety net for people who replied with nothing recorded (27 Oct: a chef the owner told "come on the 10th" had no card). FILES: you can send any file yourself — send_message(attachment_base64=<the file as base64>, file_name="X.pdf") or upload_file then attachment_url; never ask the owner to upload to Drive or send it by hand. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who wrote to us in the last 30 days (interested candidates, interview follow-ups) → everyone else → nudges to non-repliers. On a linked number only people who wrote in the last 30 days skip the daily limit, and at most hourlyCap (10) automated messages go out per hour — a burst to old contacts got the hotel number logged out (26 Oct). Never plan big batches to old contacts from a linked number. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). Work only with people on campaign lists: they get "Reply to" cards, and inbox_summary shows every one of them waiting for an answer (also those whose card was closed before a new message) — look at it before deciding and read the chat (get_messages) before drafting. Chats of people on no list are the staff's everyday chats: leave them alone unless the owner asks; never answer the hub's own numbers or the owner's phones. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. EVERY REPLY ENDS IN A RECORD: after any conversation (yours or the owner's own reply by hand) record what was agreed — a day → update_list_member visit_at (with time) or available_from; interested, no day → stage interested + follow_up_at; not interested → that stage. "Next step missing: X" cards are the hub's safety net for people who replied with nothing recorded (27 Oct: a chef the owner told "come on the 10th" had no card). FILES: open_file shows you a photo/screenshot/ID someone sent (as the picture) or a PDF's text — read them before replying; save_media / open_file also give a link to forward the file. A message sent by mistake → unsend_message (linked numbers, 2 days). You can send any file yourself — send_message(attachment_base64=<the file as base64>, file_name="X.pdf") or upload_file then attachment_url; never ask the owner to upload to Drive or send it by hand. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who wrote to us in the last 30 days (interested candidates, interview follow-ups) → everyone else → nudges to non-repliers. On a linked number only people who wrote in the last 30 days skip the daily limit, and at most hourlyCap (10) automated messages go out per hour — a burst to old contacts got the hotel number logged out (26 Oct). Never plan big batches to old contacts from a linked number. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
   const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter for this call: a campaign name, "none" (hotel / no campaign) or "all". Default: ${focus ? `"${focus}" (the campaign the owner has open)` : 'all campaigns'}.`);
   const tool = (name, description, inputSchema, fn) => {
@@ -1443,13 +1445,66 @@ function buildServer(playbook = '', focus = '') {
     return `Saved ${f.name} (${f.mimetype}, ${Math.round(f.size / 1024)} KB). attachment_url: ${f.url}`;
   });
 
-  tool('save_media', 'Download and keep a file from a message (e.g. a candidate\'s resume). Use the media id shown by get_messages.', {
-    account: accountArg, chat: chatArg, message_id: z.string(),
-  }, async (a) => {
+  /** A file someone sent: kept in the hub, plus a hub file link (/f/…) that can be sent on to anyone. */
+  const mediaFile = async (a) => {
     const s = await manager.resolve(a.account);
     const jid = await resolveChat(s.id, a.chat);
-    await s.saveMedia(jid, a.message_id);
-    return `Saved. Open in the dashboard: ${config.publicUrl || ''}/api/media/${s.id}/${encodeURIComponent(jid)}/${a.message_id}`;
+    const ref = await s.saveMedia(jid, a.message_id);
+    const [row] = await query('SELECT type, body, media FROM messages WHERE account_id = $1 AND chat_jid = $2 AND id = $3', [s.id, jid, a.message_id]);
+    const { getMedia } = await import('./media.js');
+    const got = await getMedia(ref);
+    const mimetype = row?.media?.mimetype || got.mimetype || 'application/octet-stream';
+    const ext = (await import('mime-types')).default.extension(mimetype) || 'bin';
+    const name = row?.media?.fileName || `${row?.type || 'file'}_${jid.split('@')[0]}_${a.message_id.slice(-6)}.${ext}`;
+    const f = await (await import('./files.js')).saveFile({ buffer: got.buffer, fileName: name, mimetype, by: 'ai' });
+    return { s, jid, row, buffer: got.buffer, mimetype, file: f };
+  };
+
+  tool('save_media', 'Download and keep a file from a message (e.g. a candidate\'s resume). Use the media id shown by get_messages. Returns a link you can pass as attachment_url to send it on (e.g. forward a resume to the owner). To SEE or READ it, use open_file.', {
+    account: accountArg, chat: chatArg, message_id: z.string(),
+  }, async (a) => {
+    const m = await mediaFile(a);
+    return `Saved ${m.file.name} (${m.mimetype}, ${Math.round(m.file.size / 1024)} KB). attachment_url to send it on: ${m.file.url}`;
+  });
+
+  tool('open_file', 'See or read a file someone sent (media id from get_messages): a photo / screenshot / ID / certificate comes back as the picture itself so you can look at it; a PDF (resume, bill, letter) comes back as its text. Also gives a link to send it on (attachment_url). Voice notes and videos can\'t be heard/watched — say so and ask the owner or the person for the gist.', {
+    account: accountArg, chat: chatArg, message_id: z.string(),
+  }, async (a) => {
+    const m = await mediaFile(a);
+    const head = `${m.file.name} (${m.mimetype}, ${Math.round(m.file.size / 1024)} KB)${m.row?.body ? ` — caption: "${trim(m.row.body, 200)}"` : ''}. attachment_url to send it on: ${m.file.url}`;
+    if (/^image\/(jpeg|png|gif|webp)$/.test(m.mimetype) && m.buffer.length <= 4 * 1024 * 1024) {
+      return { content: [{ type: 'text', text: head }, { type: 'image', data: m.buffer.toString('base64'), mimeType: m.mimetype }] };
+    }
+    if (m.mimetype === 'application/pdf') {
+      const { pdfText } = await import('./files.js');
+      const p = await pdfText(m.buffer).catch((err) => ({ error: err.message }));
+      if (p.error) return `${head}\nCould not read the PDF (${p.error}).`;
+      return `${head}\n${p.pages} page(s).${p.text ? `\n--- text ---\n${p.text}` : ' No text layer (a scanned image) — ask the owner to look at it via the link.'}`;
+    }
+    if (/^text\//.test(m.mimetype)) return `${head}\n--- text ---\n${m.buffer.toString('utf8').slice(0, 20000)}`;
+    return `${head}\nThis kind of file can't be shown to you (${m.row?.type || m.mimetype}). Open the link, or ask the owner / the person what it says.`;
+  });
+
+  tool('unsend_message', 'Delete for everyone a message WE sent by mistake (wrong person, wrong text, wrong file) — linked numbers only, within about 2 days of sending. Give outbox_id (#… from list_outbox) or the WhatsApp message_id. Logged in Activity. Meta Cloud API numbers cannot unsend.', {
+    account: accountArg, chat: chatArg, message_id: z.string().optional().describe('WhatsApp id of our message'), outbox_id: z.number().int().optional().describe('OR the hub message number #… from list_outbox / the send result'),
+    reason: z.string().describe('Why it is being taken back'),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    if (s.isCloud) return `"${s.id}" is a Meta Cloud API number — WhatsApp does not let those unsend. Send a short correction instead.`;
+    const jid = await resolveChat(s.id, a.chat);
+    let mid = a.message_id;
+    if (!mid && a.outbox_id) mid = (await query('SELECT message_id FROM outbox WHERE id = $1 AND account_id = $2 AND to_jid = $3', [a.outbox_id, s.id, jid]))[0]?.message_id;
+    if (!mid) return 'Give message_id, or outbox_id of a message that was sent from this number to this chat.';
+    const [m] = await query('SELECT id, from_me, ts, deleted FROM messages WHERE account_id = $1 AND chat_jid = $2 AND id = $3', [s.id, jid, mid]);
+    if (!m) return 'No such message in that chat.';
+    if (!m.from_me) return 'That message is theirs — only our own messages can be unsent.';
+    if (m.deleted) return 'Already deleted.';
+    if (Date.now() / 1000 - Number(m.ts) > 2 * 86400) return 'Older than 2 days — WhatsApp no longer allows deleting it for everyone. Send a short correction instead.';
+    if (!s.sock) return `"${s.id}" is not connected right now — try again when it is.`;
+    await s.sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: true, id: m.id } });
+    await query('UPDATE messages SET deleted = true WHERE account_id = $1 AND chat_jid = $2 AND id = $3', [s.id, jid, m.id]);
+    await ai(s.id, `Unsent our message ${m.id} to ${jid.split('@')[0]} — ${a.reason}`);
+    return `Deleted for everyone (${jid.split('@')[0]}). Reason logged: ${a.reason}`;
   });
 
   tool('fetch_older_messages', 'Ask the phone for older messages of a chat than what is stored (arrives in the background in ~1 min; phone must be online). Use when a chat\'s history looks cut off.', {
