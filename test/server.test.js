@@ -1925,6 +1925,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   const d1 = await run('send_message', { account: 'mcpall', to: P, template: 'Toolbox ask', note: 'ask the day' });
   const d2 = await run('send_message', { account: 'mcpall', to: P, text: 'Kal 11 baje aaiye', schedule_at: '2026-12-09 10:00' });
   await run('upload_file', { base64: Buffer.from('%PDF-1.4 toolbox').toString('base64'), file_name: 'Toolbox.pdf' });
+  await run('daily_checkins', {});
   await run('list_outbox', { account: 'mcpall', status: 'draft' });
   await run('edit_draft', { id: idOf(d1), text: 'Namaste Mr Ravi, kab aa sakte hain?' });
   await run('reschedule_messages', { ids: [idOf(d2)], at: '2026-12-10 10:00' });
@@ -2033,7 +2034,7 @@ test('morning summary: right content, once a day, only from the number that is c
   await digest.saveDigest({ enabled: true, time: '06:00', account: 'dig1' });
   const today = new Date();
   await query(`INSERT INTO tasks (account_id, title, kind, status, due_at, assignee, priority, ref) VALUES
-    ('dig1','Interview: Morning Test — Sat', 'visit', 'upcoming', now() + interval '2 hours', 'you', true, 'visit:999:919733500001@s.whatsapp.net'),
+    ('dig1','Interview: Morning Test — Sat', 'visit', 'upcoming', now() + interval '1 minute', 'you', true, 'visit:999:919733500001@s.whatsapp.net'),
     ('dig1','Call Digest Person 9733500002', 'todo', 'upcoming', now() - interval '1 hour', 'you', true, NULL)`);
   const { text } = await digest.buildDigest(today);
   assert.match(text, /Good morning/);
@@ -2041,7 +2042,7 @@ test('morning summary: right content, once a day, only from the number that is c
   assert.match(text, /Morning Test/);
   assert.match(text, /⭐ Call Digest Person/);
   // an interview card written by hand ("Interview: …", kind todo) is an interview, not a to-do
-  await query(`INSERT INTO tasks (account_id, title, kind, status, due_at, assignee, priority) VALUES ('dig1','Interview: Hand Made Cook — 11:00', 'todo', 'upcoming', now() + interval '3 hours', 'you', true)`);
+  await query(`INSERT INTO tasks (account_id, title, kind, status, due_at, assignee, priority) VALUES ('dig1','Interview: Hand Made Cook — 11:00', 'todo', 'upcoming', now() + interval '2 minutes', 'you', true)`);
   const t2 = (await digest.buildDigest(today)).text;
   const [interviews, rest] = t2.split('✅');
   assert.match(interviews, /Hand Made Cook/);
@@ -2601,4 +2602,49 @@ test('files someone sent: open_file shows a photo as the picture and a PDF as te
   s.sock = null;
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'see' AND status IN ('draft','queued')`);
   await manager.remove('see');
+});
+
+test('daily check-ins: checklist photos with the word count; at the deadline one reminder goes WITHOUT approval and the owner gets a card that closes when photos come', async () => {
+  const ck = await import('../src/checkins.js');
+  const { localDate } = await import('../src/util.js');
+  await manager.create({ id: 'ckh', label: 'Hotel CK' });
+  fake('ckh');
+  await manager.update('ckh', { settings: { aiMode: 'approve', anytime: false, sendStart: '09:30', sendEnd: '19:00' } });
+  const r = await call('PUT', '/api/checkins', { items: [{ name: 'Mallesh', phone: '9866600001', what: 'the room checklist and the front desk checklist', account: 'ckh' }] });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.items[0].keyword, 'checklist');
+  assert.equal(r.data.items[0].minPhotos, 2);
+  const J = '919866600001@s.whatsapp.net';
+  const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const at = (hm) => Math.floor(localDate(`${day} ${hm}`).getTime() / 1000);
+  // other photos all day don't count; one captioned, one followed by the word, one on another hub number
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
+    ('ckh',$1,'CK1',false,$2,'image','dal ready'), ('ckh',$1,'CK2',false,$3,'image','Checklist rooms')`, [J, at('12:00'), at('19:00')]);
+  const before = (await ck.checkinStatus(localDate(`${day} 20:00`)))[0];
+  assert.equal(before.photos, 1);
+  // 21:05, still one: reminder queued (not a draft) from the hotel number, card for the owner
+  const late = localDate(`${day} 21:05`);
+  assert.equal(await ck.runCheckins(late), 1);
+  assert.equal(await ck.runCheckins(late), 0, 'only one reminder a day');
+  const [o] = await query(`SELECT status, source, payload FROM outbox WHERE account_id = 'ckh' AND to_jid = $1`, [J]);
+  assert.ok(['queued', 'sending', 'sent'].includes(o.status), 'no approval needed: ' + o.status);
+  assert.match(o.payload.text, /checklist/);
+  const card = (await call('GET', '/api/tasks?for=you')).data.find((t) => t.ref === 'checkin:mallesh');
+  assert.ok(card && /1\/2/.test(card.title), JSON.stringify(card?.title));
+  // the reminder is not held by the 19:00 sending-hours cut-off (it is the owner's own message)
+  const st = await outbox.queueStatus?.('ckh').catch(() => null);
+  if (st) assert.ok(!/Outside sending hours/.test(st.reason || ''), st.reason);
+  // the second photo (word in a message right after) → card closes
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
+    ('hiring',$1,'CK3',false,$2,'image',''), ('hiring',$1,'CK4',false,$3,'text','front desk check list')`, [J, at('21:20'), at('21:22')]);
+    await ck.runCheckins(localDate(`${day} 21:30`));
+  const [t] = await query(`SELECT status FROM tasks WHERE ref = 'checkin:mallesh'`);
+  assert.equal(t.status, 'done');
+  // MCP: the AI sees it; changing it needs the owner's words
+  assert.match(await mcp('daily_checkins', {}), /Mallesh .*DONE/);
+  assert.match(await mcp('daily_checkins', { items: [] }), /owner's own words/);
+  assert.equal((await call('PUT', '/api/checkins', { items: [{ name: 'X', phone: '12', account: 'ckh' }] })).status, 400);
+  await ck.setCheckins([]);
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'ckh' AND status IN ('draft','queued')`);
+  await manager.remove('ckh');
 });

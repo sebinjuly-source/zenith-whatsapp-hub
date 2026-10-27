@@ -48,6 +48,12 @@ async function main() {
       .catch((err) => logger.warn({ err: err.message }, 'morning summary failed'));
   }, 60 * 1000).unref();
 
+  // Daily check-ins (e.g. staff checklist photos): reminder at the deadline if they haven't come
+  const { runCheckins } = await import('./checkins.js');
+  setInterval(() => {
+    runCheckins().catch((err) => logger.warn({ err: err.message }, 'daily check-ins failed'));
+  }, 60 * 1000).unref();
+
   // Render's free plan sleeps after 15 min without incoming requests, which would drop WhatsApp.
   // Ping our own public URL every 10 min (counts as incoming traffic). Off when not on Render.
   if (config.publicUrl && process.env.RENDER && process.env.KEEP_AWAKE !== '0') {

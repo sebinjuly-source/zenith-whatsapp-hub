@@ -2182,10 +2182,11 @@ ${laterText(shown)}` : ''}`)) return;
     optOutWords: 'Opt-out words', webhookUrl: 'Notify URL' };
   async function viewSettings() {
     await loadAccounts(true);
-    const [pb, al, tr, pr, dflt, dg] = await Promise.all([
+    const [pb, al, tr, ck, pr, dflt, dg] = await Promise.all([
       api('/api/playbook').catch(() => ({ text: '' })),
       api('/api/alerts').catch(() => ({ phones: [] })),
       api('/api/trusted-recipients').catch(() => ({ phones: [] })),
+      api('/api/checkins').catch(() => ({ items: [] })),
       api('/api/pricing').catch(() => null),
       api('/api/settings/defaults').catch(() => null),
       api('/api/digest').catch(() => null),
@@ -2334,6 +2335,34 @@ ${laterText(shown)}` : ''}`)) return;
     }) },
       h('p', { class: 'muted', style: 'margin-top:0' }, 'AI, routine and campaign messages TO these people go out without your approval, from any number (e.g. your own phone, so a routine can send you a report). Only you can change this list — the AI cannot. Until you save it, it is your alert phone(s).'),
       h('div', { class: 'row' }, h('input', { type: 'text', name: 'phones', class: 'grow', style: 'width:auto', value: tr.phones.join(', '), placeholder: '9198…, comma separated' }), h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
+    const ckRow = (c = {}) => h('div', { class: 'card ck-row', style: 'margin:8px 0;padding:10px' },
+      h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' },
+        h('input', { name: 'name', placeholder: 'Name (e.g. Mallesh)', value: c.name || '', style: 'width:140px' }),
+        h('input', { name: 'phone', placeholder: 'Phone 91…', value: c.phone || '', style: 'width:140px' }),
+        h('input', { name: 'what', placeholder: 'What (e.g. room + front desk checklists)', value: c.what || '', class: 'grow', style: 'width:auto' })),
+      h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px;margin-top:6px' },
+        h('label', {}, 'Word ', h('input', { name: 'keyword', value: c.keyword || 'checklist', style: 'width:100px' })),
+        h('label', {}, 'Photos ', h('input', { name: 'minPhotos', type: 'number', min: 1, max: 10, value: c.minPhotos || 2, style: 'width:56px' })),
+        h('label', {}, 'By ', h('input', { name: 'deadline', type: 'time', value: c.deadline || '21:00' })),
+        h('label', {}, 'Remind from ', h('select', { name: 'account' }, state.accounts.map((x) => h('option', { value: x.id, selected: x.id === c.account }, x.label)))),
+        h('label', {}, h('input', { name: 'enabled', type: 'checkbox', checked: c.enabled !== false }), ' On')),
+      h('textarea', { name: 'text', rows: 2, style: 'width:100%;margin-top:6px', placeholder: 'Reminder message (blank = a standard one)' }, c.text || ''),
+      c.photos !== undefined ? h('p', { class: 'muted', style: 'margin:4px 0 0' }, `Today: ${c.photos}/${c.minPhotos} ${c.done ? '✅' : c.reminder ? '— reminder sent' : c.late ? '— late' : '— waiting'}`) : null,
+      h('button', { type: 'button', class: 'btn', style: 'margin-top:6px', onclick: (e) => e.target.closest('.ck-row').remove() }, 'Remove'));
+    const ckList = h('div', {}, (ck.items || []).map(ckRow));
+    const checkinForm = h('form', { onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const items = [...e.target.querySelectorAll('.ck-row')].map((r) => ({ name: r.querySelector('[name=name]').value, phone: r.querySelector('[name=phone]').value,
+        what: r.querySelector('[name=what]').value, keyword: r.querySelector('[name=keyword]').value, minPhotos: r.querySelector('[name=minPhotos]').value,
+        deadline: r.querySelector('[name=deadline]').value, account: r.querySelector('[name=account]').value, text: r.querySelector('[name=text]').value,
+        enabled: r.querySelector('[name=enabled]').checked }));
+      const r = await api('/api/checkins', { method: 'PUT', body: { items } });
+      toast(`Saved ${r.items.length} daily check-in(s)`);
+      viewSettings();
+    }) },
+      h('p', { class: 'muted', style: 'margin-top:0' }, 'Staff who send you a photo report every day. A photo counts when they write the word with it (caption, or a message right after). If not enough have come by the time, a reminder goes to them from the chosen number WITHOUT approval, and you get a card on the Board.'),
+      ckList,
+      h('div', { class: 'row', style: 'gap:6px' }, h('button', { type: 'button', class: 'btn', onclick: () => ckList.append(ckRow()) }, '+ Add person'), h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
     const digestForm = !dg ? null : h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
       const x = e.target;
@@ -2474,6 +2503,7 @@ ${laterText(shown)}` : ''}`)) return;
       h('div', { style: 'margin-top:20px' },
         fold('🔔 Connection alerts', alertForm),
         fold('✅ Send without approval to', trustedForm),
+        fold('📋 Daily check-ins (staff photo reports)', checkinForm),
         digestForm ? fold('☀️ Morning summary on WhatsApp', digestForm) : null,
         priceForm ? fold('💰 Meta message prices', priceForm) : null,
         fold('📘 Playbook (your rules for the AI)', playbookForm),

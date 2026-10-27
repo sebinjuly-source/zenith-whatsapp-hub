@@ -1435,6 +1435,26 @@ function buildServer(playbook = '', focus = '') {
     return `Now open: ${scope.label(c)}. The dashboard and every tool (by default) show only it from the next call.`;
   });
 
+  tool('daily_checkins', 'Daily check-ins: staff who must send a photo report every day (e.g. Mallesh: room + front desk checklists, with the word "checklist"). Shows today: photos received, deadline, whether the automatic reminder went. With items (and owner_asked) it REPLACES the whole list — read it first and keep the others. The reminder goes from the chosen number without approval at the deadline; the owner gets a card that closes when the photos come.', {
+    items: z.array(z.object({
+      name: z.string(), phone: z.string(), what: z.string().optional().describe('e.g. "the room checklist and the front desk checklist"'),
+      keyword: z.string().optional().describe('Word he writes with the photos (default "checklist")'), min_photos: z.number().int().optional(),
+      deadline: z.string().optional().describe('HH:MM, default 21:00'), account: z.string().describe('Number the reminder goes from'),
+      text: z.string().optional().describe('Reminder text'), enabled: z.boolean().optional(),
+    })).optional(),
+    owner_asked: z.string().optional().describe('The owner\'s own words asking for this change (required to change the list)'),
+  }, async (a) => {
+    const ck = await import('./checkins.js');
+    if (a.items) {
+      if (!a.owner_asked) return 'Changing daily check-ins needs the owner\'s own words (owner_asked) — only when the owner asked.';
+      const items = await ck.setCheckins(a.items.map((i) => ({ ...i, minPhotos: i.min_photos })));
+      await ai(null, `Daily check-ins set (owner asked: "${trim(a.owner_asked, 120)}"): ${items.map((c) => c.name).join(', ') || 'none'}`);
+    }
+    const st = await ck.checkinStatus();
+    if (!st.length) return 'No daily check-ins set.';
+    return st.map((c) => `${c.name} (+${c.phone}): ${c.photos}/${c.minPhotos} photo(s) with "${c.keyword}" today, by ${c.deadline} — ${c.done ? 'DONE' : c.reminder ? `reminder #${c.reminder.id} ${c.reminder.status}` : c.late ? 'LATE' : 'waiting'}${c.enabled ? '' : ' (off)'} · reminder from ${c.account}: "${trim(c.text, 120)}"`).join('\n');
+  });
+
   tool('upload_file', 'Hand the hub a file to send — a PDF (letter, invoice, certificate, voucher), image, poster or document from your computer or one you just made — as base64. Returns a hub link to use as attachment_url in send_message, bulk_send, send_to_list, edit_messages or templates (also works for Meta numbers; kept 90 days). You never need Google Drive or a public link to send a file. For one message, send_message(attachment_base64=…) does both in one step.', {
     base64: z.string().describe('The file content as base64 (a data: URL is fine)'),
     file_name: z.string().describe('With extension, e.g. "Certificate_of_Stay.pdf"'),
