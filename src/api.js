@@ -508,6 +508,12 @@ export function buildApp() {
     await act(req, null, `Call result for card #${req.params.id}: ${r.note.replace(/^📞 Call: /, '')}`);
     res.json(r);
   }));
+  api.get('/trusted-recipients', wrap(async (req, res) => res.json({ phones: await notify.trustedPhones() })));
+  api.put('/trusted-recipients', wrap(async (req, res) => {
+    const phones = await notify.setTrustedPhones(req.body?.phones);
+    await act(req, null, `Send without approval to: ${phones.map((p) => '+' + p).join(', ') || 'nobody'}`);
+    res.json({ phones });
+  }));
   api.get('/alerts', wrap(async (req, res) => res.json({ phones: await notify.alertPhones() })));
   api.put('/alerts', wrap(async (req, res) => {
     const phones = await notify.setAlertPhones(req.body?.phones);

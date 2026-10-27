@@ -27,6 +27,32 @@ export async function setAlertPhones(phones) {
   return alertPhones();
 }
 
+/**
+ * Recipients whose AI / campaign / routine messages go out WITHOUT approval, on any number (Settings → "Send without
+ * approval to"): the owner's own phones, so a routine can message the owner directly. Until the owner saves the list,
+ * it is the alert phones. Only the owner changes it (REST / Settings) — the AI cannot.
+ */
+export async function trustedPhones() {
+  const [r] = await query(`SELECT value FROM config WHERE key = 'trusted_recipients'`).catch(() => []);
+  const list = r ? r.value?.phones || [] : await alertPhones();
+  return [...new Set(list.map((p) => String(p).replace(/D/g, '')).filter((p) => p.length >= 8).map((p) => toJid(p).split('@')[0]))];
+}
+
+export async function setTrustedPhones(phones) {
+  const list = (Array.isArray(phones) ? phones : String(phones || '').split(',')).map((p) => String(p).trim()).filter(Boolean);
+  await query(
+    `INSERT INTO config (key, value) VALUES ('trusted_recipients', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [JSON.stringify({ phones: list })],
+  );
+  return trustedPhones();
+}
+
+/** Is this chat one of the trusted recipients (no approval needed)? */
+export async function isTrusted(jid) {
+  if (!jid || String(jid).endsWith('@g.us')) return false;
+  return (await trustedPhones()).includes(String(jid).split('@')[0]);
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**

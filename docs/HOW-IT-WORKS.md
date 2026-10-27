@@ -167,6 +167,10 @@ notes needed" card and the AI drafts the reply from it. AI: `add_task_note`, `ta
 **Safety net.** An "interested" candidate with no interview date, no follow-up date, no open card and no message
 either way for 3 days gets a "Follow up" card due now (history: "Added by the safety net"), at most 20 per check.
 
+**Send without approval to (trusted recipients).** Settings → "✅ Send without approval to": AI, routine and
+campaign messages TO these phones skip Drafts on every number (e.g. the owner's own phone, so a routine can send a
+report). Until saved it is the alert phones; only the owner changes it (`PUT /api/trusted-recipients`), never the AI.
+
 **Next step missing.** Anyone on a list who replied in the last 30 days, whose chat has been quiet 2 hours, with no
 stage beyond "interested", no interview date, no follow-up date, no open card and no draft waiting, gets an AI card
 "Next step missing: X — read the chat and record it" (at most 10 per check). It catches the owner answering by hand

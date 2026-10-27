@@ -2497,3 +2497,26 @@ test('replied but nothing recorded (owner answered by hand) → "Next step missi
   await board.syncBoard();
   assert.equal((await query(`SELECT count(*)::int n FROM tasks WHERE ref = $1`, [ref]))[0].n, 1, 'closed card not reopened without a new message');
 });
+
+test('trusted recipients (Settings → Send without approval to): AI / routine messages to the owner\'s phone skip Drafts; others still wait', async () => {
+  const outbox = await import('../src/outbox.js');
+  await manager.create({ id: 'trs', label: 'Trust' });
+  fake('trs');
+  await call('PUT', '/api/alerts', { phones: '9833300011' });
+  await query(`DELETE FROM config WHERE key = 'trusted_recipients'`);
+  assert.deepEqual((await call('GET', '/api/trusted-recipients')).data.phones, ['919833300011'], 'defaults to the alert phones');
+  const a = await outbox.enqueue({ account: 'trs', to: '919833300011', payload: { text: 'Routine report' }, source: 'mcp' });
+  assert.equal(a.status, 'queued', 'alert phone gets it without approval');
+  const b = await outbox.enqueue({ account: 'trs', to: '919833300099', payload: { text: 'Hi' }, source: 'mcp' });
+  assert.equal(b.status, 'draft', 'anyone else still needs approval');
+  const r = await call('PUT', '/api/trusted-recipients', { phones: '+91 98333 00099' });
+  assert.deepEqual(r.data.phones, ['919833300099']);
+  assert.equal((await outbox.enqueue({ account: 'trs', to: '919833300011', payload: { text: 'x' }, source: 'mcp' })).status, 'draft', 'once saved, only the saved list counts');
+  assert.equal((await outbox.enqueue({ account: 'trs', to: '919833300099', payload: { text: 'y' }, source: 'campaign' })).status, 'queued');
+  await call('PUT', '/api/trusted-recipients', { phones: '' });
+  assert.equal((await outbox.enqueue({ account: 'trs', to: '919833300099', payload: { text: 'z' }, source: 'mcp' })).status, 'draft', 'empty list → everything needs approval');
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'trs' AND status IN ('draft','queued')`);
+  await query(`DELETE FROM config WHERE key = 'trusted_recipients'`);
+  await call('PUT', '/api/alerts', { phones: '' });
+  await manager.remove('trs');
+});

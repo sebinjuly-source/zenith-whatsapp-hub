@@ -586,7 +586,7 @@ function buildServer(playbook = '', focus = '') {
 
   tool(
     'send_message',
-    'Send a WhatsApp message (optionally with a file from a URL: PDF, image, voucher). Respects the account\'s AI mode: in "approve" mode it becomes a draft the owner approves in the dashboard; in "auto" mode it is queued with the account\'s random delay, daily cap and sending hours. Tell the user which happened.',
+    'Send a WhatsApp message (optionally with a file from a URL: PDF, image, voucher). Respects the account\'s AI mode: in "approve" mode it becomes a draft the owner approves in the dashboard; in "auto" mode it is queued with the account\'s random delay, daily cap and sending hours. Messages to the owner\'s trusted recipients (Settings → Send without approval to; by default the alert phones) go out without approval in either mode: use this to send the owner a report or alert. Tell the user which happened.',
     {
       account: accountArg,
       to: chatArg,

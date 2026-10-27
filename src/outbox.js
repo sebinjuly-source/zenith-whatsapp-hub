@@ -17,6 +17,7 @@ import { createTask, refreshTask, fillTemplate, planRecipients } from './tasks.j
 import { hasAuthState } from './wa/auth-state.js';
 import { getTemplate, contactFields, fieldsIn } from './templates.js';
 import { localDate } from './util.js';
+import { isTrusted } from './notify.js';
 
 // Automated = random delay, daily cap, typing. Drafts (approval) only for AI and bulk; your rules are pre-approved.
 const AUTOMATED = ['mcp', 'campaign', 'rule'];
@@ -82,7 +83,8 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
     await assertCloudWindow(session, jid, payload);
     await assertNewChatAllowed(session, jid);
   }
-  const status = NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued';
+  // trusted recipients (the owner's own phones, Settings) get AI / routine messages without approval
+  const status = NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' && !(await isTrusted(jid)) ? 'draft' : 'queued';
   const [row] = await query(
     `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id, idem_key, expires_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz, now()),$9,$10,$11)
@@ -151,7 +153,7 @@ export async function bulkSend({ account, title, details, recipients, text, atta
       `INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note, scheduled_at, task_id, expires_at)
        VALUES ($1,$2,$3,$4,$5,0,$6,COALESCE($7::timestamptz, now()),$8,$9)`,
       [session.id, r.jid, JSON.stringify(payload), source,
-        NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' ? 'draft' : 'queued',
+        NEEDS_APPROVAL.includes(source) && session.settings.aiMode === 'approve' && !(await isTrusted(r.jid)) ? 'draft' : 'queued',
         title || null, scheduledAt || null, task.id, expires],
     );
     n++;

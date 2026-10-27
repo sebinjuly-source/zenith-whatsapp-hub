@@ -2182,9 +2182,10 @@ ${laterText(shown)}` : ''}`)) return;
     optOutWords: 'Opt-out words', webhookUrl: 'Notify URL' };
   async function viewSettings() {
     await loadAccounts(true);
-    const [pb, al, pr, dflt, dg] = await Promise.all([
+    const [pb, al, tr, pr, dflt, dg] = await Promise.all([
       api('/api/playbook').catch(() => ({ text: '' })),
       api('/api/alerts').catch(() => ({ phones: [] })),
+      api('/api/trusted-recipients').catch(() => ({ phones: [] })),
       api('/api/pricing').catch(() => null),
       api('/api/settings/defaults').catch(() => null),
       api('/api/digest').catch(() => null),
@@ -2326,6 +2327,13 @@ ${laterText(shown)}` : ''}`)) return;
     }) },
       h('p', { class: 'muted', style: 'margin-top:0' }, 'A WhatsApp (from another connected number) when a number is logged out or offline for 15+ minutes. Use a personal number that is not one of the hub numbers.'),
       h('div', { class: 'row' }, h('input', { type: 'text', name: 'phones', class: 'grow', style: 'width:auto', value: al.phones.join(', '), placeholder: '9198…, comma separated' }), h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
+    const trustedForm = h('form', { onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const r = await api('/api/trusted-recipients', { method: 'PUT', body: { phones: e.target.phones.value } });
+      toast(r.phones.length ? 'No approval needed for ' + r.phones.map((p) => '+' + p).join(', ') : 'Every AI message needs approval');
+    }) },
+      h('p', { class: 'muted', style: 'margin-top:0' }, 'AI, routine and campaign messages TO these people go out without your approval, from any number (e.g. your own phone, so a routine can send you a report). Only you can change this list — the AI cannot. Until you save it, it is your alert phone(s).'),
+      h('div', { class: 'row' }, h('input', { type: 'text', name: 'phones', class: 'grow', style: 'width:auto', value: tr.phones.join(', '), placeholder: '9198…, comma separated' }), h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
     const digestForm = !dg ? null : h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
       const x = e.target;
@@ -2465,6 +2473,7 @@ ${laterText(shown)}` : ''}`)) return;
       form,
       h('div', { style: 'margin-top:20px' },
         fold('🔔 Connection alerts', alertForm),
+        fold('✅ Send without approval to', trustedForm),
         digestForm ? fold('☀️ Morning summary on WhatsApp', digestForm) : null,
         priceForm ? fold('💰 Meta message prices', priceForm) : null,
         fold('📘 Playbook (your rules for the AI)', playbookForm),
