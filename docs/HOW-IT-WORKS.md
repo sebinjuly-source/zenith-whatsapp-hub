@@ -145,7 +145,7 @@ through MCP — an AI saying "I can't, please do it yourself" is a gap to fix, n
 Useful asks: "who replied today?", "draft replies to the chefs who wrote", "move X to date_given Sunday 11 am",
 "run a health check on the Meta number", "what happened to the message to 98xxxxxxx?", "schedule batch 8 for 9 am".
 
-AI tools: `upload_file, open_file, unsend_message, list_accounts, list_chats, get_messages, search_messages, get_contact, update_contact, find_person,
+AI tools: `upload_file, open_file, catalog_file, find_files, storage_status, unsend_message, list_accounts, list_chats, get_messages, search_messages, get_contact, update_contact, find_person,
 send_message (text, files, buttons, wa_template, schedule_at), bulk_send, list_outbox, approve_draft, reject_draft, edit_draft (new wording, keeps picture and date), reschedule_messages (ids, at), move_messages,
 approve_task, list_tasks (kind=reply|followup|visit|scheduled|reminder, for=you|ai, due_now), create_task / update_task (for, priority), add_task_note, task_history, list_lists, list_members, import_list,
 send_to_list (wa_template, schedule_at, attachment_url — one image for everyone, each person's message as its caption), set_followup, update_list_member (visit_at, available_from, follow_up_at), pipeline, set_pipeline, known_candidates,
@@ -182,6 +182,22 @@ either way for 3 days gets a "Follow up" card due now (history: "Added by the sa
 `upload_file` once and reuse the returned link (`/f/<token>/<name>`, unguessable, kept 90 days, table `hub_files`) in any
 send. Scripts: `curl -H "x-api-key: …" --data-binary @file.pdf "<hub>/api/files?name=file.pdf"` → `{ url }`. The send
 queue reads hub links straight from the database (`files.js`, `media.js loadOutgoing`).
+
+**Drafts on the phone (31 Oct).** Settings → "📱 Drafts on the phone" (numbers, campaigns; on for Seema's number). An immediate
+reply the AI drafts there (they wrote in the last 24 h; not scheduled; not bulk) also goes to that phone: a note in its own
+"Message yourself" chat (pinned) with the text and a wa.me link that opens their chat with it already typed, and their chat
+marked unread. WhatsApp keeps unsent typing per device, so no linked device can type into the phone's box itself. Sent from
+the phone → the hub draft closes ("Answered on the phone"); the note deleted → draft dropped; approved/rejected in the hub →
+note removed. Checked every minute (`phonedrafts.js`, table `phone_drafts`, config `phone_drafts`).
+
+**Files: saved, filed, cleaned up (31 Oct).** WhatsApp deletes a file from its servers after ~2 weeks and the phone often
+won't resend it, so auto-save (Settings, per number; on for the hotel and Seema; 1-to-1 chats only) keeps a copy; at start-up
+the last 2 weeks are rescued. The AI files each saved file (`catalog_file`: title, folder, keep / temporary / delete;
+`find_files`, `storage_status`; table `media_catalog`). Over the storage limit (config `storage.limitMb`, 900 MB) the hub
+deletes "temporary" files oldest first, never "keep" or unfiled ones, then cards the owner. Links to saved files point at
+the stored copy (`hub_files.ref`), never a second copy. The evening review routine (20:45) checks Mallesh's checklists
+by looking at the photos (`daily_checkins mark_received`), cards problems it sees, files the day's files and turns
+promises in all chats into cards; it messages the owner only for things that cannot wait for the 06:00 summary.
 
 **Daily check-ins (staff photo reports).** Settings → "📋 Daily check-ins": a staff member (e.g. Mallesh: the room
 checklist + the front desk checklist) must send N photos a day with a word (default "checklist" — in the caption or a
