@@ -101,6 +101,8 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
   await query(`UPDATE outbox SET role = COALESCE($4::text, ${roleOf('$2', '$3')}) WHERE id = $1 AND role IS NULL`, [row.id, session.id, jid, role || null]).catch(() => {});
   if (taskId) await refreshTask(taskId);
   if (status === 'queued') wake(session.id);
+  // An immediate reply drafted on a number with "drafts on the phone" also goes to that phone (not awaited)
+  if (status === 'draft') import('./phonedrafts.js').then((p) => p.offer(row, manager)).catch(() => {});
   // A single message for later shows on the Board until it goes out
   if (!taskId && scheduledAt && new Date(scheduledAt) > new Date(Date.now() + 15 * 60000)) {
     await import('./board.js').then((b) => b.syncScheduled()).catch(() => {});

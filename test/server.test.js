@@ -1926,6 +1926,9 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   const d2 = await run('send_message', { account: 'mcpall', to: P, text: 'Kal 11 baje aaiye', schedule_at: '2026-12-09 10:00' });
   await run('upload_file', { base64: Buffer.from('%PDF-1.4 toolbox').toString('base64'), file_name: 'Toolbox.pdf' });
   await run('daily_checkins', {});
+  await run('find_files', { untagged: true });
+  await run('storage_status', {});
+  await run('catalog_file', { account: 'mcpall', chat: P, message_id: 'M2', title: 'Toolbox CV', folder: 'Candidate resumes', keep: 'keep' });
   await run('list_outbox', { account: 'mcpall', status: 'draft' });
   await run('edit_draft', { id: idOf(d1), text: 'Namaste Mr Ravi, kab aa sakte hain?' });
   await run('reschedule_messages', { ids: [idOf(d2)], at: '2026-12-10 10:00' });
@@ -2647,4 +2650,133 @@ test('daily check-ins: checklist photos with the word count; at the deadline one
   await ck.setCheckins([]);
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'ckh' AND status IN ('draft','queued')`);
   await manager.remove('ckh');
+});
+
+test('drafts on the phone: an immediate reply drafted on an enabled number goes to its "Message yourself" chat with a tap-to-type link; phone and hub stay in step', async () => {
+  const pdm = await import('../src/phonedrafts.js');
+  await manager.create({ id: 'pdx', label: 'Seema PD' });
+  const s = fake('pdx');
+  s.account.phone = '919800077700';
+  const SELF = '919800077700@s.whatsapp.net';
+  const mods = [];
+  const revokes = [];
+  s.sock = { chatModify: async (m, jid) => mods.push({ m, jid }), sendMessage: async (jid, c) => { if (c.delete) revokes.push(c.delete.id); return {}; } };
+  await pdm.setPhoneDrafts({ enabled: true, accounts: ['pdx'], campaigns: [] });
+  const now = Math.floor(Date.now() / 1000);
+  const G1 = '919800077701@s.whatsapp.net';
+  const G2 = '919800077702@s.whatsapp.net';
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
+    ('pdx',$1,'PD1',false,$3,'text','Room available tonight?'), ('pdx',$2,'PD2',false,$3,'text','Rate for 2 nights?')`, [G1, G2, now - 120]);
+  const before = sent.length;
+  await mcp('send_message', { account: 'pdx', to: G1, text: 'Yes, a deluxe room is free tonight. Shall I hold it for you?' });
+  const note = await until(() => sent.slice(before).find((x) => x.account === 'pdx' && x.jid === SELF), 5000);
+  assert.ok(note, 'note sent to the own chat of the number');
+  assert.match(note.content.text, /Draft reply/);
+  assert.match(note.content.text, /https:\/\/wa\.me\/919800077701\?text=Yes%2C%20a%20deluxe/);
+  assert.ok(mods.some((x) => x.jid === SELF && x.m.pin), 'self chat pinned');
+  assert.ok(mods.some((x) => x.jid === G1 && x.m.markRead === false), 'their chat marked unread on the phone');
+  const [d1] = await until(async () => { const r = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1 AND p.note_id IS NOT NULL`, [G1]); return r.length ? r : null; }, 5000);
+  // answered on the phone (a message of ours the hub did not send) → hub draft closes, note removed
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('pdx',$1,'PHONE1',true,$2,'text','Yes sir, holding it')`, [G1, now + 5]);
+  const r1 = await pdm.syncPhoneDrafts(manager);
+  assert.equal(r1.answered, 1);
+  const [o1] = await query(`SELECT status, error FROM outbox WHERE id = $1`, [d1.id]);
+  assert.equal(o1.status, 'rejected');
+  assert.match(o1.error, /Answered on the phone/);
+  assert.ok(revokes.includes(d1.note_id), 'note deleted from the phone');
+  // rejected in the hub → note removed from the phone
+  await mcp('send_message', { account: 'pdx', to: G2, text: 'Dear Mr Ravi, 2 nights are possible.' });
+  const [d2] = await until(async () => { const r = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1 AND p.note_id IS NOT NULL`, [G2]); return r.length ? r : null; }, 5000);
+  await query(`UPDATE outbox SET status = 'rejected' WHERE id = $1`, [d2.id]);
+  const r2 = await pdm.syncPhoneDrafts(manager);
+  assert.equal(r2.removed, 1);
+  assert.ok(revokes.includes(d2.note_id));
+  // a message for later, or to someone who has not written in 24 h, stays in the hub only
+  await mcp('send_message', { account: 'pdx', to: G2, text: 'Reminder for tomorrow', schedule_at: '2099-01-01 10:00' });
+  await mcp('send_message', { account: 'pdx', to: '919800077703', text: 'Hello, cold' });
+  await pdm.syncPhoneDrafts(manager);
+  assert.equal((await query(`SELECT count(*)::int n FROM phone_drafts p JOIN outbox o ON o.id = p.outbox_id WHERE o.account_id = 'pdx' AND (o.scheduled_at > now() + interval '1 day' OR o.to_jid = '919800077703@s.whatsapp.net')`))[0].n, 0);
+  // the note deleted on the phone → the draft is dropped
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('pdx',$1,'PD3',false,$2,'text','And breakfast?')`, [G2, now + 10]);
+  await mcp('send_message', { account: 'pdx', to: G2, text: 'Breakfast is included.' });
+  const [d3] = await until(async () => { const r = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1 AND p.closed_at IS NULL AND p.note_id IS NOT NULL`, [G2]); return r.length ? r : null; }, 5000);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body, deleted) VALUES ('pdx',$1,$2,true,$3,'text','note',true) ON CONFLICT DO NOTHING`, [SELF, d3.note_id, now]);
+  await query(`UPDATE messages SET deleted = true WHERE account_id = 'pdx' AND id = $1`, [d3.note_id]);
+  const r3 = await pdm.syncPhoneDrafts(manager);
+  assert.equal(r3.dropped, 1);
+  assert.equal((await query(`SELECT status FROM outbox WHERE id = $1`, [d3.id]))[0].status, 'rejected');
+  // settings API
+  const st = await call('PUT', '/api/phone-drafts', { enabled: false });
+  assert.equal(st.data.enabled, false);
+  assert.deepEqual(st.data.accounts, ['pdx']);
+  await pdm.setPhoneDrafts({ enabled: true, accounts: [] });
+  s.sock = null;
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'pdx' AND status IN ('draft','queued')`);
+  await manager.remove('pdx');
+});
+
+test('check-ins: misspelt word counts ("chechlist"), the same photo sent to two numbers counts once, and the AI can mark today received after looking', async () => {
+  const ck = await import('../src/checkins.js');
+  const { localDate } = await import('../src/util.js');
+  await manager.create({ id: 'ck2', label: 'CK2' });
+  fake('ck2');
+  await ck.setCheckins([{ name: 'Mallesh', phone: '9866600009', account: 'ck2' }]);
+  const J = '919866600009@s.whatsapp.net';
+  const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const at = (hm) => Math.floor(localDate(`${day} ${hm}`).getTime() / 1000);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body, media) VALUES
+    ('ck2',$1,'S1',false,$2,'image','sir today chechlist sir','{"fileSha256":"AAA"}'),
+    ('hiring',$1,'S2',false,$2,'image','sir today chechlist sir','{"fileSha256":"AAA"}'),
+    ('ck2',$1,'S3',false,$3,'image','Today work','{"fileSha256":"BBB"}')`, [J, at('20:30'), at('20:31')]);
+  const t = localDate(`${day} 20:40`);
+  assert.equal((await ck.photosToday((await ck.getCheckins())[0], t)).count, 1, 'misspelt word counts; same photo on two numbers once; "Today work" alone does not');
+  // the AI looked at the photos: both checklists are there → no reminder at 21:00
+  await ck.markReceived('mallesh', 'room + front desk checklists at 20:30', t);
+  assert.equal(await ck.runCheckins(localDate(`${day} 21:05`)), 0, 'no reminder once marked received');
+  assert.match(await mcp('daily_checkins', {}), /Mallesh/);
+  // rename a person on a list (the real name they sign with)
+  const imp = await call('POST', '/api/lists/import', { account: 'ck2', name: 'Rename batch', role: 'Win-back', members: [{ phone: '9866600010', name: 'Suvijaya' }] });
+  assert.match(await mcp('update_list_member', { list: String(imp.data.list.id), phone: '9866600010', name: 'Sujit Dey', campaign: 'all' }), /Sujit Dey/);
+  await ck.setCheckins([]);
+  await query(`DELETE FROM config WHERE key = 'checkin_marks'`);
+  await manager.remove('ck2');
+});
+
+test('file catalog: the AI files saved photos (title, folder, keep/temporary/delete), finds them later; links reuse the saved copy; storage cleanup deletes temporary files first', async () => {
+  const cat = await import('../src/catalog.js');
+  await manager.create({ id: 'fc', label: 'Files cat' });
+  const s = fake('fc');
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  s.downloadMedia = async () => png;
+  const now = Math.floor(Date.now() / 1000);
+  const J = '919811300001@s.whatsapp.net';
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body, media) VALUES
+    ('fc',$1,'F1',false,$2,'image','aadhaar','{"kind":"imageMessage","mimetype":"image/png","size":600000}'),
+    ('fc',$1,'F2',false,$3,'image','lunch','{"kind":"imageMessage","mimetype":"image/png","size":700000}'),
+    ('fc',$1,'F3',false,$4,'image','fwd','{"kind":"imageMessage","mimetype":"image/png","size":500000}')`, [J, now - 300, now - 200, now - 100]);
+  for (const id of ['F1', 'F2', 'F3']) await mcp('save_media', { account: 'fc', chat: J, message_id: id });
+  // opening a saved file twice makes one link, no second copy in the database
+  const o1 = await mcp('open_file', { account: 'fc', chat: J, message_id: 'F1' });
+  await mcp('open_file', { account: 'fc', chat: J, message_id: 'F1' });
+  const links = await query(`SELECT data IS NULL AS no_copy FROM hub_files WHERE ref = (SELECT media_saved FROM messages WHERE account_id = 'fc' AND id = 'F1')`);
+  assert.equal(links.length, 1);
+  assert.equal(links[0].no_copy, true);
+  const link = (typeof o1 === 'string' ? o1 : '').match(/attachment_url to send it on: (\S+)/)?.[1];
+  if (link) assert.equal((await fetch(base + link.replace(/^https?:\/\/[^/]+/, ''))).status, 200);
+  assert.match(await mcp('find_files', { untagged: true, account: 'fc' }), /F1[\s\S]*not filed|not filed[\s\S]*F1/);
+  assert.match(await mcp('catalog_file', { account: 'fc', chat: J, message_id: 'F1', title: 'Ravi K — Aadhaar card', folder: 'Guest IDs', keep: 'keep' }), /Filed/);
+  await mcp('catalog_file', { account: 'fc', chat: J, message_id: 'F2', title: 'Lunch photo', folder: 'Food & kitchen', keep: 'temporary' });
+  assert.match(await mcp('catalog_file', { account: 'fc', chat: J, message_id: 'F3', title: 'Forwarded meme', folder: 'Other', keep: 'delete' }), /stored copy deleted/);
+  assert.equal((await query(`SELECT media_saved FROM messages WHERE account_id = 'fc' AND id = 'F3'`))[0].media_saved, null);
+  assert.match(await mcp('find_files', { query: 'aadhaar' }), /Ravi K — Aadhaar card/);
+  assert.match(await mcp('storage_status', {}), /Saved files: \d+/);
+  // over the limit: temporary goes first, "keep" stays
+  await query(`INSERT INTO config (key, value) VALUES ('storage', '{"limitMb": 0.5}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+  const r = await cat.cleanupStorage();
+  assert.ok(r.deleted >= 1);
+  const left = await query(`SELECT id, media_saved IS NOT NULL AS saved FROM messages WHERE account_id = 'fc' ORDER BY id`);
+  assert.deepEqual(left.map((x) => [x.id, x.saved]), [['F1', true], ['F2', false], ['F3', false]]);
+  await query(`DELETE FROM config WHERE key = 'storage'`);
+  await query(`DELETE FROM tasks WHERE ref = 'storage:full'`);
+  await manager.remove('fc');
 });

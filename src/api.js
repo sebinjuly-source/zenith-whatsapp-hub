@@ -529,6 +529,13 @@ export function buildApp() {
       : await saveFile({ base64: body.base64, fileName: body.fileName || body.name, mimetype: body.mimetype, by: actorOf(req) });
     res.json(f);
   }));
+  // Drafts on the phone: { enabled, accounts: [ids], campaigns: [names] (empty = all) }
+  api.get('/phone-drafts', wrap(async (req, res) => res.json(await (await import('./phonedrafts.js')).getPhoneDrafts())));
+  api.put('/phone-drafts', wrap(async (req, res) => {
+    const r = await (await import('./phonedrafts.js')).setPhoneDrafts(req.body || {});
+    await act(req, null, `Drafts on the phone: ${r.enabled ? 'on' : 'off'} for ${r.accounts.join(', ') || 'no numbers'}${r.campaigns.length ? ` (campaigns: ${r.campaigns.join(', ')})` : ' (all campaigns)'}`);
+    res.json(r);
+  }));
   // Daily check-ins (staff photo reports): [{ name, phone, what, keyword, minPhotos, deadline, account, text, enabled }]
   api.get('/checkins', wrap(async (req, res) => res.json({ items: await (await import('./checkins.js')).checkinStatus() })));
   api.put('/checkins', wrap(async (req, res) => {

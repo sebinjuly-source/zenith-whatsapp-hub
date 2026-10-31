@@ -20,8 +20,18 @@ export async function saveFile({ base64, buffer, fileName, mimetype, by = 'ai' }
   const type = mimetype || mime.lookup(name) || 'application/octet-stream';
   const token = crypto.randomBytes(16).toString('hex');
   await query(`INSERT INTO hub_files (token, name, mimetype, data, size, created_by) VALUES ($1,$2,$3,$4,$5,$6)`, [token, name, type, data, data.length, by]);
-  await query(`DELETE FROM hub_files WHERE created_at < now() - interval '90 days'`).catch(() => {});
+  await query(`DELETE FROM hub_files WHERE data IS NOT NULL AND created_at < now() - interval '90 days'`).catch(() => {});
   return { token, name, mimetype: type, size: data.length, url: `${config.publicUrl || ''}/f/${token}/${encodeURIComponent(name)}` };
+}
+
+/** A link for a file already saved from a message (no second copy): the same link every time. */
+export async function linkFor({ ref, fileName, mimetype, size = null, by = 'ai' }) {
+  const name = safeName(fileName);
+  const [have] = await query(`SELECT token, name FROM hub_files WHERE ref = $1 LIMIT 1`, [ref]);
+  const token = have?.token || crypto.randomBytes(16).toString('hex');
+  if (!have) await query(`INSERT INTO hub_files (token, name, mimetype, ref, size, created_by) VALUES ($1,$2,$3,$4,$5,$6)`, [token, name, mimetype || 'application/octet-stream', ref, size, by]);
+  const shown = have?.name || name;
+  return { token, name: shown, mimetype, size, url: `${config.publicUrl || ''}/f/${token}/${encodeURIComponent(shown)}` };
 }
 
 /** A hub file link (/f/<token>/…) → its token, else null. */
@@ -36,6 +46,11 @@ export async function pdfText(buffer, max = 20000) {
 }
 
 export async function getFile(token) {
-  const [f] = await query(`SELECT name, mimetype, data FROM hub_files WHERE token = $1`, [token]);
-  return f ? { fileName: f.name, mimetype: f.mimetype, buffer: Buffer.from(f.data) } : null;
+  const [f] = await query(`SELECT name, mimetype, data, ref FROM hub_files WHERE token = $1`, [token]);
+  if (!f) return null;
+  if (!f.data && f.ref) {
+    const got = await (await import('./media.js')).getMedia(f.ref);
+    return { fileName: f.name, mimetype: f.mimetype || got.mimetype, buffer: got.buffer };
+  }
+  return { fileName: f.name, mimetype: f.mimetype, buffer: Buffer.from(f.data) };
 }

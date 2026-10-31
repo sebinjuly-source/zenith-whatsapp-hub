@@ -369,6 +369,36 @@ CREATE TABLE IF NOT EXISTS campaigns (
   archived TIMESTAMPTZ
 );
 -- every saved version of a playbook (main = key 'playbook', campaign = 'playbook:<name>'): history + restore
+-- AI drafts also put on the number's phone (note in "Message yourself" with a tap-to-type link): phonedrafts.js
+-- A hub link can point at a file already saved from a message (ref) instead of a second copy (data)
+ALTER TABLE hub_files ADD COLUMN IF NOT EXISTS ref TEXT;
+ALTER TABLE hub_files ALTER COLUMN data DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS hub_files_ref ON hub_files (ref);
+-- What each saved file is (AI files it): catalog.js
+CREATE TABLE IF NOT EXISTS media_catalog (
+  account_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  chat_jid TEXT NOT NULL,
+  title TEXT,
+  folder TEXT,
+  keep TEXT NOT NULL DEFAULT 'keep',
+  notes TEXT,
+  size INTEGER,
+  tagged_by TEXT,
+  tagged_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, message_id)
+);
+
+CREATE TABLE IF NOT EXISTS phone_drafts (
+  outbox_id BIGINT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  to_jid TEXT NOT NULL,
+  note_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  closed_at TIMESTAMPTZ,
+  outcome TEXT
+);
+
 CREATE TABLE IF NOT EXISTS playbook_versions (
   id BIGSERIAL PRIMARY KEY,
   key TEXT NOT NULL,

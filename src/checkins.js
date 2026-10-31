@@ -58,20 +58,69 @@ export async function setCheckins(items) {
   return list;
 }
 
-/** Photos with the word that came today (on any hub number): { count, last }. */
+/** Edit distance (small strings only). */
+function distance(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  }
+  return d[a.length][b.length];
+}
+
+/**
+ * Does this text contain the word, allowing for how staff really type it (30 Oct: Mallesh writes "chechlist",
+ * "check list")? Words and word pairs are compared with spaces removed; up to 2 letters may differ for words of
+ * 7+ letters (1 for shorter ones).
+ */
+export function hasWord(text, keyword) {
+  const kw = String(keyword || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!kw) return false;
+  const words = String(text || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const allowed = kw.length >= 7 ? 2 : kw.length >= 4 ? 1 : 0;
+  const cands = [...words, ...words.slice(1).map((w, i) => words[i] + w)];
+  return cands.some((w) => w.includes(kw) || (Math.abs(w.length - kw.length) <= allowed && distance(w, kw) <= allowed));
+}
+
+/**
+ * Photos with the word that came today (on any hub number): { count, last, marked }. The same photo sent to two
+ * numbers counts once (same file fingerprint). "marked" = the AI looked at the photos and marked today received
+ * (daily_checkins mark_received) — counts as done whatever the captions say.
+ */
 export async function photosToday(c, now = new Date()) {
-  const start = Math.floor(localDate(`${today(now)} 00:00`).getTime() / 1000);
+  const day = today(now);
+  const start = Math.floor(localDate(`${day} 00:00`).getTime() / 1000);
   const jid = `${c.phone}@s.whatsapp.net`;
-  const kw = `%${c.keyword.replace(/\s+/g, '')}%`; // spaces ignored: "check list" counts
-  const [r] = await query(
-    `SELECT count(DISTINCT p.id)::int AS n, max(p.ts) AS last FROM messages p
-     WHERE p.chat_jid = $1 AND NOT p.from_me AND p.ts >= $2 AND p.type IN ('image','document')
-       AND (replace(lower(coalesce(p.body,'')), ' ', '') LIKE $3
-            OR EXISTS (SELECT 1 FROM messages t WHERE t.chat_jid = p.chat_jid AND t.account_id = p.account_id AND NOT t.from_me
-                       AND replace(lower(coalesce(t.body,'')), ' ', '') LIKE $3 AND t.ts >= p.ts AND t.ts <= p.ts + 900))`,
-    [jid, start, kw],
+  const rows = await query(
+    `SELECT account_id, id, ts, type, body, media->>'fileSha256' AS sha FROM messages
+     WHERE chat_jid = $1 AND NOT from_me AND ts >= $2 AND ts <= $3 ORDER BY ts`,
+    [jid, start, Math.floor(now.getTime() / 1000)],
   );
-  return { count: r?.n || 0, last: r?.last ? Number(r.last) : null };
+  const photos = new Map();
+  for (const p of rows) {
+    if (!['image', 'document'].includes(p.type)) continue;
+    // the word in its caption, or in a message of theirs on that number within 15 minutes after it
+    const named = hasWord(p.body, c.keyword) || rows.some((t) => t.account_id === p.account_id && t.ts >= p.ts && t.ts <= Number(p.ts) + 900 && t.id !== p.id && hasWord(t.body, c.keyword));
+    if (named) photos.set(p.sha || p.id, Number(p.ts));
+  }
+  const [m] = await query(`SELECT value FROM config WHERE key = 'checkin_marks'`).catch(() => []);
+  const marked = m?.value?.[c.id]?.date === day ? m.value[c.id] : null;
+  const last = photos.size ? Math.max(...photos.values()) : null;
+  return { count: marked ? Math.max(photos.size, c.minPhotos) : photos.size, last, marked };
+}
+
+/** The AI looked at today's photos and saw the checklists (spelling or captions aside): count today as received. */
+export async function markReceived(id, note = '', now = new Date()) {
+  const c = (await getCheckins()).find((x) => x.id === id || x.name.toLowerCase() === String(id).toLowerCase());
+  if (!c) throw new Error(`No daily check-in "${id}"`);
+  const [m] = await query(`SELECT value FROM config WHERE key = 'checkin_marks'`).catch(() => []);
+  const marks = { ...(m?.value || {}), [c.id]: { date: today(now), note: String(note).slice(0, 300), at: now.toISOString() } };
+  await query(
+    `INSERT INTO config (key, value) VALUES ('checkin_marks', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [JSON.stringify(marks)],
+  );
+  await runCheckins(now); // closes the owner's card at once
+  return c;
 }
 
 /** Today's state of every check-in (for the AI, the dashboard and the morning summary). */

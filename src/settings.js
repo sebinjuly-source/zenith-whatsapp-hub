@@ -54,6 +54,9 @@ export const DEFAULT_SETTINGS = {
   // default — roughly the last few months), 'none' (only new messages from now on). Only used at link time.
   historyMode: 'full',
   storeGroups: true,
+  // Turn on for numbers whose files matter (31 Oct: on for the hotel and Seema): WhatsApp deletes a file from its
+  // servers after ~2 weeks and the phone often won't send it again, so unsaved photos, IDs and PDFs become
+  // unopenable. Only 1-to-1 chats are saved (never groups), up to autosaveMaxMb. Off by default to spare storage.
   autosaveImages: false,
   autosaveDocuments: false,
   // Only autosave media from people you have chatted with (skips businesses blasting brochures).

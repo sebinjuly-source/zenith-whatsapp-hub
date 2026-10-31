@@ -65,9 +65,53 @@ export async function getMedia(ref) {
   return { buffer: Buffer.from(rows[0].data), mimetype: rows[0].mimetype };
 }
 
+/** Delete a stored copy (Supabase object or media_files row). */
+export async function deleteMedia(ref) {
+  if (ref.startsWith('sb:')) {
+    const path = ref.slice(3);
+    const res = await fetch(`${config.supabase.url}/storage/v1/object/${config.supabase.bucket}/${encodeURI(path)}`, {
+      method: 'DELETE', headers: sbHeaders(), signal: AbortSignal.timeout(30000),
+    });
+    if (!res.ok && res.status !== 404) throw new Error(`Supabase storage delete failed: ${res.status}`);
+    return;
+  }
+  await query('DELETE FROM media_files WHERE path = $1', [ref.replace(/^db:/, '')]);
+}
+
 export function mediaPath(accountId, chatJid, msgId, mimetype, fileName) {
   const ext = (fileName && fileName.includes('.') ? fileName.split('.').pop() : mime.extension(mimetype || '')) || 'bin';
   return `${accountId}/${chatJid.split('@')[0]}/${msgId}.${ext.replace(/[^a-z0-9]/gi, '').slice(0, 8)}`;
+}
+
+/**
+ * Keep a copy of recent files people sent (1-to-1 chats, images + documents) that were not saved yet, before
+ * WhatsApp's link expires (~2 weeks). Runs once at start-up on the server holding each number, slowly (one at a
+ * time); later files are saved as they arrive (autosave). Returns { saved, failed }.
+ */
+export async function rescueRecentMedia(manager, { days = 14, limit = 3000 } = {}) {
+  const since = Math.floor(Date.now() / 1000) - days * 86400;
+  let saved = 0;
+  let failed = 0;
+  for (const s of manager.sessions.values()) {
+    if (!s.saveMedia || s.status !== 'open') continue;
+    const types = [s.settings?.autosaveImages && 'image', s.settings?.autosaveDocuments && 'document'].filter(Boolean);
+    if (!types.length) continue; // this number doesn't keep files (Settings → auto-save)
+    const rows = await query(
+      `SELECT chat_jid, id FROM messages WHERE account_id = $1 AND NOT from_me AND media IS NOT NULL AND media_saved IS NULL
+         AND type = ANY($4::text[]) AND chat_jid NOT LIKE '%@g.us' AND ts > $2 ORDER BY ts DESC LIMIT $3`,
+      [s.id, since, limit, types],
+    );
+    for (const r of rows) {
+      try {
+        await s.saveMedia(r.chat_jid, r.id);
+        saved++;
+      } catch {
+        failed++;
+      }
+      await new Promise((ok) => setTimeout(ok, 300));
+    }
+  }
+  return { saved, failed };
 }
 
 /**

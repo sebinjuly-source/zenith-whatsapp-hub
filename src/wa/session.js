@@ -619,7 +619,7 @@ export class Session extends EventEmitter {
       const wanted = (isImage && settings.autosaveImages) || (isDoc && settings.autosaveDocuments);
       const sizeOk = !r.media.size || r.media.size <= settings.autosaveMaxMb * 1024 * 1024;
       const notSpam = (r.forwardScore || 0) < 4;
-      if (wanted && sizeOk && notSpam) {
+      if (wanted && sizeOk && notSpam && !isJidGroup(r.chatJid)) {
         const known = !settings.autosaveKnownOnly || (await store.hasChattedWith(this.id, r.chatJid));
         if (known) await this.saveMedia(r.chatJid, r.id);
       }

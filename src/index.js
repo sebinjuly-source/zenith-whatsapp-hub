@@ -48,10 +48,21 @@ async function main() {
       .catch((err) => logger.warn({ err: err.message }, 'morning summary failed'));
   }, 60 * 1000).unref();
 
+  // Keep copies of the last 2 weeks' files people sent, before WhatsApp's links expire (once, a few minutes after start)
+  setTimeout(() => {
+    import('./media.js').then((m) => m.rescueRecentMedia(manager))
+      .then((r) => r.saved + r.failed && logger.info(r, 'recent files kept'))
+      .catch((err) => logger.warn({ err: err.message }, 'keeping recent files failed'));
+  }, 3 * 60 * 1000).unref();
+
   // Daily check-ins (e.g. staff checklist photos): reminder at the deadline if they haven't come
   const { runCheckins } = await import('./checkins.js');
+  const { syncPhoneDrafts } = await import('./phonedrafts.js');
   setInterval(() => {
     runCheckins().catch((err) => logger.warn({ err: err.message }, 'daily check-ins failed'));
+    syncPhoneDrafts(manager).catch((err) => logger.warn({ err: err.message }, 'phone drafts failed'));
+    // once an hour: keep saved files under the storage limit (deletes "temporary" files first)
+    if (new Date().getMinutes() === 7) import('./catalog.js').then((c) => c.cleanupStorage()).catch((err) => logger.warn({ err: err.message }, 'storage cleanup failed'));
   }, 60 * 1000).unref();
 
   // Render's free plan sleeps after 15 min without incoming requests, which would drop WhatsApp.

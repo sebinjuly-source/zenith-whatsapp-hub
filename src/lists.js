@@ -363,7 +363,7 @@ export function followupBefore(availableFrom) {
   return at > new Date() ? at : new Date(Date.now() + 3600000);
 }
 
-export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, visitAt, followupAt, followupNote, availableFrom }) {
+export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, visitAt, followupAt, followupNote, availableFrom, name }) {
   const jid = toJid(phoneOrJid);
   if (stage !== undefined && stage !== null && stage !== '') {
     const [lr] = await query('SELECT role FROM lists WHERE id = $1', [listId]);
@@ -393,11 +393,12 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
        checked_at = CASE WHEN $6::text = 'keep' THEN checked_at ELSE NULL END,
        followup_at = CASE WHEN $8::text = 'keep' THEN followup_at WHEN $8 = 'clear' THEN NULL ELSE $9::timestamptz END,
        followup_note = CASE WHEN $8::text = 'clear' THEN NULL ELSE COALESCE($10, followup_note) END,
+       name = COALESCE(NULLIF($11::text, ''), name), -- the real name when the list had a wrong one (31 Oct: "Suvijaya" was Mr Sujit)
        updated_at = now()
      WHERE list_id = $1 AND jid = $2 RETURNING *`,
     [listId, jid, outcome === undefined ? null : outcome, notes ?? null, stage === undefined ? null : stage,
       visit === undefined ? 'keep' : visit === null ? 'clear' : 'set', visit ? visit.toISOString() : null,
-      fu === undefined ? 'keep' : fu === null ? 'clear' : 'set', fu ? fu.toISOString() : null, followupNote || null],
+      fu === undefined ? 'keep' : fu === null ? 'clear' : 'set', fu ? fu.toISOString() : null, followupNote || null, name ? String(name).trim().slice(0, 80) : null],
   );
   if (!m) throw new Error('Not on this list');
   // The board shows every visit from the moment the date is set (not only the day before), and drops it when

@@ -274,7 +274,7 @@ function buildServer(playbook = '', focus = '') {
 
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). Work only with people on campaign lists: they get "Reply to" cards, and inbox_summary shows every one of them waiting for an answer (also those whose card was closed before a new message) — look at it before deciding and read the chat (get_messages) before drafting. Chats of people on no list are the staff's everyday chats: leave them alone unless the owner asks; never answer the hub's own numbers or the owner's phones. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. EVERY REPLY ENDS IN A RECORD: after any conversation (yours or the owner's own reply by hand) record what was agreed — a day → update_list_member visit_at (with time) or available_from; interested, no day → stage interested + follow_up_at; not interested → that stage. "Next step missing: X" cards are the hub's safety net for people who replied with nothing recorded (27 Oct: a chef the owner told "come on the 10th" had no card). FILES: open_file shows you a photo/screenshot/ID someone sent (as the picture) or a PDF's text — read them before replying; save_media / open_file also give a link to forward the file. A message sent by mistake → unsend_message (linked numbers, 2 days). You can send any file yourself — send_message(attachment_base64=<the file as base64>, file_name="X.pdf") or upload_file then attachment_url; never ask the owner to upload to Drive or send it by hand. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who wrote to us in the last 30 days (interested candidates, interview follow-ups) → everyone else → nudges to non-repliers. On a linked number only people who wrote in the last 30 days skip the daily limit, and at most hourlyCap (10) automated messages go out per hour — a burst to old contacts got the hotel number logged out (26 Oct). Never plan big batches to old contacts from a linked number. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). Work only with people on campaign lists: they get "Reply to" cards, and inbox_summary shows every one of them waiting for an answer (also those whose card was closed before a new message) — look at it before deciding and read the chat (get_messages) before drafting. Chats of people on no list are the staff's everyday chats: leave them alone unless the owner asks; never answer the hub's own numbers or the owner's phones. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. EVERY REPLY ENDS IN A RECORD: after any conversation (yours or the owner's own reply by hand) record what was agreed — a day → update_list_member visit_at (with time) or available_from; interested, no day → stage interested + follow_up_at; not interested → that stage. "Next step missing: X" cards are the hub's safety net for people who replied with nothing recorded (27 Oct: a chef the owner told "come on the 10th" had no card). NAMES: the name a person writes themselves (signature, "my name is", booking details) beats their WhatsApp profile name, which beats the name saved on the phone or the list (31 Oct: a guest saved as "Suvijaya" signs "Sujit" — he was addressed as "Ms Suvijaya"). Never guess gender from a name: use Mr/Ms only when the chat makes it clear (they wrote it, or were called Sir/Madam and answered), else "Dear <name> ji". When a list or contact name is wrong, fix it (update_list_member name, update_contact name). FILES: open_file shows you a photo/screenshot/ID someone sent (as the picture) or a PDF's text — read them before replying; save_media / open_file also give a link to forward the file. A message sent by mistake → unsend_message (linked numbers, 2 days). You can send any file yourself — send_message(attachment_base64=<the file as base64>, file_name="X.pdf") or upload_file then attachment_url; never ask the owner to upload to Drive or send it by hand. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who wrote to us in the last 30 days (interested candidates, interview follow-ups) → everyone else → nudges to non-repliers. On a linked number only people who wrote in the last 30 days skip the daily limit, and at most hourlyCap (10) automated messages go out per hour — a burst to old contacts got the hotel number logged out (26 Oct). Never plan big batches to old contacts from a linked number. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
   const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter for this call: a campaign name, "none" (hotel / no campaign) or "all". Default: ${focus ? `"${focus}" (the campaign the owner has open)` : 'all campaigns'}.`);
   const tool = (name, description, inputSchema, fn) => {
@@ -1211,6 +1211,7 @@ function buildServer(playbook = '', focus = '') {
 
   tool('update_list_member', 'Move a person through their campaign\'s funnel: stage (a key of that campaign\'s stages — list_campaigns shows each campaign\'s; hiring: interested, date_given, visited, trial, selected, joined, no_show, not_interested, rejected), the date/time they will come (visit_at → automatic reminder before it and a board task), outcome (short reason) and notes. Stages joined / not_interested / rejected close the person (no more sends or follow-ups). Owner rule: anyone asking for money before joining → stage rejected.', {
     list: listArg, phone: z.string(),
+    name: z.string().optional().describe('Correct the person\'s name on the list (the name they sign with / their profile, when the list has a wrong one)'),
     stage: z.string().optional().describe('Funnel stage KEY of the list\'s campaign ("" clears it). Each campaign has its own stages (list_campaigns shows them): hiring = interested, date_given, visited, trial, selected, joined, no_show, not_interested, rejected; sales/corporate and win-back have their own (e.g. contact_shared, rates_shared, first_booking, booked, not_now)'),
     visit_at: z.string().optional().describe('When they will come (ISO or "YYYY-MM-DD HH:MM", your timezone if no offset); sets stage date_given; "" clears'),
     outcome: z.string().optional().describe('Short reason/summary, e.g. "rejected – asked for money before joining"'),
@@ -1224,7 +1225,7 @@ function buildServer(playbook = '', focus = '') {
     const f = localTime(a.follow_up_at);
     const m = await lists.updateMember(l.id, a.phone, {
       outcome: a.outcome, notes: a.notes, stage: a.stage, visitAt: v === undefined ? undefined : v || null,
-      followupAt: f === undefined ? undefined : f || null, availableFrom: localTime(a.available_from) || undefined, followupNote: a.follow_up_note,
+      followupAt: f === undefined ? undefined : f || null, availableFrom: localTime(a.available_from) || undefined, followupNote: a.follow_up_note, name: a.name,
     });
     await ai(l.account_id, `${m.name || m.phone} → ${m.stage || '-'}${m.visit_at ? ' (visit ' + d(m.visit_at) + ')' : ''}${m.followup_at ? ' (follow up ' + d(m.followup_at) + ')' : ''}${a.outcome ? ' – ' + a.outcome : ''} — ${l.name}`, l.role);
     const parts = [m.stage && `stage ${m.stage}`, m.visit_at && `visit ${d(m.visit_at)}${['interested', 'date_given'].includes(m.stage) ? ' (interview on the Board for the owner; reminders the evening before and 3 h before)' : ' (no interview card: stage ' + m.stage + ')'}`, m.followup_at && `follow-up ${d(m.followup_at)} (on the Board)`, m.outcome && `outcome ${m.outcome}`, m.notes && 'notes saved'].filter(Boolean);
@@ -1435,7 +1436,7 @@ function buildServer(playbook = '', focus = '') {
     return `Now open: ${scope.label(c)}. The dashboard and every tool (by default) show only it from the next call.`;
   });
 
-  tool('daily_checkins', 'Daily check-ins: staff who must send a photo report every day (e.g. Mallesh: room + front desk checklists, with the word "checklist"). Shows today: photos received, deadline, whether the automatic reminder went. With items (and owner_asked) it REPLACES the whole list — read it first and keep the others. The reminder goes from the chosen number without approval at the deadline; the owner gets a card that closes when the photos come.', {
+  tool('daily_checkins', 'Daily check-ins: staff who must send a photo report every day (e.g. Mallesh: room + front desk checklists, with the word "checklist"). Shows today: photos received, deadline, whether the automatic reminder went. Staff misspell the word or forget it: before the deadline, open_file their photos of today (newest first, on every number) and if you SEE the reports, mark_received. With items (and owner_asked) it REPLACES the whole list — read it first and keep the others. The reminder goes from the chosen number without approval at the deadline; the owner gets a card that closes when the photos come.', {
     items: z.array(z.object({
       name: z.string(), phone: z.string(), what: z.string().optional().describe('e.g. "the room checklist and the front desk checklist"'),
       keyword: z.string().optional().describe('Word he writes with the photos (default "checklist")'), min_photos: z.number().int().optional(),
@@ -1443,8 +1444,14 @@ function buildServer(playbook = '', focus = '') {
       text: z.string().optional().describe('Reminder text'), enabled: z.boolean().optional(),
     })).optional(),
     owner_asked: z.string().optional().describe('The owner\'s own words asking for this change (required to change the list)'),
+    mark_received: z.object({ id: z.string().describe('Check-in id or name, e.g. "mallesh"'), note: z.string().describe('What you saw, e.g. "room checklist + front desk checklist photos at 20:34"') }).optional()
+      .describe('You LOOKED at today\'s photos (open_file, newest first, on every number) and both reports are there even without the word → count today as received: no reminder, the owner\'s card closes'),
   }, async (a) => {
     const ck = await import('./checkins.js');
+    if (a.mark_received) {
+      const c = await ck.markReceived(a.mark_received.id, a.mark_received.note);
+      await ai(null, `Daily check-in ${c.name}: marked received today — ${trim(a.mark_received.note, 150)}`);
+    }
     if (a.items) {
       if (!a.owner_asked) return 'Changing daily check-ins needs the owner\'s own words (owner_asked) — only when the owner asked.';
       const items = await ck.setCheckins(a.items.map((i) => ({ ...i, minPhotos: i.min_photos })));
@@ -1476,8 +1483,10 @@ function buildServer(playbook = '', focus = '') {
     const mimetype = row?.media?.mimetype || got.mimetype || 'application/octet-stream';
     const ext = (await import('mime-types')).default.extension(mimetype) || 'bin';
     const name = row?.media?.fileName || `${row?.type || 'file'}_${jid.split('@')[0]}_${a.message_id.slice(-6)}.${ext}`;
-    const f = await (await import('./files.js')).saveFile({ buffer: got.buffer, fileName: name, mimetype, by: 'ai' });
-    return { s, jid, row, buffer: got.buffer, mimetype, file: f };
+    // a link to the saved copy (no second copy in the database)
+    const f = await (await import('./files.js')).linkFor({ ref, fileName: name, mimetype, size: got.buffer.length });
+    const [cat] = await query('SELECT title, folder, keep FROM media_catalog WHERE account_id = $1 AND message_id = $2', [s.id, a.message_id]);
+    return { s, jid, row, buffer: got.buffer, mimetype, file: { ...f, size: got.buffer.length }, cat };
   };
 
   tool('save_media', 'Download and keep a file from a message (e.g. a candidate\'s resume). Use the media id shown by get_messages. Returns a link you can pass as attachment_url to send it on (e.g. forward a resume to the owner). To SEE or READ it, use open_file.', {
@@ -1491,7 +1500,7 @@ function buildServer(playbook = '', focus = '') {
     account: accountArg, chat: chatArg, message_id: z.string(),
   }, async (a) => {
     const m = await mediaFile(a);
-    const head = `${m.file.name} (${m.mimetype}, ${Math.round(m.file.size / 1024)} KB)${m.row?.body ? ` — caption: "${trim(m.row.body, 200)}"` : ''}. attachment_url to send it on: ${m.file.url}`;
+    const head = `${m.file.name} (${m.mimetype}, ${Math.round(m.file.size / 1024)} KB)${m.row?.body ? ` — caption: "${trim(m.row.body, 200)}"` : ''}${m.cat ? ` — filed: "${m.cat.title}" in ${m.cat.folder} (${m.cat.keep})` : ' — not filed yet: catalog_file it'}. attachment_url to send it on: ${m.file.url}`;
     if (/^image\/(jpeg|png|gif|webp)$/.test(m.mimetype) && m.buffer.length <= 4 * 1024 * 1024) {
       return { content: [{ type: 'text', text: head }, { type: 'image', data: m.buffer.toString('base64'), mimeType: m.mimetype }] };
     }
@@ -1503,6 +1512,30 @@ function buildServer(playbook = '', focus = '') {
     }
     if (/^text\//.test(m.mimetype)) return `${head}\n--- text ---\n${m.buffer.toString('utf8').slice(0, 20000)}`;
     return `${head}\nThis kind of file can't be shown to you (${m.row?.type || m.mimetype}). Open the link, or ask the owner / the person what it says.`;
+  });
+
+  tool('catalog_file', 'File a saved photo / PDF after looking at it (open_file) so it can be found later and storage is managed: a clear title ("Sujit Dey — Aadhaar card", "Room 205 checklist 31 Oct — coffee & tea short"), a folder ("Guest IDs", "Payment proofs", "Invoices & bills", "Checklists/2026-10", "Candidate resumes", "Maintenance", "Food & kitchen", "Other") and keep = keep (IDs, payments, invoices, agreements, resumes, checklists showing a problem) | temporary (routine photos, food, everyday updates — deleted first when storage is full) | delete (junk, duplicates, forwards — removed now). Notes = what is in it that matters.', {
+    account: accountArg, chat: chatArg, message_id: z.string(), title: z.string(), folder: z.string(), keep: z.enum(['keep', 'temporary', 'delete']),
+    notes: z.string().optional(),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    const jid = await resolveChat(s.id, a.chat);
+    const r = await (await import('./catalog.js')).catalogFile({ account: s.id, chat: jid, messageId: a.message_id, title: a.title, folder: a.folder, keep: a.keep, notes: a.notes });
+    return `Filed "${a.title}" in ${a.folder} (${a.keep})${r.dropped ? ' — stored copy deleted' : ''}.`;
+  });
+
+  tool('find_files', 'Find saved photos / PDFs: by words (title, notes, caption, file name, person), folder, person (chat), keep state; untagged=true lists saved files nobody has filed yet (to review and catalog_file them). One line each with ids for open_file.', {
+    query: z.string().optional(), folder: z.string().optional(), chat: z.string().optional(), account: z.string().optional(),
+    keep: z.enum(['keep', 'temporary', 'delete']).optional(), untagged: z.boolean().optional(), limit: z.number().int().min(1).max(200).optional(),
+  }, async (a) => {
+    const rows = await (await import('./catalog.js')).findFiles({ q: a.query, folder: a.folder, chat: a.chat, account: a.account, keep: a.keep, untagged: a.untagged, limit: a.limit || 40 });
+    if (!rows.length) return 'No files found.';
+    return rows.map((r) => `${fmtTime(r.ts)} | ${r.account_id} | ${r.person || r.chat_jid.split('@')[0]} (${r.chat_jid.split('@')[0]}) | ${r.type}${r.file_name ? ' ' + r.file_name : ''} | ${r.size ? Math.round(r.size / 1024) + ' KB' : '?'} | ${r.title ? `"${r.title}" [${r.folder}, ${r.keep}]` : 'not filed'}${r.saved ? '' : ' (copy deleted)'} | message_id ${r.id}${r.body ? ' | caption: ' + trim(r.body, 60) : ''}`).join('\n');
+  });
+
+  tool('storage_status', 'How much file storage the saved photos / PDFs use, against the limit (Supabase free plan 1 GB; limit 900 MB), by folder, how many are not filed yet and how much is "temporary". When over the limit the hub deletes temporary files oldest first.', {}, async () => {
+    const st = await (await import('./catalog.js')).storageStatus();
+    return `Saved files: ${st.files} using ${st.mb} MB of ${st.limitMb} MB (${Math.round((st.mb / st.limitMb) * 100)}%). Not filed yet: ${st.untagged}. Temporary (deleted first when full): ${st.temporaryMb} MB.\nBy folder: ${st.folders.map((f) => `${f.folder} ${f.files} (${Math.round(Number(f.bytes) / 1048576)} MB)`).join(', ')}`;
   });
 
   tool('unsend_message', 'Delete for everyone a message WE sent by mistake (wrong person, wrong text, wrong file) — linked numbers only, within about 2 days of sending. Give outbox_id (#… from list_outbox) or the WhatsApp message_id. Logged in Activity. Meta Cloud API numbers cannot unsend.', {

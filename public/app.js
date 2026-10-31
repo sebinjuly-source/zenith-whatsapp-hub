@@ -2182,11 +2182,13 @@ ${laterText(shown)}` : ''}`)) return;
     optOutWords: 'Opt-out words', webhookUrl: 'Notify URL' };
   async function viewSettings() {
     await loadAccounts(true);
-    const [pb, al, tr, ck, pr, dflt, dg] = await Promise.all([
+    const [pb, al, tr, ck, pd, camps, pr, dflt, dg] = await Promise.all([
       api('/api/playbook').catch(() => ({ text: '' })),
       api('/api/alerts').catch(() => ({ phones: [] })),
       api('/api/trusted-recipients').catch(() => ({ phones: [] })),
       api('/api/checkins').catch(() => ({ items: [] })),
+      api('/api/phone-drafts').catch(() => null),
+      api('/api/campaigns').catch(() => []),
       api('/api/pricing').catch(() => null),
       api('/api/settings/defaults').catch(() => null),
       api('/api/digest').catch(() => null),
@@ -2363,6 +2365,21 @@ ${laterText(shown)}` : ''}`)) return;
       h('p', { class: 'muted', style: 'margin-top:0' }, 'Staff who send you a photo report every day. A photo counts when they write the word with it (caption, or a message right after). If not enough have come by the time, a reminder goes to them from the chosen number WITHOUT approval, and you get a card on the Board.'),
       ckList,
       h('div', { class: 'row', style: 'gap:6px' }, h('button', { type: 'button', class: 'btn', onclick: () => ckList.append(ckRow()) }, '+ Add person'), h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
+    const phoneForm = !pd ? null : h('form', { onsubmit: guard(async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const r = await api('/api/phone-drafts', { method: 'PUT', body: {
+        enabled: f.enabled.checked,
+        accounts: [...f.querySelectorAll('input[name=acc]:checked')].map((x) => x.value),
+        campaigns: [...f.querySelectorAll('input[name=camp]:checked')].map((x) => x.value),
+      } });
+      toast(r.enabled && r.accounts.length ? 'Drafts go to the phone of: ' + r.accounts.join(', ') : 'Drafts on the phone are off');
+    }) },
+      h('p', { class: 'muted', style: 'margin-top:0' }, 'When the AI drafts an immediate reply (the person wrote in the last 24 h, not a message for later, not bulk) on these numbers, the phone gets it too: a note in its own "Message yourself" chat (pinned) with a link that opens the chat with the reply already typed, and their chat marked unread. Whoever holds the phone can send it, change it, or delete the note to drop it — you can still approve or reject it here. Sent from the phone → the draft here closes by itself.'),
+      h('label', { class: 'switch' }, h('input', { type: 'checkbox', name: 'enabled', checked: pd.enabled }), h('span', {}, 'On')),
+      h('div', { style: 'margin:8px 0' }, h('b', {}, 'Numbers: '), state.accounts.filter((x) => x.provider !== 'cloud').map((x) => h('label', { style: 'margin-right:12px' }, h('input', { type: 'checkbox', name: 'acc', value: x.id, checked: pd.accounts.includes(x.id) }), ' ' + x.label))),
+      h('div', { style: 'margin:8px 0' }, h('b', {}, 'Campaigns (none ticked = all): '), [{ name: 'none', label: 'Hotel / no campaign' }, ...(camps || []).map((c) => ({ name: c.role, label: c.role }))].map((c) => h('label', { style: 'margin-right:12px' }, h('input', { type: 'checkbox', name: 'camp', value: c.name, checked: pd.campaigns.includes(c.name) }), ' ' + c.label))),
+      h('button', { class: 'btn primary', type: 'submit' }, 'Save'));
     const digestForm = !dg ? null : h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
       const x = e.target;
@@ -2504,6 +2521,7 @@ ${laterText(shown)}` : ''}`)) return;
         fold('🔔 Connection alerts', alertForm),
         fold('✅ Send without approval to', trustedForm),
         fold('📋 Daily check-ins (staff photo reports)', checkinForm),
+        phoneForm ? fold('📱 Drafts on the phone', phoneForm) : null,
         digestForm ? fold('☀️ Morning summary on WhatsApp', digestForm) : null,
         priceForm ? fold('💰 Meta message prices', priceForm) : null,
         fold('📘 Playbook (your rules for the AI)', playbookForm),
