@@ -35,14 +35,7 @@ Node ≥ 20 ESM · Express 5 · Baileys 7 · Postgres (Supabase) / PGlite locall
 - Never message real people while testing; owner test messages go to the owner's alert phone only.
 - After a fix to the hub, sync the skill template and update `docs/HOW-IT-WORKS.md` (§10.10 recipes, §10.11 method).
 
-## Architecture (where things are)
-`src/index.js` start-up + minute loop · `wa/session.js` linked numbers (leases: one server per number) · `wa/cloud.js`
-Meta · `outbox.js` sending (approval, limits, send order) · `lists.js` lists/funnel/follow-ups · `board.js` +
-`tasks.js` the Board · `mcp.js` AI tools (+ `hub_api`, `runTool`) · `api.js` REST (+ `/api/tools`) · `scope.js`
-campaign filter · `phonedrafts.js` drafts on the phone · `db.js` schema. Full guide: `docs/HOW-IT-WORKS.md`.
-
-## Debugging method (worked again and again — §10.11)
-Evidence first (read-only SQL on live: `events`, `outbox`, `tasks`, `pg_stat_statements`) → one hypothesis per lead →
-`node --check` → smoke every tool on live data → reproduce in a test → fix → `npm test` → UI in a real browser at 375 px
-→ verify after deploy (`/health` version). "elsewhere" right after a deploy = the other server still holds the
-number for 1–3 min, not an unlinked number.
+## Where to read more (don't copy it here)
+`docs/HOW-IT-WORKS.md` is the full manual — for the owner and for debugging: §10 follows a message end to end through
+the files, §10.10 is the symptom → where-to-look table, §10.11 the debugging method, §10.12 what was measured.
+Read the section you need instead of the whole file. This file holds only the rules every session must follow.
