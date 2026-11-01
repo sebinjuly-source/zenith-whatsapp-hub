@@ -251,9 +251,10 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
   needs `owner_asked=true`; never possible: link/unlink a number, delete a number, shutdown, approve-all. For the rare
   things without a dedicated tool (pricing, alerts, digest, trusted recipients, check-in setup, playbook history /
   restore, deleting a template/rule/contact, events, jobs). One door instead of twenty more tools keeps sessions small.
-- **Google Sheet "Command Center"** (`apps-script/HubCommandCenter.gs`): Leads (every person of a sales campaign with
-  stage, source, value, ₹ won, outcome — what the Ads routine needs for ROAS), Today (due cards, most important first +
-  drafts waiting), Send (rows → drafts), Ask (any tool by name). Test any `.gs` before pasting it into a Sheet:
+- **Google Sheet "Command Center"** (`apps-script/HubCommandCenter.gs`, installed 1 Nov as a test of the API): Leads
+  (every person of a sales campaign with stage, source, ₹ won), Today (due cards), Send (rows → drafts), Ask (any tool by
+  name). A sheet is for people (sharing, sums); **AI routines read the hub directly** — e.g. the Ads routine runs two
+  small `inspect_data` queries for ₹ won per source (its STEP 0c), no sheet or browser in between. Test any `.gs` before pasting it into a Sheet:
   `node scripts/gas-twin.mjs apps-script/HubCommandCenter.gs setup runAsk` runs the real script in Node against the
   live hub with an in-memory spreadsheet.
 
