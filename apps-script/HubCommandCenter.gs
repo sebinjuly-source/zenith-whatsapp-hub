@@ -16,15 +16,7 @@
 const HUB_URL = 'https://zenith-whatsapp-hub.onrender.com';
 const LEAD_CAMPAIGN = 'Guest leads';
 
-function onOpen() {
-  SpreadsheetApp.getUi().createMenu('WhatsApp Hub')
-    .addItem('Refresh Leads + Today', 'refreshAll')
-    .addItem('Create drafts from Send', 'createDrafts')
-    .addItem('Run the Ask tab', 'runAsk')
-    .addToUi();
-}
-
-/** Run once: a 30-minute refresh and the four tabs. */
+/** Run once (it is first, so the editor's Run button picks it): a 30-minute refresh and the four tabs. */
 function setup() {
   ScriptApp.getProjectTriggers().filter((t) => t.getHandlerFunction() === 'refreshAll').forEach((t) => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('refreshAll').timeBased().everyMinutes(30).create();
@@ -32,6 +24,19 @@ function setup() {
   const ask = tab_('Ask', null);
   if (!ask.getRange('A1').getValue()) ask.getRange('A1:B2').setValues([['Tool', 'inbox_summary'], ['Arguments (JSON)', '{"campaign":"all"}']]);
   refreshAll();
+}
+
+/** The "WhatsApp Hub" menu — Google adds it when the SHEET opens (from the editor's Run button it can't, so it says so). */
+function onOpen() {
+  try {
+    SpreadsheetApp.getUi().createMenu('WhatsApp Hub')
+      .addItem('Refresh Leads + Today', 'refreshAll')
+      .addItem('Create drafts from Send', 'createDrafts')
+      .addItem('Run the Ask tab', 'runAsk')
+      .addToUi();
+  } catch (e) {
+    console.log('onOpen runs by itself when the sheet is opened — in the editor, run setup instead.');
+  }
 }
 
 function refreshAll() {
