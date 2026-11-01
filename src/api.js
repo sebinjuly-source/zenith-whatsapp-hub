@@ -543,6 +543,30 @@ export function buildApp() {
     await act(req, null, `Daily check-ins: ${items.map((c) => `${c.name} (${c.minPhotos} photo(s) with "${c.keyword}" by ${c.deadline}, reminder from ${c.account})${c.enabled ? '' : ' — off'}`).join('; ') || 'none'}`);
     res.json({ items });
   }));
+  // Staff attendance + advances: GET ?month=YYYY-MM (summary + entries), PUT { items } (the staff list),
+  // POST /staff/log { staff, day, kind, amount, note }, DELETE /staff/log/:id, GET /staff.csv?month= (for a Sheet)
+  api.get('/staff', wrap(async (req, res) => res.json(await (await import('./staff.js')).monthSummary(req.query.month || undefined))));
+  api.get('/staff.csv', wrap(async (req, res) => {
+    const st = await import('./staff.js');
+    const sum = await st.monthSummary(req.query.month || undefined);
+    res.type('text/csv').set('content-disposition', `attachment; filename="staff-${sum.month}.csv"`).send(st.toCsv(sum));
+  }));
+  api.put('/staff', wrap(async (req, res) => {
+    const items = await (await import('./staff.js')).setStaff(req.body?.items || []);
+    await act(req, null, `Staff list: ${items.map((s) => `${s.name}${s.active ? '' : ' (inactive)'}`).join(', ') || 'none'}`);
+    res.json({ items });
+  }));
+  api.post('/staff/log', wrap(async (req, res) => {
+    const b = req.body || {};
+    const r = await (await import('./staff.js')).record({ staff: b.staff, day: b.day, kind: b.kind, amount: b.amount, note: b.note, by: actorOf(req) });
+    await act(req, null, `Staff: ${r.staff.name} ${b.kind}${b.amount ? ` ₹${b.amount}` : ''} on ${b.day || 'today'}${b.note ? ` — ${b.note}` : ''}`);
+    res.json({ id: r.id });
+  }));
+  api.delete('/staff/log/:id', wrap(async (req, res) => {
+    const n = await (await import('./staff.js')).removeEntry(req.params.id);
+    await act(req, null, `Staff log entry #${req.params.id} deleted`);
+    res.json({ deleted: n });
+  }));
   api.get('/trusted-recipients', wrap(async (req, res) => res.json({ phones: await notify.trustedPhones() })));
   api.put('/trusted-recipients', wrap(async (req, res) => {
     const phones = await notify.setTrustedPhones(req.body?.phones);

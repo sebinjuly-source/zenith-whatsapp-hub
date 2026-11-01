@@ -61,6 +61,8 @@ async function main() {
   setInterval(() => {
     runCheckins().catch((err) => logger.warn({ err: err.message }, 'daily check-ins failed'));
     syncPhoneDrafts(manager).catch((err) => logger.warn({ err: err.message }, 'phone drafts failed'));
+    // staff attendance from "Gm mam present" messages (never overwrites a day already marked)
+    import('./staff.js').then((s) => s.scanAttendance()).catch((err) => logger.warn({ err: err.message }, 'staff attendance failed'));
     // once an hour: keep saved files under the storage limit (deletes "temporary" files first)
     if (new Date().getMinutes() === 7) import('./catalog.js').then((c) => c.cleanupStorage()).catch((err) => logger.warn({ err: err.message }, 'storage cleanup failed'));
   }, 60 * 1000).unref();

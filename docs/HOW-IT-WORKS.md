@@ -206,6 +206,17 @@ goes to him from the chosen number WITHOUT approval and outside that number's se
 message), and the owner gets a Board card that closes when the photos come. Checked every minute (`checkins.js`,
 config key `checkins`, idempotency key `checkin:<id>:<date>`); MCP `daily_checkins` (changes need owner_asked).
 
+**Staff: attendance & advances (1 Nov).** Settings → "👥 Staff": the staff list (name, phone, role, monthly salary,
+how attendance counts), the month's table (present / half day / leave / absent, advances asked / paid / recovered,
+outstanding) and a row to record a payment or a leave. Attendance marks itself every minute from their WhatsApp to
+any hub number: "present" in any spelling ("perseant", "prseant", "presant") or a "Gm"/"good morning" greeting — or,
+for staff set to "any message" (the night desk never writes it), the first message of the day. A day already marked
+(e.g. leave the owner entered) is never overwritten. The AI records advances staff ask for in chat ("5000rs advance
+plz", "plz send 2000/-") with the message id (never twice); each request makes an owner card "X asks ₹N advance" that
+closes when a payment for that person is recorded. Outstanding = paid − recovered, all time. `⬇ CSV` (or
+`GET /api/staff.csv?month=YYYY-MM`) gives the month's entries for the salary sheet. Code `staff.js`, config key
+`staff`, table `staff_log`; MCP `staff_log` (the staff list needs owner_asked; payments only when the owner says so).
+
 **Send without approval to (trusted recipients).** Settings → "✅ Send without approval to": AI, routine and
 campaign messages TO these phones skip Drafts on every number (e.g. the owner's own phone, so a routine can send a
 report). Until saved it is the alert phones; only the owner changes it (`PUT /api/trusted-recipients`), never the AI.
