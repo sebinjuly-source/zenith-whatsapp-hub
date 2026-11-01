@@ -25,6 +25,7 @@ function sheetObj(name) {
     setValue(v) { (g[r - 1] ||= [])[c - 1] = v; return this; },
     setValues(vals) { vals.forEach((row, i) => row.forEach((v, j) => ((g[r - 1 + i] ||= [])[c - 1 + j] = v))); return this; },
     setFontWeight() { return this; }, setWrap() { return this; },
+    clearContent() { for (let i = 0; i < nr; i++) for (let j = 0; j < nc; j++) if (g[r - 1 + i]) g[r - 1 + i][c - 1 + j] = ''; return this; },
   });
   const a1 = (s) => {
     const [a, b] = s.split(':');
@@ -36,7 +37,8 @@ function sheetObj(name) {
   return {
     getRange: (r, c, nr, nc) => (typeof r === 'string' ? a1(r) : range(r, c, nr, nc)),
     getDataRange: () => range(1, 1, g.length || 1, Math.max(1, ...g.map((x) => x?.length || 0))),
-    clearContents() { g.length = 0; }, setFrozenRows() {},
+    clearContents() { g.length = 0; }, setFrozenRows() {}, setRowHeights() {},
+    getLastRow: () => g.length, getMaxRows: () => Math.max(1000, g.length), insertRowsAfter() {},
   };
 }
 const ctx = {

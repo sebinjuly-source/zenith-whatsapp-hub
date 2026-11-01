@@ -114,7 +114,13 @@ function runAsk() {
   const tool = String(sh.getRange('B1').getValue()).trim();
   const args = String(sh.getRange('B2').getValue() || '{}');
   const res = hub_('POST', '/api/tools/' + encodeURIComponent(tool), JSON.parse(args), true);
-  sh.getRange('A4').setValue(String(res.text || res.error || '')).setWrap(true);
+  // one line of the answer per row (a single wrapped cell was unreadable in a narrow column)
+  const lines = String(res.text || res.error || '').split(/\r?\n/);
+  const old = sh.getLastRow();
+  if (old >= 4) sh.getRange(4, 1, old - 3, 1).clearContent().setWrap(false);
+  if (sh.getMaxRows() < lines.length + 3) sh.insertRowsAfter(sh.getMaxRows(), lines.length + 3 - sh.getMaxRows());
+  sh.getRange(4, 1, lines.length, 1).setValues(lines.map((l) => [l])).setWrap(false);
+  sh.setRowHeights(4, lines.length, 21);
 }
 
 // ---------------------------------------------------------------- helpers
