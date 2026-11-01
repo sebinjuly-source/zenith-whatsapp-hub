@@ -171,6 +171,11 @@ export async function catchForgotten() {
                        AND t.ref IN ('reply:' || l.account_id || ':' || m.jid, 'followup:' || m.list_id || ':' || m.jid, 'nextstep:' || m.list_id || ':' || m.jid))
        AND COALESCE((SELECT max(x.ts) FROM messages x WHERE x.chat_jid = m.jid), 0) < extract(epoch FROM now())::bigint - $1::bigint * 86400
        AND COALESCE(m.stage_at, now() - interval '30 days') < now() - ($1 || ' days')::interval
+       -- the owner or the AI closed their follow-up card in the last 14 days (e.g. "no nudges to people who don't
+       -- answer"): that was a decision, not a forgotten person (1 Nov: the net re-made cards minutes after the AI closed them)
+       AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.ref = 'followup:' || m.list_id || ':' || m.jid
+                       AND t.status IN ('done','cancelled') AND t.completed_at > now() - interval '14 days'
+                       AND EXISTS (SELECT 1 FROM task_log tl WHERE tl.task_id = t.id AND tl.actor IN ('ai','you')))
      LIMIT 20`,
     [FORGOTTEN_DAYS],
   );

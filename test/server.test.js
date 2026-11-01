@@ -2875,3 +2875,18 @@ test('a Follow up card closed by the AI (no message) stays closed: the due follo
   await mcp('update_list_member', { list: 'Zombie check', phone: '9733311111', follow_up_at: '2026-12-20 10:00', campaign: 'all' });
   assert.equal((await open()).length, 1);
 });
+
+test('safety net respects a decision: an interested person whose follow-up card the AI closed gets no new card for 14 days', async () => {
+  const { catchForgotten } = await import('../src/board.js');
+  await mcp('import_list', { account: 'hotel', name: 'Net check', role: 'Chef', members: [{ phone: '9733322222', name: 'Quiet' }, { phone: '9733322223', name: 'Forgotten' }] });
+  const [l] = await query(`SELECT id FROM lists WHERE name = 'Net check'`);
+  for (const p of ['919733322222', '919733322223']) await query(`UPDATE list_members SET stage = 'interested', stage_at = now() - interval '10 days' WHERE list_id = $1 AND phone = $2`, [l.id, p]);
+  // the AI had a follow-up card for "Quiet" and closed it without a message
+  await mcp('update_list_member', { list: 'Net check', phone: '9733322222', follow_up_at: '2026-10-30 10:00', campaign: 'all' });
+  const [card] = await query(`SELECT id FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled')`, [`followup:${l.id}:919733322222@s.whatsapp.net`]);
+  await mcp('update_task', { id: card.id, status: 'done', campaign: 'all' });
+  await catchForgotten();
+  const open = async (p) => (await query(`SELECT id FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled')`, [`followup:${l.id}:${p}@s.whatsapp.net`])).length;
+  assert.equal(await open('919733322222'), 0, 'decision respected');
+  assert.equal(await open('919733322223'), 1, 'a truly forgotten person still gets the safety-net card');
+});
