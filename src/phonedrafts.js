@@ -71,14 +71,18 @@ export async function offer(row, manager) {
     [row.id, row.account_id, row.to_jid],
   );
   if (!claim) return false; // another server or an earlier run did it
+  // the name on their list (what they call themselves) beats a WhatsApp profile name like "Trader 📈☝️"; the campaign
+  // tells the person holding the phone at a glance whether it is a guest or a candidate
   const [who] = await query(
-    `SELECT COALESCE(NULLIF(ch.name,''), ct.name, ct.notify) AS name FROM (SELECT 1) x
+    `SELECT COALESCE(NULLIF(lm.name,''), NULLIF(ch.name,''), ct.name, ct.notify) AS name, lm.role FROM (SELECT 1) x
+     LEFT JOIN LATERAL (SELECT m.name, l.role FROM list_members m JOIN lists l ON l.id = m.list_id
+       WHERE m.jid = $2 AND l.account_id = $1 ORDER BY m.updated_at DESC NULLS LAST LIMIT 1) lm ON TRUE
      LEFT JOIN chats ch ON ch.account_id = $1 AND ch.jid = $2 LEFT JOIN contacts ct ON ct.account_id = $1 AND ct.jid = $2`,
     [row.account_id, row.to_jid],
   );
   const phone = phoneOf(row.to_jid);
   const text = row.payload.text;
-  const note = `📝 *Draft reply* for ${who?.name || '+' + phone} (+${phone})\n\n${text}\n\n`
+  const note = `📝 *Draft reply* for ${who?.name || '+' + phone} (+${phone})${who?.role ? ` · ${who.role}` : ''}\n\n${text}\n\n`
     + `👉 Tap to open the chat with this already typed: https://wa.me/${phone}?text=${encodeURIComponent(text)}\n`
     + `${row.payload.attachment ? '📎 It has a file too — send that one from the hub (Drafts).\n' : ''}`
     + 'Send it, change it, or ignore it. Delete this note (for everyone) to drop the draft. — Zenith Hub';

@@ -179,6 +179,13 @@ export async function updateTask(id, { title, details, status, dueAt, assignee, 
     [id, title ?? null, details ?? null, status ?? null, dueAt === undefined ? null : dueAt || '', who(assignee), priority == null ? null : !!priority],
   );
   if (!row) throw new Error('Task not found');
+  // A "Follow up: X" card closed by the owner or the AI ("closed without a message") is a decision: clear the follow-up
+  // date that has come due, or the 10-minute re-check makes the same card again (1 Nov: 14 cards came back at once).
+  // A date still ahead (more than 12 h) stays — that is a later follow-up, not this one.
+  if (row.ref?.startsWith('followup:') && ['done', 'cancelled'].includes(row.status) && before && !['done', 'cancelled'].includes(before.status)) {
+    const [, listId, jid] = row.ref.split(':');
+    await query(`UPDATE list_members SET followup_at = NULL WHERE list_id = $1 AND jid = $2 AND followup_at <= now() + interval '12 hours'`, [listId, jid]);
+  }
   const changes = [
     before && row.status !== before.status && `Moved to ${LABEL[row.status]}`,
     before && row.priority !== before.priority && (row.priority ? 'Marked priority' : 'Priority removed'),

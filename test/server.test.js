@@ -2860,3 +2860,18 @@ test('list_tasks: owner notes, PRIORITY and cards the owner wrote come first; a 
   assert.ok(out.length < 16000, 'fits in one answer');
   for (const t of [...made, vip]) await tasks.updateTask(t.id, { status: 'done', actor: 'ai' });
 });
+
+test('a Follow up card closed by the AI (no message) stays closed: the due follow-up date is cleared, the re-check makes no new card', async () => {
+  await mcp('import_list', { account: 'hotel', name: 'Zombie check', role: 'Chef', members: [{ phone: '9733311111', name: 'Zed' }] });
+  await mcp('update_list_member', { list: 'Zombie check', phone: '9733311111', follow_up_at: '2026-10-30 10:00', follow_up_note: 'free after 30 Oct', campaign: 'all' });
+  await call('POST', '/api/board/sync');
+  const open = async () => query(`SELECT id FROM tasks WHERE ref LIKE 'followup:%:919733311111@s.whatsapp.net' AND status NOT IN ('done','cancelled')`);
+  const [card] = await open();
+  assert.ok(card, 'the hub made the follow-up card');
+  assert.match(await mcp('update_task', { id: card.id, status: 'done', campaign: 'all' }), /done/);
+  await call('POST', '/api/board/sync');
+  assert.equal((await open()).length, 0, 'no zombie card after the re-check');
+  // a follow-up set again later makes a new card as usual
+  await mcp('update_list_member', { list: 'Zombie check', phone: '9733311111', follow_up_at: '2026-12-20 10:00', campaign: 'all' });
+  assert.equal((await open()).length, 1);
+});

@@ -1063,6 +1063,7 @@ export function buildApp() {
       dates: 'times without a zone are read in the hub time zone (TZ_NAME); numbers without a country code get COUNTRY_CODE',
       guide: `${config.publicUrl || ''}/ (Connect AI & apps page) · docs/HOW-IT-WORKS.md §7 and §10 in the repo`,
       mcp: `${config.publicUrl || ''}/mcp/<API_KEY>`,
+      tools: 'every AI tool over REST too: GET /api/tools (catalogue), POST /api/tools/<name> {args} → { text, images, isError }',
       routes,
     });
   });

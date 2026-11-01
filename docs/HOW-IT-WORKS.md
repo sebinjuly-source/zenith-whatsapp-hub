@@ -242,6 +242,21 @@ Send `POST /api/send` (text, attachment, replyTo, buttons, waTemplate, scheduleA
 `GET/PUT /api/pricing` · Others: templates, rules, playbook, alerts, people, search, events, media, `/webhook`
 (old form-bot format), `/health`.
 
+### 7b. Two bridges — the AI and scripts can reach everything (1 Nov)
+- **REST → every AI tool**: `GET /api/tools` lists the ~74 tools (name, what it does, parameters); `POST /api/tools/<name>`
+  with the tool's arguments as JSON runs it with exactly the MCP checks and answers `{ text, images, isError }`
+  (422 when the tool says Error, 400 for bad arguments, 404 for an unknown tool). So a sheet can call
+  `person_context`, `inbox_summary`, `send_message` (a draft in approval mode) … without an MCP client.
+- **AI → every REST endpoint**: the MCP tool `hub_api(method, path, body, owner_asked)`. GET always works; any change
+  needs `owner_asked=true`; never possible: link/unlink a number, delete a number, shutdown, approve-all. For the rare
+  things without a dedicated tool (pricing, alerts, digest, trusted recipients, check-in setup, playbook history /
+  restore, deleting a template/rule/contact, events, jobs). One door instead of twenty more tools keeps sessions small.
+- **Google Sheet "Command Center"** (`apps-script/HubCommandCenter.gs`): Leads (every person of a sales campaign with
+  stage, source, value, ₹ won, outcome — what the Ads routine needs for ROAS), Today (due cards, most important first +
+  drafts waiting), Send (rows → drafts), Ask (any tool by name). Test any `.gs` before pasting it into a Sheet:
+  `node scripts/gas-twin.mjs apps-script/HubCommandCenter.gs setup runAsk` runs the real script in Node against the
+  live hub with an in-memory spreadsheet.
+
 ---
 
 ## 8. Where things run and why it's sometimes slow
@@ -491,6 +506,10 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
 | A page asks for one campaign but shows another | `roleQ` refuses a `role` that differs from the open campaign — the page passed a stale role |
 | AI tool says "belongs to campaign X … out of scope" | intended: it must pass `campaign="X"` (or "all") to act on purpose |
 | `/mcp/<key>/<campaign>` returns HTML | the old server still answers during a deploy (~1–2 min) — retry |
+| A list shows "elsewhere" / "held — the other server" | a deploy is switching servers (1–3 min): the number IS linked; check `events` for "Connected as" and `accounts.lease_owner` — do not tell the owner it is unlinked |
+| A "Follow up: X" card keeps coming back after being closed | fixed 1 Nov: closing it clears that person's due follow-up date (older rows: `update_list_member follow_up_at=""`) |
+| The AI missed a card | `list_tasks(due_now)` puts owner notes / PRIORITY / owner-written cards first and is one line per card when long; the routine must work EVERY due card (1 Nov: a VIP wish card fell off a cut-off list) |
+| Something is slow / the database works hard | `inspect_data` on `pg_stat_statements` ordered by `total_exec_time` (see 10.12) |
 | Anything else | Render logs (pino JSON), then reproduce in a test: `npm test` runs the whole hub on PGlite with a fake WhatsApp and a fake Meta server |
 
 ### 10.11 How to debug (method that worked here)
@@ -511,3 +530,25 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
 Pitfalls met: Express 5 `req.query` is read-only (assignments are lost); scripted text edits with
 `String.replace` turn `$$` into `$` (use a replacer function); shell heredocs break on quotes — write edit scripts
 to a file; Baileys "Disconnected (428/408/503) — reconnecting" warnings are normal churn.
+
+### 10.12 Efficiency and security pass (1 Nov) — what was measured and changed
+Measured on live data: the size of every main tool's answer (`node scripts/mcp-call.mjs <tool> '<args>'` and count
+characters — the AI pays for every character) and the database's own statistics
+(`SELECT calls, total_exec_time, mean_exec_time, rows, query FROM pg_stat_statements ORDER BY total_exec_time DESC`).
+- `list_tasks(due_now)` was 16.4 KB and cut off (the owner's PRIORITY card was in "… 9 more lines not shown") → ordered
+  owner notes → PRIORITY → owner-written → rest, one line per card above 15 cards: 9 KB, nothing cut.
+- List status refresh rewrote every member row each time (~1 million row writes in 2 weeks; the dashboard's Lists page
+  refreshed every list on each visit) → one pass per member, only changed rows written, read paths skip a refresh
+  younger than 60 s unless a message came in.
+- `/health` ran `pg_database_size` on every ping (171k times) → cached 10 minutes. The Board re-check sorted a week of
+  messages (153 ms every 10 min) → starts from chats active this week. The LID map was reloaded on every reconnect →
+  once per process. Indexes for snoozed chats and chat recency.
+- Security: files people send are never shown as a page on the hub's own address (HTML/SVG/XML/JS → download,
+  `nosniff`) — a contact could otherwise send an .html "document" that runs with the owner's login; non-ASCII file
+  names on `/f/` links; the key is compared in constant time and 10 wrong keys per IP in 15 min → 429 (login, API,
+  MCP; a logged-out dashboard is never counted); `Referrer-Policy: same-origin` so `?key=` links never leak to other
+  sites; `X-Frame-Options`, HSTS, `trust proxy` (secure cookie on Render).
+- Not adopted from generic SaaS checklists, on purpose: multi-tenancy (one hub per business), Redis caching / rate
+  limits (one server), Sentry (Render logs + `events` table are enough at this size), staging environment (tests run
+  the whole hub on PGlite with fake WhatsApp/Meta).
+

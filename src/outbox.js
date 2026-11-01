@@ -783,6 +783,9 @@ export async function queueStatus(accountId) {
   let until = null;
   if (!q.queued) state = 'idle';
   else if (!session.account.enabled) { state = 'held'; reason = 'Number is paused (Settings)'; }
+  // 'elsewhere' = another server of this hub holds the number (for a minute or two while a new version starts) — it
+  // IS linked and sending; this answer just came from the other server (1 Nov: it was read as "the number is unlinked")
+  else if (session.status === 'elsewhere') { state = 'held'; reason = 'Held by the other server for a moment (a new version is starting) — the number is linked; sending continues within 1–3 minutes'; }
   else if (session.status !== 'open') { state = 'held'; reason = `Number is not connected (${session.status}) — messages go out once it is`; }
   else if (q.queued_automated && !insideSendingWindow(s)) { state = 'held'; reason = `Outside sending hours (${s.sendStart}–${s.sendEnd})`; }
   else if (q.queued_cold && q.queued_cold === q.queued && a.n >= s.dailyCap) { state = 'held'; reason = `Daily limit for people who haven't written in ${WARM_DAYS} days reached: ${a.n} of ${s.dailyCap} in the last 24 hours`; until = capFreeAt; }
