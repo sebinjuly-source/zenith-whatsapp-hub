@@ -1946,6 +1946,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('move_messages', { ids: [idOf(d3)], account: 'mcpall2' });
   const b = await run('bulk_send', { account: 'mcpall', title: 'Toolbox bulk', text: 'Hi {name}', recipients: [{ to: '9733300003', name: 'Three' }] });
   await run('approve_task', { id: idOf(b) });
+  await run('hub_api', { path: '/pricing' });
   await run('send_to_list', { list: 'Chef – Toolbox', statuses: ['new'], text: 'Namaste {first_name}' });
   const t = await run('create_task', { account: 'mcpall', title: 'Call Ravi 9733300001', for: 'you', priority: true, due: '2026-12-09 11:00' });
   await run('update_task', { id: idOf(t), due: '2026-12-09 12:00', move_to_campaign: 'Chef' });
@@ -2784,4 +2785,78 @@ test('file catalog: the AI files saved photos (title, folder, keep/temporary/del
   await query(`DELETE FROM config WHERE key = 'storage'`);
   await query(`DELETE FROM tasks WHERE ref = 'storage:full'`);
   await manager.remove('fc');
+});
+
+test('security: a file someone sent never runs as a page on the hub; odd file names work; key guessing is limited', async () => {
+  const { saveFile } = await import('../src/files.js');
+  const page = await saveFile({ buffer: Buffer.from('<script>alert(1)</script>'), fileName: 'invoice.html', mimetype: 'text/html' });
+  const r1 = await fetch(`${base}/f/${page.token}/invoice.html`);
+  assert.equal(r1.headers.get('content-type'), 'application/octet-stream');
+  assert.match(r1.headers.get('content-disposition'), /^attachment/);
+  assert.equal(r1.headers.get('x-content-type-options'), 'nosniff');
+  const svg = await saveFile({ buffer: Buffer.from('<svg onload="alert(1)"/>'), fileName: 'logo.svg', mimetype: 'image/svg+xml' });
+  assert.match((await fetch(`${base}/f/${svg.token}`)).headers.get('content-disposition'), /^attachment/);
+  // a PDF still opens in the browser; a Hindi file name no longer breaks the response
+  const pdf = await saveFile({ buffer: Buffer.from('%PDF-1.4 x'), fileName: 'बिल.pdf', mimetype: 'application/pdf' });
+  const r2 = await fetch(`${base}/f/${pdf.token}`);
+  assert.equal(r2.status, 200);
+  assert.equal(r2.headers.get('content-type'), 'application/pdf');
+  assert.match(r2.headers.get('content-disposition'), /^inline; filename="___\.pdf"; filename\*=UTF-8''/);
+  // headers on every response; ?key= links never leak to other sites
+  const h = await fetch(`${base}/health`);
+  assert.equal(h.headers.get('referrer-policy'), 'same-origin');
+  assert.equal(h.headers.get('x-frame-options'), 'SAMEORIGIN');
+  assert.equal(h.headers.get('x-powered-by'), null);
+  // 10 wrong keys from one place → 429 even for the login page; a logged-out dashboard (no key) is never counted
+  const { resetKeyGuesses } = await import('../src/auth.js');
+  resetKeyGuesses();
+  for (let i = 0; i < 20; i++) assert.equal((await call('GET', '/api/accounts', null, { key: null })).status, 401);
+  assert.equal((await call('POST', '/login', { key: 'k' }, { key: null })).status, 200);
+  for (let i = 0; i < 10; i++) await call('POST', '/login', { key: `guess${i}` }, { key: null });
+  assert.equal((await call('POST', '/login', { key: 'k' }, { key: null })).status, 429);
+  assert.equal((await fetch(`${base}/mcp/guess`, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } })).status, 429);
+  resetKeyGuesses();
+  assert.equal((await call('POST', '/login', { key: 'k' }, { key: null })).status, 200);
+});
+
+test('bridges: the AI reaches every REST endpoint (hub_api, changes only when the owner asked); REST runs every AI tool', async () => {
+  // hub_api: reads work, changes need owner_asked, some things are never allowed
+  assert.match(await mcp('hub_api', { path: '/pricing' }), /^200 GET \/api\/pricing/);
+  assert.match(await mcp('hub_api', { method: 'PUT', path: '/alerts', body: { phones: [] } }), /owner_asked=true/);
+  assert.match(await mcp('hub_api', { method: 'POST', path: '/outbox/approve-all', owner_asked: true }), /Not possible from the AI/);
+  assert.match(await mcp('hub_api', { method: 'POST', path: '/accounts/hotel/unlink', owner_asked: true }), /Not possible from the AI/);
+  assert.match(await mcp('hub_api', { method: 'DELETE', path: '/accounts/hotel', owner_asked: true }), /owner's job/);
+  assert.match(await mcp('hub_api', { path: 'http://evil.example/x' }), /path must look like/);
+  assert.match(await mcp('hub_api', { path: '/../health' }), /path must look like/);
+  const t = await call('POST', '/api/templates', { name: 'Bridge test', body: 'Hello {name}' });
+  const del = await mcp('hub_api', { method: 'DELETE', path: `/templates/${t.data.id}`, owner_asked: true });
+  assert.match(del, /^200 DELETE/);
+  // REST → tools: catalogue, a run, bad arguments, unknown tool
+  const cat = await call('GET', '/api/tools');
+  assert.ok(cat.data.tools.length > 60);
+  assert.ok(cat.data.tools.find((x) => x.name === 'person_context').params.person);
+  const pc = await call('POST', '/api/tools/list_accounts', {});
+  assert.equal(pc.status, 200);
+  assert.match(pc.data.text, /hotel/);
+  assert.equal((await call('POST', '/api/tools/person_context', {})).status, 400);
+  assert.equal((await call('POST', '/api/tools/no_such_tool', {})).status, 404);
+  const bad = await call('POST', '/api/tools/update_task', { id: 999999, status: 'done' });
+  assert.equal(bad.status, 422);
+  assert.equal(bad.data.isError, true);
+});
+
+test('list_tasks: owner notes, PRIORITY and cards the owner wrote come first; a long list is one short line per card', async () => {
+  const tasks = await import('../src/tasks.js');
+  const made = [];
+  for (let i = 0; i < 18; i++) made.push(await tasks.createTask({ account: 'hotel', title: `Follow up: Person ${i}`, assignee: 'ai', dueAt: new Date(Date.now() - (30 - i) * 3600e3), createdBy: 'hub' }));
+  const vip = await tasks.createTask({ account: 'hotel', title: 'Wish Rashith on Rajyotsava', assignee: 'ai', priority: true, dueAt: new Date(Date.now() - 3600e3), createdBy: 'you' });
+  const out = await mcp('list_tasks', { for: 'ai', due_now: true, campaign: 'all' });
+  const lines = out.split('\n');
+  assert.match(lines[0], /need attention first/);
+  // the PRIORITY card the owner wrote is above every ordinary follow-up (other suites' owner-note cards may come first)
+  const at = lines.findIndex((l) => l.startsWith(`#${vip.id} `));
+  assert.match(lines[at], /PRIORITY.*Wish Rashith/);
+  assert.ok(at < lines.findIndex((l) => /Follow up: Person/.test(l)));
+  assert.ok(out.length < 16000, 'fits in one answer');
+  for (const t of [...made, vip]) await tasks.updateTask(t.id, { status: 'done', actor: 'ai' });
 });

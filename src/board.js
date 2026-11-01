@@ -251,12 +251,16 @@ export async function catchNoNextStep() {
 export async function syncBoard() {
   await (await import('./stages.js')).refreshStages();
   const since = Math.floor(Date.now() / 1000) - 7 * 86400;
+  // From the chats active this week (one row each, kept current on every message) to their latest message — not a
+  // sort of a whole week of messages (153 ms × every 10 minutes before, 1 Nov 2026)
   const last = await query(
-    `SELECT DISTINCT ON (x.account_id, x.chat_jid) x.account_id, x.chat_jid, x.from_me, x.ts, x.body, x.type
-     FROM messages x
-     WHERE x.ts > $1 AND x.chat_jid NOT LIKE '%@g.us'
-       AND EXISTS (SELECT 1 FROM list_members m WHERE m.jid = x.chat_jid)
-     ORDER BY x.account_id, x.chat_jid, x.ts DESC`,
+    `SELECT c.account_id, c.jid AS chat_jid, x.from_me, x.ts, x.body, x.type
+     FROM chats c
+     JOIN LATERAL (SELECT from_me, ts, body, type FROM messages x WHERE x.account_id = c.account_id AND x.chat_jid = c.jid
+                   ORDER BY x.ts DESC LIMIT 1) x ON TRUE
+     WHERE c.last_ts > $1 AND x.ts > $1 AND c.jid NOT LIKE '%@g.us'
+       AND EXISTS (SELECT 1 FROM list_members m WHERE m.jid = c.jid)
+     ORDER BY c.account_id, c.jid`,
     [since],
   );
   let opened = 0;

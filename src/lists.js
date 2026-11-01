@@ -271,44 +271,64 @@ export function refreshList(listId) {
   return st.running;
 }
 // Messages from the list's number AND from any number its messages were moved to (e.g. when a number is blocked).
+// One pass per member (it used to scan their messages five times) and only rows whose numbers changed are written
+// (it used to rewrite every member each time: ~1 million row writes in 2 weeks, 1 Nov 2026).
+const lastRefresh = new Map(); // listId -> ms
 async function doRefreshList(listId) {
+  lastRefresh.set(String(listId), Date.now());
   await query(
     `WITH l AS (SELECT id, account_id, extract(epoch FROM since)::bigint AS since,
        ARRAY(SELECT DISTINCT o.account_id FROM outbox o WHERE o.list_id = $1) || account_id AS accs FROM lists WHERE id = $1),
-     -- a message WhatsApp/Meta reported as not delivered (status 0) does not count as sent
-     m AS (
-       SELECT lm.jid,
-         (SELECT min(ts) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND COALESCE(x.status, 1) <> 0 AND x.ts >= l.since) AS first_sent,
-         (SELECT max(ts) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND COALESCE(x.status, 1) <> 0 AND x.ts >= l.since) AS last_sent,
-         (SELECT count(*) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND COALESCE(x.status, 1) <> 0 AND x.ts >= l.since) AS sent_count
-       FROM list_members lm WHERE lm.list_id = $1
-     ),
      r AS (
-       SELECT m.jid, m.first_sent, m.last_sent, m.sent_count,
-         (SELECT max(ts) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = m.jid AND NOT x.from_me AND x.ts >= m.first_sent) AS last_reply,
-         (SELECT count(*) FROM messages x, l WHERE x.account_id = ANY(l.accs) AND x.chat_jid = m.jid AND NOT x.from_me AND x.ts >= m.first_sent) AS replies,
-         (SELECT count(*) FROM outbox o WHERE o.list_id = $1 AND o.to_jid = m.jid AND o.status IN ('draft','queued','sending')) AS pending,
-         (SELECT o.error FROM outbox o WHERE o.list_id = $1 AND o.to_jid = m.jid AND o.status = 'failed' ORDER BY o.id DESC LIMIT 1) AS last_error,
-         (SELECT o.created_at FROM outbox o WHERE o.list_id = $1 AND o.to_jid = m.jid AND o.status = 'failed' ORDER BY o.id DESC LIMIT 1) AS failed_at,
-         (SELECT count(*) FROM outbox o WHERE o.list_id = $1 AND o.to_jid = m.jid AND o.note = 'follow-up' AND o.status = 'sent') AS followups,
-         EXISTS (SELECT 1 FROM contacts c, l WHERE c.account_id = ANY(l.accs) AND c.jid = m.jid AND 'opted-out' = ANY(c.tags)) AS opted_out
-       FROM m
+       SELECT lm.jid, s.first_sent, s.last_sent, rp.last_reply, rp.replies, ob.pending, ob.followups,
+         f.error AS last_error, f.created_at AS failed_at,
+         EXISTS (SELECT 1 FROM contacts c WHERE c.account_id = ANY(l.accs) AND c.jid = lm.jid AND 'opted-out' = ANY(c.tags)) AS opted_out
+       FROM list_members lm CROSS JOIN l
+       -- a message WhatsApp/Meta reported as not delivered (status 0) does not count as sent
+       LEFT JOIN LATERAL (SELECT min(x.ts) AS first_sent, max(x.ts) AS last_sent FROM messages x
+         WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND x.from_me AND COALESCE(x.status, 1) <> 0 AND x.ts >= l.since) s ON TRUE
+       LEFT JOIN LATERAL (SELECT max(x.ts) AS last_reply, count(*)::int AS replies FROM messages x
+         WHERE x.account_id = ANY(l.accs) AND x.chat_jid = lm.jid AND NOT x.from_me AND x.ts >= s.first_sent) rp ON TRUE
+       LEFT JOIN LATERAL (SELECT count(*) FILTER (WHERE o.status IN ('draft','queued','sending'))::int AS pending,
+           count(*) FILTER (WHERE o.note = 'follow-up' AND o.status = 'sent')::int AS followups
+         FROM outbox o WHERE o.list_id = $1 AND o.to_jid = lm.jid) ob ON TRUE
+       LEFT JOIN LATERAL (SELECT o.error, o.created_at FROM outbox o
+         WHERE o.list_id = $1 AND o.to_jid = lm.jid AND o.status = 'failed' ORDER BY o.id DESC LIMIT 1) f ON TRUE
+       WHERE lm.list_id = $1
+     ),
+     n AS (
+       SELECT jid, to_timestamp(first_sent) AS first_sent_at, to_timestamp(last_sent) AS last_sent_at,
+         to_timestamp(last_reply) AS last_reply_at, replies, followups,
+         CASE
+           WHEN opted_out THEN 'opted_out'
+           WHEN replies > 0 THEN 'replied'
+           WHEN pending > 0 THEN 'queued'
+           WHEN first_sent IS NOT NULL AND (failed_at IS NULL OR to_timestamp(last_sent) > failed_at) THEN 'sent'
+           WHEN last_error IS NOT NULL THEN 'failed'
+           ELSE 'new' END AS status,
+         CASE WHEN first_sent IS NULL OR to_timestamp(last_sent) < failed_at THEN last_error END AS error
+       FROM r
      )
      UPDATE list_members lm SET
-       first_sent_at = to_timestamp(r.first_sent), last_sent_at = to_timestamp(r.last_sent),
-       last_reply_at = to_timestamp(r.last_reply), replies = r.replies, followups_sent = r.followups,
-       status = CASE
-         WHEN r.opted_out THEN 'opted_out'
-         WHEN r.replies > 0 THEN 'replied'
-         WHEN r.pending > 0 THEN 'queued'
-         WHEN r.first_sent IS NOT NULL AND (r.failed_at IS NULL OR to_timestamp(r.last_sent) > r.failed_at) THEN 'sent'
-         WHEN r.last_error IS NOT NULL THEN 'failed'
-         ELSE 'new' END,
-       error = CASE WHEN r.first_sent IS NULL OR to_timestamp(r.last_sent) < r.failed_at THEN r.last_error END,
-       updated_at = now()
-     FROM r WHERE lm.list_id = $1 AND lm.jid = r.jid`,
+       first_sent_at = n.first_sent_at, last_sent_at = n.last_sent_at, last_reply_at = n.last_reply_at,
+       replies = n.replies, followups_sent = n.followups, status = n.status, error = n.error, updated_at = now()
+     FROM n WHERE lm.list_id = $1 AND lm.jid = n.jid
+       AND (lm.first_sent_at, lm.last_sent_at, lm.last_reply_at, lm.replies, lm.followups_sent, lm.status, lm.error)
+           IS DISTINCT FROM (n.first_sent_at, n.last_sent_at, n.last_reply_at, n.replies, n.followups, n.status, n.error)`,
     [listId],
   );
+}
+
+/** For screens and AI reads: refresh only when the last refresh is older than maxAgeMs (sends refresh on their own). */
+export async function refreshListIfStale(listId, maxAgeMs = 60000) {
+  const at = lastRefresh.get(String(listId));
+  if (at && Date.now() - at < maxAgeMs) {
+    // …unless a message came in on the list's number since then (a reply must show at once)
+    const [m] = await query(`SELECT 1 FROM lists l JOIN messages m ON m.account_id = l.account_id AND m.ts >= $2 WHERE l.id = $1 LIMIT 1`,
+      [listId, Math.floor(at / 1000)]);
+    if (!m) return;
+  }
+  return refreshList(listId);
 }
 
 export async function listLists(account, role, { includeArchived = false } = {}) {

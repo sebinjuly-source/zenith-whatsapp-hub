@@ -9,6 +9,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import config from './config.js';
+import { keyOk, keyGuessBlocked } from './auth.js';
 import { query, tx } from './db.js';
 import { manager } from './wa/manager.js';
 import * as store from './store.js';
@@ -281,13 +282,17 @@ function buildServer(playbook = '', focus = '') {
     const shape = { ...inputSchema };
     if (!shape.campaign) shape.campaign = CAMPAIGN_FILTER;
     if (name === 'update_task') shape.in_campaign = CAMPAIGN_FILTER.describe('Older name of campaign (the filter)');
-    server.registerTool(name, { description, inputSchema: shape }, safe(async (a = {}) => {
+    const run = safe(async (a = {}) => {
       const c = callCampaign(name, a, focus);
       await enforceScope(c, name, a);
       a._c = c; // handlers filter by it
       return fn(a);
-    }, name === 'get_playbook' ? Infinity : RESPONSE_BUDGET)); // the owner's rules are never cut
+    }, name === 'get_playbook' ? Infinity : RESPONSE_BUDGET); // the owner's rules are never cut
+    server.registerTool(name, { description, inputSchema: shape }, run);
+    registry.set(name, { description, shape, run }); // the same tools over REST: POST /api/tools/<name>
   };
+  const registry = new Map();
+  server.hubTools = registry;
 
   tool('list_accounts', 'List the WhatsApp numbers in the hub: id, purpose, phone, connection status, AI mode (approve/auto), and how much history is stored. Start here.', {}, async () => {
     const lines = [];
@@ -1114,7 +1119,7 @@ function buildServer(playbook = '', focus = '') {
     include_archived: z.boolean().optional(),
   }, async (a) => {
     const acc = a.account ? (await manager.resolve(a.account)).id : null;
-    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND archived IS NULL', [acc])) await lists.refreshList(l.id);
+    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND archived IS NULL', [acc])) await lists.refreshListIfStale(l.id);
     const rows = await lists.listLists(acc, a.role, { includeArchived: a.include_archived });
     const others = acc ? (await query('SELECT count(*)::int n FROM lists WHERE account_id <> $1 AND archived IS NULL', [acc]))[0].n : 0;
     const note = others ? `\n(${others} more list(s) on other numbers — call list_lists without account to see them)` : '';
@@ -1147,7 +1152,7 @@ function buildServer(playbook = '', focus = '') {
     outcome: z.string().optional(),
   }, async (a) => {
     const l = await lists.getList(a.list);
-    await lists.refreshList(l.id);
+    await lists.refreshListIfStale(l.id);
     let rows = await lists.listMembers(l.id, { status: a.status, outcome: a.outcome });
     if (a.stage) {
       const want = a.stage.split(',').map((x) => x.trim());
@@ -1236,7 +1241,7 @@ function buildServer(playbook = '', focus = '') {
     account: z.string().optional(), role: z.string().optional(),
   }, async (a) => {
     const acc = a.account ? (await manager.resolve(a.account)).id : null;
-    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND archived IS NULL', [acc])) await lists.refreshList(l.id);
+    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND archived IS NULL', [acc])) await lists.refreshListIfStale(l.id);
     const { counts, visits } = await lists.pipelineSummary(acc, a.role);
     const byList = {};
     for (const c of counts) (byList[c.name] ||= []).push(`${c.stage}: ${c.n}`);
@@ -1620,7 +1625,23 @@ function buildServer(playbook = '', focus = '') {
       const newer = !m.from_me && Number(m.ts) > new Date(t.updated_at).getTime() / 1000;
       return ` | chat now: ${m.from_me ? 'me' : 'them'} ${fmtTime(m.ts)} "${m.body}"${newer ? ' (NEWER than this card — read person_context)' : ''}`;
     };
-    if (rows.length) return rows.map((t) => `${taskLine(t)}${chatOf(t)}${nowLine(t)}`).join('\n');
+    // most important first, so a cut-off long list never hides them (1 Nov: the owner's PRIORITY card was below 28
+    // stale follow-ups and fell into "… 9 more lines not shown"): owner notes → priority → cards the owner wrote → the rest
+    const rank = (t) => (t.owner_note_pending ? 0 : t.priority ? 1 : t.created_by === 'you' && t.kind === 'todo' ? 2 : 3);
+    rows = rows.map((t, i) => [t, i]).sort((x, y) => rank(x[0]) - rank(y[0]) || x[1] - y[1]).map(([t]) => t);
+    // a long list gets one short line per card (the full card: task_history / person_context) so all of it fits
+    const compact = rows.length > 15;
+    const line = (t) => (compact
+      ? [`#${t.id}`, t.account_id, t.status, t.owner_note_pending ? 'OWNER NOTE TO ACT ON' : null, t.priority ? 'PRIORITY' : null,
+        (t.assignee || 'you') === 'ai' ? 'for AI' : 'for owner', trim(t.title, 70),
+        t.due_at ? `due ${fmtTime(Math.floor(new Date(t.due_at).getTime() / 1000))}` : null,
+        t.notes ? `last note: "${trim(t.last_note, 90)}"` : null].filter(Boolean).join(' | ') + chatOf(t)
+      : `${taskLine(t)}${chatOf(t)}${nowLine(t)}`);
+    if (rows.length) {
+      const top = rows.filter((t) => rank(t) < 3).length;
+      const head = compact ? `${rows.length} cards${top ? ` — ${top} need attention first (owner notes / PRIORITY / written by the owner)` : ''}; one line each — task_history(id) or person_context for the full story:\n` : '';
+      return head + rows.map(line).join('\n');
+    }
     if (a.past) return 'No finished tasks match.';
     const [p] = await query(`SELECT count(*)::int n FROM tasks WHERE status IN ('done','cancelled') AND completed_at > now() - interval '7 days'`);
     return `No open tasks match${a.account || a.for || a.kind || a.role ? ' these filters' : ''}. (${p.n} finished in the last 7 days — they are hidden; use past=true. A finished bulk send means everything went out.)`;
@@ -1717,13 +1738,78 @@ function buildServer(playbook = '', focus = '') {
     return `Approved ${r.approved} messages of task #${a.id}.`;
   });
 
+  // The REST API does a few things no tool does (pricing, alerts, digest, check-in setup, playbook history/restore,
+  // deleting a template/rule/contact, events, jobs …). One door instead of twenty tools keeps every session small.
+  const NEVER = [/^\/(shutdown|login|logout)\b/, /^\/accounts\/[^/?]+\/(link|unlink)\b/, /^\/outbox\/approve-all\b/];
+  tool('hub_api', 'Call ANY REST endpoint of the hub — the same API the dashboard and Apps Script use — for the few things no other tool does: pricing, alerts, morning digest, trusted recipients, daily check-in setup, playbook history/restore, deleting a template/rule/contact, events (?problems=1), jobs, account settings. GET /help lists every endpoint. Reads (GET) always work. Changes need owner_asked=true (only when the owner asked for exactly this) — and prefer the dedicated tool when one exists. Never possible here: linking/unlinking a number, shutdown, approve-all.', {
+    method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']).optional().describe('Default GET'),
+    path: z.string().describe('The path after /api, e.g. "/pricing", "/events?problems=1&limit=20", "/templates/12"'),
+    body: z.record(z.string(), z.any()).optional().describe('JSON body for POST/PUT/PATCH'),
+    owner_asked: z.boolean().optional(),
+  }, async (a) => {
+    const method = a.method || 'GET';
+    const p = String(a.path || '').trim();
+    if (!p.startsWith('/') || p.includes('..') || /^\/\//.test(p) || /[\s\\]/.test(p)) throw new Error('path must look like "/pricing" (no host, no "..")');
+    if (method === 'DELETE' && /^\/accounts\/[^/?]+\/?$/.test(p)) throw new Error('Removing a number is the owner\'s job in the dashboard.');
+    if (NEVER.some((r) => r.test(p))) throw new Error('Not possible from the AI — the owner does this in the dashboard.');
+    if (method !== 'GET' && !a.owner_asked) throw new Error('A change through hub_api needs owner_asked=true (only when the owner asked for it). For everyday work use the dedicated tools.');
+    if (!localServer.port) throw new Error('The hub has not served a request yet — try again in a moment');
+    const r = await fetch(`http://127.0.0.1:${localServer.port}/api${p}`, {
+      method, headers: { 'x-api-key': config.apiKey, 'content-type': 'application/json', accept: 'application/json' },
+      body: method === 'GET' || method === 'DELETE' ? undefined : JSON.stringify(a.body || {}),
+    });
+    const ct = r.headers.get('content-type') || '';
+    if (!/json|text/.test(ct)) return `${r.status} ${ct} (${r.headers.get('content-length') || '?'} bytes) — a file; use open_file / save_media for files.`;
+    const raw = await r.text();
+    let out = raw;
+    try { out = JSON.stringify(JSON.parse(raw)); } catch { /* plain text */ }
+    if (method !== 'GET') await ai(null, `hub_api ${method} ${p} → ${r.status}`);
+    return `${r.status}${r.ok ? '' : ' ERROR'} ${method} /api${p}\n${out}`;
+  });
+
   return server;
 }
 
+/** The port this process answers on (set by the first request), so hub_api can call its own REST API. */
+export const localServer = { port: 0 };
+
+// One tool set for REST callers (Apps Script, a second app): every campaign, no playbook text needed.
+let restServer = null;
+const restTools = () => (restServer ??= buildServer('', '')).hubTools;
+/** The tools as a catalogue: name, what it does, its parameters (for GET /api/tools). */
+export function toolCatalog() {
+  return [...restTools()].map(([name, t]) => ({
+    name,
+    description: t.description,
+    params: Object.fromEntries(Object.entries(t.shape).map(([k, v]) => [k, v.description || v.def?.type || v.type || ''])),
+  }));
+}
+/** Run one tool with the same checks as MCP (POST /api/tools/<name>). Returns { text, images, isError }. */
+export async function runTool(name, args = {}) {
+  const t = restTools().get(name);
+  if (!t) throw Object.assign(new Error(`No tool "${name}" — GET /api/tools lists them`), { status: 404 });
+  const parsed = z.object(t.shape).safeParse(args || {});
+  if (!parsed.success) throw Object.assign(new Error(parsed.error.issues.map((i) => `${i.path.join('.') || 'args'}: ${i.message}`).join('; ')), { status: 400 });
+  const r = await t.run(parsed.data);
+  return {
+    text: r.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n'),
+    images: r.content.filter((c) => c.type === 'image').map((c) => ({ mimeType: c.mimeType, data: c.data })),
+    isError: Boolean(r.isError),
+  };
+}
+
 export function mountMcp(app) {
+  app.use((req, res, next) => {
+    localServer.port ||= req.socket.localPort;
+    next();
+  });
   const handler = async (req, res) => {
     const key = req.params.key || req.get('x-api-key') || req.query.key;
-    if (key !== config.apiKey) return res.status(401).json({ error: 'Unauthorized' });
+    if (keyGuessBlocked(req.ip)) return res.status(429).set('Retry-After', '900').json({ error: 'Too many wrong keys — try again in 15 minutes' });
+    if (!keyOk(key)) {
+      keyGuessBlocked(req.ip, Boolean(key));
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     if (req.method !== 'POST') return res.status(405).set('Allow', 'POST').json({ error: 'Method not allowed' });
     // Campaign scope: the URL can pin one (/mcp/<key>/<campaign>, ?campaign=…; "all" = every campaign) — e.g. for a
     // background routine that always works on Chef hiring. Otherwise the campaign chosen in the dashboard applies.

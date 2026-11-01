@@ -2162,7 +2162,11 @@ ${laterText(shown)}` : ''}`)) return;
       tabs,
       approveAllBar,
       selectBtn,
-      h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr))' }, items.length ? items : [h('p', { class: 'muted' }, 'Nothing here.')]),
+      h('div', { class: 'cards', style: 'grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr))' }, items.length ? items : [h('div', { class: 'empty' },
+        h('div', { class: 'empty-ico', 'aria-hidden': 'true' }, { draft: '✅', queued: '📭', sent: '📨', failed: '👍' }[tab] || '📭'),
+        h('p', {}, { draft: 'No drafts waiting for you.', queued: 'Nothing waiting to go out.', sent: 'Nothing sent yet.', failed: 'Nothing failed or rejected.' }[tab] || 'Nothing here.'),
+        h('p', { class: 'muted' }, tab === 'draft' ? 'When the AI or a campaign writes a message on a number in approval mode, it waits here for you to approve, edit or reject.'
+          : acc ? 'Try "All numbers" above.' : ''))]),
       pickBar,
     ]);
     if (scrollY) requestAnimationFrame(() => { const m = document.querySelector('main'); if (m) m.scrollTop = scrollY; });

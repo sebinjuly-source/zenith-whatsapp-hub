@@ -317,7 +317,9 @@ details.section > :last-child { margin-bottom: 12px; }
 .tc-meta { font-size: 12px; margin-top: 3px; }
 .tc-note { font-size: 13px; margin-top: 4px; white-space: pre-wrap; }
 .tc-actions { margin-top: 8px; gap: 6px; align-items: flex-start; }
-details.more { flex-basis: 100%; }
+/* closed: a small pill next to ✓ Done (one row per card); open: the full width below */
+details.more { flex: 0 0 auto; }
+details.more[open] { flex-basis: 100%; }
 details.more > summary { cursor: pointer; color: var(--ink-3); font-size: 12.5px; }
 details.more[open] { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
 details.day { border-top: 1px solid var(--line); padding: 6px 0; }
@@ -381,7 +383,6 @@ details.day .cardlist { margin: 6px 0; }
 
 /* board: room between ✓ Done and More; select cards for one note */
 .tc-actions { gap: 10px; }
-details.more { margin-top: 10px; }
 details.more > summary { display: inline-block; padding: 4px 10px; border: 1px solid var(--line); border-radius: 99px; background: var(--panel); }
 .tc-head .pick { width: 18px; height: 18px; margin: 1px 2px 0 0; accent-color: var(--accent); flex: 0 0 auto; cursor: pointer; }
 .taskcard.picked { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -405,9 +406,10 @@ details.day > summary .selall { margin-left: 8px; }
 .app.focused .campaign-pick { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
 .tag.campaign-tag { background: var(--accent-soft); color: var(--ink); border-color: transparent; }
 @media (max-width: 760px) {
-  .campaign-pick { max-width: 112px; font-size: 12px; padding: 5px 6px; }
-  .topbar .tab .tab-label { display: none; }
-  .topbar .tab { padding: 7px 10px; font-size: 18px; }
+  .campaign-pick { max-width: 132px; font-size: 12px; padding: 5px 6px; }
+  /* phones: icon with a tiny word under it — icons alone (📁 💬 ✉️) didn't say what they open */
+  .topbar .tab { flex-direction: column; gap: 1px; padding: 3px 8px; font-size: 17px; }
+  .topbar .tab .tab-label { display: block; font-size: 10px; font-weight: 600; line-height: 1.1; }
 }
 .callrow[hidden] { display: none; }
 .callrow { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 2px; }
@@ -416,3 +418,8 @@ details.day > summary .selall { margin-left: 8px; }
 .card.draftcard.picked { outline: 2px solid var(--accent); outline-offset: 1px; }
 .card.draftcard .pick { width: 18px; height: 18px; accent-color: var(--accent); flex: 0 0 auto; cursor: pointer; }
 .pickbar select { width: auto; max-width: 180px; color: var(--ink); background: var(--panel); }
+
+/* empty lists: say what will appear here and why it is empty */
+.empty { text-align: center; padding: 28px 16px; border: 1px dashed var(--line); border-radius: 12px; background: var(--panel); }
+.empty p { margin: 4px 0; }
+.empty-ico { font-size: 30px; margin-bottom: 6px; }

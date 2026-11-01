@@ -29,6 +29,7 @@ const warmAccounts = new Set(); // accounts whose whole lid_map is in lidCache
 
 /** Load every known mapping once, so lookups during a big history sync never hit the network. */
 export async function warmLidCache(accountId) {
+  if (warmAccounts.has(accountId)) return; // reconnects reuse it: every later mapping goes through saveLidMappings
   const rows = await query('SELECT lid, pn FROM lid_map WHERE account_id = $1', [accountId]);
   for (const r of rows) lidCache.set(`${accountId}|${r.lid}`, r.pn);
   warmAccounts.add(accountId);

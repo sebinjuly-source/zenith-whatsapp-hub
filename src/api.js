@@ -3,6 +3,7 @@
  *   header "x-api-key: <key>", or "?key=<key>" (handy for Apps Script), or the dashboard login cookie.
  */
 import express from 'express';
+import { keyOk, keyGuessBlocked } from './auth.js';
 import * as scope from './scope.js';
 import { roleOf, roleFilter } from './campaign.js';
 import cookieParser from 'cookie-parser';
@@ -15,7 +16,7 @@ import { manager } from './wa/manager.js';
 import * as store from './store.js';
 import * as outbox from './outbox.js';
 import { getMedia } from './media.js';
-import { mountMcp } from './mcp.js';
+import { mountMcp, toolCatalog, runTool } from './mcp.js';
 import { mountMetaWebhook } from './meta.js';
 import { toTs } from './util.js';
 import * as tasks from './tasks.js';
@@ -57,13 +58,49 @@ const indexHtml = () =>
 const wrap = (fn) => (req, res) =>
   Promise.resolve(fn(req, res)).catch((err) => res.status(err.status || 400).json({ error: err.message }));
 
+// The database size changes slowly; /health is polled every few seconds by the host (171k size queries in 2 weeks)
+let dbSize = { at: 0, mb: null };
+async function dbSizeMb() {
+  if (Date.now() - dbSize.at < 10 * 60000) return dbSize.mb;
+  const mb = await query('SELECT pg_database_size(current_database())::bigint AS b').then(([r]) => Math.round(Number(r.b) / 1048576)).catch(() => null);
+  dbSize = { at: Date.now(), mb };
+  return mb;
+}
+
 function authed(req) {
-  const key = req.get('x-api-key') || req.query.key || req.cookies?.hub_key;
-  return key && key === config.apiKey;
+  return keyOk(req.get('x-api-key') || req.query.key || req.cookies?.hub_key);
+}
+
+/**
+ * Send a stored file. Anyone on WhatsApp can send us a "document", so a file must never run as a page on the hub's
+ * own address (it would act with the owner's login): page-like types are always downloaded, never opened inline.
+ */
+const ACTIVE_TYPES = /^(text\/html|application\/xhtml|image\/svg|text\/xml|application\/xml|text\/javascript|application\/(x-)?javascript|application\/ecmascript|multipart\/)/i;
+export function sendStoredFile(res, { buffer, mimetype, fileName, download = false, cache = 'private, max-age=86400' }) {
+  const active = ACTIVE_TYPES.test(mimetype || '');
+  res.setHeader('Content-Type', active ? 'application/octet-stream' : mimetype || 'application/octet-stream');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // Headers must be plain ASCII (a Hindi or accented file name made Node throw): ASCII fallback + the real name in filename*
+  const fname = String(fileName || 'file').replace(/["\\\r\n]/g, '');
+  const ascii = fname.replace(/[^\x20-\x7e]/g, '_');
+  res.setHeader('Content-Disposition', `${download || active ? 'attachment' : 'inline'}; filename="${ascii}"${ascii !== fname ? `; filename*=UTF-8''${encodeURIComponent(fname)}` : ''}`);
+  if (cache) res.setHeader('Cache-Control', cache);
+  res.send(buffer);
 }
 
 export function buildApp() {
   const app = express();
+  // Render (and most hosts) sit behind a proxy: needed for req.secure (secure cookie) and the real client IP
+  app.set('trust proxy', 1);
+  app.disable('x-powered-by');
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    // links opened from the dashboard must never carry "?key=" to another site in the Referer header
+    res.setHeader('Referrer-Policy', 'same-origin');
+    if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=15552000');
+    next();
+  });
   // Raw body kept only for Meta's webhook signature check.
   app.use(express.json({ limit: '30mb', verify: (req, res, buf) => { if (req.url.startsWith('/meta/')) req.rawBody = buf; } }));
   app.use(cookieParser());
@@ -73,9 +110,7 @@ export function buildApp() {
     const { getFile } = await import('./files.js');
     const f = /^[0-9a-f]{32}$/.test(req.params.token) ? await getFile(req.params.token).catch(() => null) : null;
     if (!f) return res.status(404).send('Not found');
-    res.set('Content-Type', f.mimetype || 'application/octet-stream');
-    res.set('Content-Disposition', `inline; filename="${f.fileName.replace(/"/g, '')}"`);
-    res.send(f.buffer);
+    sendStoredFile(res, { buffer: f.buffer, mimetype: f.mimetype, fileName: f.fileName, download: req.query.download === '1', cache: null });
   });
 
   // Always 200 (Render restarts on a failing health check); problems are reported in the body
@@ -90,7 +125,7 @@ export function buildApp() {
       version: VERSION,
       memoryMb: Math.round(process.memoryUsage().rss / 1048576), // Render free plan: 512 MB
       // database size (Supabase free plan: 500 MB) — see docs/DATA-GROWTH.md for what to do as it grows
-      dbMb: dbOk ? await query('SELECT pg_database_size(current_database())::bigint AS b').then(([r]) => Math.round(Number(r.b) / 1048576)).catch(() => null) : null,
+      dbMb: dbOk ? await dbSizeMb() : null,
       accounts: manager.list().map((a) => ({ id: a.id, status: a.status })),
       // the 10-minute Board re-check: when it last ran and how it went
       board: { ...lastSync, late: stale },
@@ -98,7 +133,11 @@ export function buildApp() {
   });
 
   app.post('/login', (req, res) => {
-    if (req.body?.key !== config.apiKey) return res.status(401).json({ error: 'Wrong key' });
+    if (keyGuessBlocked(req.ip)) return res.status(429).set('Retry-After', '900').json({ error: 'Too many wrong keys — try again in 15 minutes' });
+    if (!keyOk(req.body?.key)) {
+      keyGuessBlocked(req.ip, true);
+      return res.status(401).json({ error: 'Wrong key' });
+    }
     res.cookie('hub_key', config.apiKey, { httpOnly: true, sameSite: 'lax', maxAge: 365 * 24 * 3600 * 1000, secure: req.secure });
     res.json({ ok: true });
   });
@@ -132,7 +171,24 @@ export function buildApp() {
   }));
 
   const api = express.Router();
-  api.use((req, res, next) => (authed(req) ? next() : res.status(401).json({ error: 'Unauthorized' })));
+  api.use((req, res, next) => {
+    if (authed(req)) return next();
+    // a script with an old key retries a few times a minute: only real guessing reaches the limit
+    // (no key at all = a logged-out dashboard polling: never counted, or it would lock the login page)
+    // (an old login cookie after a key change is cleared, not counted — the login page then works again)
+    if (req.cookies?.hub_key) res.clearCookie('hub_key');
+    const tried = Boolean(req.get('x-api-key') || req.query.key);
+    if (keyGuessBlocked(req.ip, tried)) return res.status(429).set('Retry-After', '900').json({ error: 'Too many wrong keys — try again in 15 minutes' });
+    res.status(401).json({ error: 'Unauthorized' });
+  });
+
+  // Every AI tool over plain REST (Apps Script, a second app): the same checks and answers as MCP.
+  // GET /api/tools → catalogue; POST /api/tools/person_context {"person":"9876543210"} → { text, images, isError }
+  api.get('/tools', wrap(async (req, res) => res.json({ tools: toolCatalog() })));
+  api.post('/tools/:name', wrap(async (req, res) => {
+    const r = await runTool(req.params.name, req.body || {});
+    res.status(r.isError ? 422 : 200).json(r);
+  }));
   // Campaign scope (scope.js): the campaign picked in the dashboard decides what the dashboard sees and may change.
   api.use(async (req, res, next) => {
     try {
@@ -391,7 +447,7 @@ export function buildApp() {
   // ---- Contact lists (candidate batches) + follow-ups
   api.get('/lists', wrap(async (req, res) => {
     // ?archived=1 includes archived lists
-    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND ($2 OR archived IS NULL)', [req.query.account || null, req.query.archived === '1'])) await lists.refreshList(l.id);
+    for (const l of await query('SELECT id FROM lists WHERE ($1::text IS NULL OR account_id = $1) AND ($2 OR archived IS NULL)', [req.query.account || null, req.query.archived === '1'])) await lists.refreshListIfStale(l.id);
     const role = roleQ(req);
     const rows = await lists.listLists(req.query.account, role && !scope.same(role, 'none') ? role : role ? '(no list belongs to Hotel / no campaign)' : undefined, { includeArchived: req.query.archived === '1' });
     // each list carries its campaign's funnel stages (the Lists page shows those, not the hiring ones)
@@ -409,7 +465,7 @@ export function buildApp() {
   api.get('/lists/:id/members', wrap(async (req, res) => {
     await scope.assertList(req.focus, req.params.id);
     const l = await lists.getList(req.params.id);
-    await lists.refreshList(l.id);
+    await lists.refreshListIfStale(l.id);
     res.json(await lists.listMembers(l.id, { status: req.query.status, outcome: req.query.outcome }));
   }));
   api.patch('/lists/:id/members/:phone', wrap(async (req, res) => {
@@ -954,15 +1010,10 @@ export function buildApp() {
       throw err;
     }
     const { buffer, mimetype } = file;
-    res.setHeader('Content-Type', mimetype || 'application/octet-stream');
     // ?download=1 saves the file on the device (phones ignore 'open in new tab' for many types)
     const ext = (mimetype || '').split('/')[1]?.split(';')[0]?.replace('jpeg', 'jpg').replace('quicktime', 'mov') || 'bin';
-    const fname = (row.media.fileName || `${jid.split('@')[0]}-${new Date(Number(row.ts) * 1000).toISOString().slice(0, 10)}-${msgId.slice(-6)}.${ext}`).replace(/["\\]/g, '');
-    // Headers must be plain ASCII (a Hindi or accented file name made Node throw): ASCII fallback + the real name in filename*
-    const ascii = fname.replace(/[^\x20-\x7e]/g, '_');
-    res.setHeader('Content-Disposition', `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="${ascii}"${ascii !== fname ? `; filename*=UTF-8''${encodeURIComponent(fname)}` : ''}`);
-    res.setHeader('Cache-Control', 'private, max-age=86400');
-    res.send(buffer);
+    const fname = row.media.fileName || `${jid.split('@')[0]}-${new Date(Number(row.ts) * 1000).toISOString().slice(0, 10)}-${msgId.slice(-6)}.${ext}`;
+    sendStoredFile(res, { buffer, mimetype, fileName: fname, download: req.query.download === '1' });
   }));
 
   api.get('/events', wrap(async (req, res) => {

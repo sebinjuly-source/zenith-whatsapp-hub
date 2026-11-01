@@ -206,6 +206,8 @@ CREATE TABLE IF NOT EXISTS rules (
 -- Chat state: open / snoozed (remind me on a date) / done. A new incoming message reopens the chat.
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'open';
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS chats_snoozed ON chats (snoozed_until) WHERE snoozed_until IS NOT NULL;
+CREATE INDEX IF NOT EXISTS chats_last_ts ON chats (last_ts DESC);
 ALTER TABLE chats ADD COLUMN IF NOT EXISTS snooze_note TEXT;
 
 -- Contact lists (candidate batches etc.) with per-person status worked out from WhatsApp messages
