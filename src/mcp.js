@@ -220,7 +220,7 @@ const isPhone = (q) => /^[+\d\s()-]{8,}$/.test(q) || q.includes('@');
 function callCampaign(name, a, focus) {
   // a tool's own job-role argument (import_list, known_candidates, list_tasks …) is more specific than campaign
   const ownRole = CAMPAIGN_ARG[name] === 'role' && a.role && !/^all$/i.test(a.role) ? a.role : undefined;
-  const explicit = name === 'update_task' ? a.in_campaign : ownRole ?? a.campaign;
+  const explicit = ownRole ?? a.campaign ?? a.in_campaign; // in_campaign: older name of update_task's filter
   if (explicit !== undefined && String(explicit).trim() !== '') return /^all$/i.test(String(explicit).trim()) ? '' : String(explicit).trim();
   return focus;
 }
@@ -279,8 +279,8 @@ function buildServer(playbook = '', focus = '') {
   const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter for this call: a campaign name, "none" (hotel / no campaign) or "all". Default: ${focus ? `"${focus}" (the campaign the owner has open)` : 'all campaigns'}.`);
   const tool = (name, description, inputSchema, fn) => {
     const shape = { ...inputSchema };
-    if (name === 'update_task') shape.in_campaign = CAMPAIGN_FILTER;
-    else if (!shape.campaign) shape.campaign = CAMPAIGN_FILTER;
+    if (!shape.campaign) shape.campaign = CAMPAIGN_FILTER;
+    if (name === 'update_task') shape.in_campaign = CAMPAIGN_FILTER.describe('Older name of campaign (the filter)');
     server.registerTool(name, { description, inputSchema: shape }, safe(async (a = {}) => {
       const c = callCampaign(name, a, focus);
       await enforceScope(c, name, a);
@@ -1641,9 +1641,13 @@ function buildServer(playbook = '', focus = '') {
     id: z.number().int(), status: z.enum(['upcoming', 'in_progress', 'waiting', 'done', 'cancelled']).optional(),
     title: z.string().optional(), details: z.string().optional(), due: z.string().optional(),
     for: z.enum(['you', 'ai']).optional(), priority: z.boolean().optional(),
-    campaign: z.string().optional().describe('Set the card\'s campaign (job role); "" clears it'),
+    // 1 Nov: this used to be "campaign", so routines passing campaign="all" (the filter on every other tool) re-tagged cards to a campaign "all"
+    move_to_campaign: z.string().optional().describe('Move the card to this campaign (job role); "" clears it. (campaign= is only the filter, as on every tool)'),
   }, async (a) => {
-    if (a.campaign !== undefined) await tasks.updateTask(a.id, { role: a.campaign, actor: 'ai' });
+    if (a.move_to_campaign !== undefined) {
+      if (/^(all|none)$/i.test(a.move_to_campaign.trim())) throw new Error('"all" / "none" are filters, not campaigns — pass a campaign name, or "" to clear');
+      await tasks.updateTask(a.id, { role: a.move_to_campaign, actor: 'ai' });
+    }
     const t = a.status === 'cancelled' ? await tasks.cancelTask(a.id, 'ai') : await tasks.updateTask(a.id, { status: a.status, title: a.title, details: a.details, dueAt: localTime(a.due), assignee: a.for, priority: a.priority, actor: 'ai' });
     return `Task #${t.id}: ${t.status} — ${t.title}`;
   });

@@ -1948,7 +1948,10 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('approve_task', { id: idOf(b) });
   await run('send_to_list', { list: 'Chef – Toolbox', statuses: ['new'], text: 'Namaste {first_name}' });
   const t = await run('create_task', { account: 'mcpall', title: 'Call Ravi 9733300001', for: 'you', priority: true, due: '2026-12-09 11:00' });
-  await run('update_task', { id: idOf(t), due: '2026-12-09 12:00', campaign: 'Chef' });
+  await run('update_task', { id: idOf(t), due: '2026-12-09 12:00', move_to_campaign: 'Chef' });
+  // campaign="all" is the filter (routines pass it everywhere) — it must not re-tag the card
+  await run('update_task', { id: idOf(t), status: 'in_progress', campaign: 'all' });
+  assert.equal((await query('SELECT role FROM tasks WHERE id = $1', [idOf(t)]))[0].role, 'Chef');
   await run('add_task_note', { id: idOf(t), text: 'Drafted the ask' });
   await run('task_history', { id: idOf(t) });
   await run('log_call_result', { id: idOf(t), result: 'call_back', at: '2026-12-10 18:00', note: 'busy at work' });
