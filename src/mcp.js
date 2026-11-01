@@ -1462,42 +1462,6 @@ function buildServer(playbook = '', focus = '') {
     return st.map((c) => `${c.name} (+${c.phone}): ${c.photos}/${c.minPhotos} photo(s) with "${c.keyword}" today, by ${c.deadline} — ${c.done ? 'DONE' : c.reminder ? `reminder #${c.reminder.id} ${c.reminder.status}` : c.late ? 'LATE' : 'waiting'}${c.enabled ? '' : ' (off)'} · reminder from ${c.account}: "${trim(c.text, 120)}"`).join('\n');
   });
 
-  tool('staff_log', 'Staff attendance and advances for the salary. Attendance is marked by itself from their messages ("Gm mam present", any spelling; or any message that day for staff set to "any"). YOU record: advances staff ask for in chat ("5000rs advance plz", "plz send 2000/-") as advance_asked with the amount, day and message_ref (account:message_id — never twice); leave/absent/half_day they tell about; advance_paid / recovered ONLY when the owner says so or a payment screenshot from the owner shows it. A request makes an owner card that closes when a payment is recorded. Without record it shows the month (default this month). staff (+ owner_asked) REPLACES the staff list — read it first and keep the others.', {
-    month: z.string().optional().describe('YYYY-MM, default this month'),
-    record: z.array(z.object({
-      staff: z.string().describe('Name, id or phone'), day: z.string().optional().describe('YYYY-MM-DD, default today'),
-      kind: z.enum(['present', 'half_day', 'leave', 'absent', 'advance_asked', 'advance_paid', 'recovered']),
-      amount: z.number().optional().describe('Rupees (advances / recovered)'), note: z.string().optional().describe('What was said, e.g. "Plz send 2000/- madam" 20 Oct'),
-      message_ref: z.string().optional().describe('account:message_id of the chat message it came from'),
-    })).optional(),
-    remove_id: z.number().int().optional().describe('Delete one wrong entry (its id from the month view)'),
-    staff: z.array(z.object({
-      name: z.string(), phone: z.string(), role: z.string().optional(), salary: z.number().optional().describe('Monthly ₹, optional'),
-      attendance: z.enum(['word', 'any']).optional().describe('"word" (default) = present/Gm message; "any" = any message that day counts (staff who never write it)'),
-      active: z.boolean().optional(),
-    })).optional(),
-    owner_asked: z.string().optional().describe('The owner\'s own words (required to change the staff list)'),
-  }, async (a) => {
-    const st = await import('./staff.js');
-    const out = [];
-    if (a.staff) {
-      if (!a.owner_asked) return 'Changing the staff list needs the owner\'s own words (owner_asked).';
-      const items = await st.setStaff(a.staff);
-      await ai(null, `Staff list set (owner asked: "${trim(a.owner_asked, 120)}"): ${items.map((s) => s.name).join(', ')}`);
-    }
-    for (const r of a.record || []) {
-      const x = await st.record({ staff: r.staff, day: r.day, kind: r.kind, amount: r.amount, note: r.note, msgRef: r.message_ref || null, by: 'ai' });
-      out.push(x.duplicate ? `${x.staff.name} ${r.kind}: already recorded (#${x.id})` : `Recorded #${x.id}: ${x.staff.name} ${r.kind}${r.amount ? ` ₹${r.amount}` : ''} ${r.day || 'today'}`);
-      if (!x.duplicate) await ai(null, `Staff: ${x.staff.name} ${r.kind}${r.amount ? ` ₹${r.amount}` : ''} ${r.day || 'today'}${r.note ? ` — ${trim(r.note, 100)}` : ''}`);
-    }
-    if (a.remove_id) out.push(`Deleted ${await st.removeEntry(a.remove_id)} entry`);
-    const sum = await st.monthSummary(a.month || undefined);
-    out.push(st.summaryText(sum));
-    const recent = sum.people.flatMap((p) => p.entries.filter((e) => e.kind !== 'present').map((e) => `#${e.id} ${e.day} ${p.name} ${e.kind}${e.amount ? ` ₹${e.amount}` : ''}${e.note ? ` — ${trim(e.note, 60)}` : ''} (${e.by})`));
-    if (recent.length) out.push('Entries (not counting present days):\n' + recent.slice(-40).join('\n'));
-    return out.join('\n');
-  });
-
   tool('upload_file', 'Hand the hub a file to send — a PDF (letter, invoice, certificate, voucher), image, poster or document from your computer or one you just made — as base64. Returns a hub link to use as attachment_url in send_message, bulk_send, send_to_list, edit_messages or templates (also works for Meta numbers; kept 90 days). You never need Google Drive or a public link to send a file. For one message, send_message(attachment_base64=…) does both in one step.', {
     base64: z.string().describe('The file content as base64 (a data: URL is fine)'),
     file_name: z.string().describe('With extension, e.g. "Certificate_of_Stay.pdf"'),

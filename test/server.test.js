@@ -1926,7 +1926,6 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   const d2 = await run('send_message', { account: 'mcpall', to: P, text: 'Kal 11 baje aaiye', schedule_at: '2026-12-09 10:00' });
   await run('upload_file', { base64: Buffer.from('%PDF-1.4 toolbox').toString('base64'), file_name: 'Toolbox.pdf' });
   await run('daily_checkins', {});
-  await run('staff_log', {});
   await run('find_files', { untagged: true });
   await run('storage_status', {});
   await run('catalog_file', { account: 'mcpall', chat: P, message_id: 'M2', title: 'Toolbox CV', folder: 'Candidate resumes', keep: 'keep' });
@@ -2782,54 +2781,4 @@ test('file catalog: the AI files saved photos (title, folder, keep/temporary/del
   await query(`DELETE FROM config WHERE key = 'storage'`);
   await query(`DELETE FROM tasks WHERE ref = 'storage:full'`);
   await manager.remove('fc');
-});
-
-test('staff: attendance marked by itself from "Gm mam perseant" (or any message), advances asked by the AI make an owner card that closes when paid; month summary, CSV', async () => {
-  const st = await import('../src/staff.js');
-  const { localDate } = await import('../src/util.js');
-  for (const t of ['Gm mam perseant mam', 'Gm mam prseant mam', 'Present 7:30am', 'Gm sir']) assert.equal(st.saysPresent(t), true, t);
-  for (const t of ['milk beku mam', '202 check in', 'pressing', 'person']) assert.equal(st.saysPresent(t), false, t);
-  await manager.create({ id: 'stf', label: 'Staff number' });
-  fake('stf');
-  const put = await call('PUT', '/api/staff', { items: [
-    { name: 'Mallesh', phone: '9866700001', role: 'Housekeeping', salary: 15000 },
-    { name: 'Vijay Kumar', phone: '9866700002', role: 'Front desk (night)', attendance: 'any' },
-  ] });
-  assert.equal(put.data.items.length, 2);
-  assert.equal((await call('PUT', '/api/staff', { items: [{ name: 'X', phone: '12' }] })).status, 400);
-  const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
-  const at = (hm) => Math.floor(localDate(`${day} ${hm}`).getTime() / 1000);
-  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
-    ('stf','919866700001@s.whatsapp.net','S1',false,$1,'text','milk beku mam'),
-    ('stf','919866700001@s.whatsapp.net','S2',false,$2,'text','Gm mam perseant mam'),
-    ('stf','919866700002@s.whatsapp.net','S3',false,$3,'text','202 check in')`, [at('00:01'), at('00:02'), at('00:03')]);
-  const now = localDate(`${day} 00:10`);
-  assert.equal(await st.scanAttendance(now), 2);
-  assert.equal(await st.scanAttendance(now), 0); // once a day
-  // a leave the owner entered is never overwritten by a message
-  await call('POST', '/api/staff/log', { staff: 'mallesh', day: '2026-10-05', kind: 'leave', note: 'sister wedding' });
-  // the AI records an advance asked in chat (once per message), the owner gets a card
-  const r = await mcp('staff_log', { record: [{ staff: 'Vijay', kind: 'advance_asked', amount: 2000, day, note: 'Plz send 2000/- madam', message_ref: 'stf:S9' }] });
-  assert.match(r, /Recorded #\d+: Vijay Kumar advance_asked ₹2000/);
-  assert.match(await mcp('staff_log', { record: [{ staff: 'Vijay', kind: 'advance_asked', amount: 2000, day, message_ref: 'stf:S9' }] }), /already recorded/);
-  const card = (await call('GET', '/api/tasks?for=you')).data.find((t) => /Vijay Kumar asks ₹2,000 advance/.test(t.title));
-  assert.ok(card);
-  await call('POST', '/api/staff/log', { staff: 'vijay-kumar', day, kind: 'advance_paid', amount: 2000, note: 'GPay' });
-  assert.equal((await query(`SELECT status FROM tasks WHERE id = $1`, [card.id]))[0].status, 'done');
-  await call('POST', '/api/staff/log', { staff: '9866700002', day, kind: 'recovered', amount: 500 });
-  assert.equal((await call('POST', '/api/staff/log', { staff: 'vijay', kind: 'advance_paid' })).status, 400); // needs an amount
-  const sum = (await call('GET', `/api/staff?month=${day.slice(0, 7)}`)).data;
-  const v = sum.people.find((p) => p.name === 'Vijay Kumar');
-  assert.deepEqual([v.present, v.asked, v.paid, v.recovered, v.balance], [1, 2000, 2000, 500, 1500]);
-  assert.equal(sum.people.find((p) => p.name === 'Mallesh').present, 1);
-  const oct = (await call('GET', '/api/staff?month=2026-10')).data.people.find((p) => p.name === 'Mallesh');
-  assert.equal(oct.leave, 1);
-  const csv = await fetch(`${base}/api/staff.csv?month=${day.slice(0, 7)}`, { headers: { 'x-api-key': process.env.API_KEY || '' } });
-  assert.equal(csv.status, 200);
-  assert.match(await csv.text(), /"advance_paid","2000","GPay"/);
-  assert.match(await mcp('staff_log', {}), /Vijay Kumar \(Front desk \(night\)\): present 1 .* outstanding ₹1,500/);
-  assert.match(await mcp('staff_log', { staff: [] }), /owner's own words/);
-  await query(`DELETE FROM config WHERE key = 'staff'`);
-  await query(`DELETE FROM staff_log`);
-  await manager.remove('stf');
 });

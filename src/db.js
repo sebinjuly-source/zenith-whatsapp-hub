@@ -389,19 +389,6 @@ CREATE TABLE IF NOT EXISTS media_catalog (
   PRIMARY KEY (account_id, message_id)
 );
 
-CREATE TABLE IF NOT EXISTS staff_log (
-  id BIGSERIAL PRIMARY KEY,
-  staff_id TEXT NOT NULL,
-  day DATE NOT NULL,
-  kind TEXT NOT NULL,
-  amount INTEGER,
-  note TEXT,
-  msg_ref TEXT,
-  by TEXT NOT NULL DEFAULT 'you',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS staff_log_day ON staff_log (day, staff_id);
-
 CREATE TABLE IF NOT EXISTS phone_drafts (
   outbox_id BIGINT PRIMARY KEY,
   account_id TEXT NOT NULL,

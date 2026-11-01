@@ -2182,8 +2182,7 @@ ${laterText(shown)}` : ''}`)) return;
     optOutWords: 'Opt-out words', webhookUrl: 'Notify URL' };
   async function viewSettings() {
     await loadAccounts(true);
-    state.staffMonth = state.staffMonth || new Date().toLocaleDateString('en-CA').slice(0, 7);
-    const [pb, al, tr, ck, pd, camps, pr, dflt, dg, sf] = await Promise.all([
+    const [pb, al, tr, ck, pd, camps, pr, dflt, dg] = await Promise.all([
       api('/api/playbook').catch(() => ({ text: '' })),
       api('/api/alerts').catch(() => ({ phones: [] })),
       api('/api/trusted-recipients').catch(() => ({ phones: [] })),
@@ -2193,7 +2192,6 @@ ${laterText(shown)}` : ''}`)) return;
       api('/api/pricing').catch(() => null),
       api('/api/settings/defaults').catch(() => null),
       api('/api/digest').catch(() => null),
-      api(`/api/staff?month=${state.staffMonth}`).catch(() => null),
     ]);
     if (!state.accounts.length) return shell([h('h1', {}, 'Settings'), h('p', { class: 'sub' }, 'Add a number first.')]);
     const allMode = state.settingsFor === '*' && dflt;
@@ -2367,60 +2365,6 @@ ${laterText(shown)}` : ''}`)) return;
       h('p', { class: 'muted', style: 'margin-top:0' }, 'Staff who send you a photo report every day. A photo counts when they write the word with it (caption, or a message right after). If not enough have come by the time, a reminder goes to them from the chosen number WITHOUT approval, and you get a card on the Board.'),
       ckList,
       h('div', { class: 'row', style: 'gap:6px' }, h('button', { type: 'button', class: 'btn', onclick: () => ckList.append(ckRow()) }, '+ Add person'), h('button', { class: 'btn primary', type: 'submit' }, 'Save')));
-    // Staff: who they are, the month's attendance and advances, and a form to record a payment / leave
-    const sfRow = (x = {}) => h('div', { class: 'card sf-row row', style: 'margin:6px 0;padding:8px;flex-wrap:wrap;gap:6px' },
-      h('input', { name: 'name', placeholder: 'Name', value: x.name || '', style: 'width:120px' }),
-      h('input', { name: 'phone', placeholder: 'Phone 91…', value: x.phone || '', style: 'width:130px' }),
-      h('input', { name: 'role', placeholder: 'Role', value: x.role || '', style: 'width:120px' }),
-      h('label', {}, '₹/month ', h('input', { name: 'salary', type: 'number', min: 0, value: x.salary || '', style: 'width:90px' })),
-      h('label', {}, 'Attendance ', h('select', { name: 'attendance' },
-        h('option', { value: 'word', selected: x.attendance !== 'any' }, '"present" / "Gm" message'),
-        h('option', { value: 'any', selected: x.attendance === 'any' }, 'any message that day'))),
-      h('label', {}, h('input', { name: 'active', type: 'checkbox', checked: x.active !== false }), ' Working'),
-      h('input', { name: 'id', type: 'hidden', value: x.id || '' }),
-      h('button', { type: 'button', class: 'btn small', onclick: (e) => e.target.closest('.sf-row').remove() }, 'Remove'));
-    const sfList = h('div', {}, (sf?.people || []).map(sfRow));
-    const rs = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');
-    const kindLabel = { present: 'present', half_day: 'half day', leave: 'leave', absent: 'absent', advance_asked: 'asked advance', advance_paid: 'advance paid', recovered: 'recovered from salary' };
-    const cell = (v) => h('td', { style: 'padding:4px 8px;text-align:right' }, v);
-    const staffForm = !sf ? null : h('div', {},
-      h('p', { class: 'muted', style: 'margin-top:0' }, 'Attendance is marked by itself from their WhatsApp ("Gm mam present", any spelling — or any message that day). The AI records advances they ask for; you record what you paid, leave, and what you took back from the salary. An advance request puts a card on your Board until a payment is recorded.'),
-      h('div', { class: 'row', style: 'gap:6px;margin:6px 0' },
-        h('input', { type: 'month', value: state.staffMonth, onchange: (e) => { state.staffMonth = e.target.value; viewSettings(); } }),
-        h('a', { class: 'btn small', href: `/api/staff.csv?month=${state.staffMonth}` }, '⬇ CSV for the salary sheet')),
-      sf.people.length ? h('div', { style: 'overflow-x:auto' }, h('table', { style: 'border-collapse:collapse;font-size:14px' },
-        h('tr', {}, ['Staff', 'Present', 'Half', 'Leave', 'Absent', 'Asked', 'Paid', 'Recovered', 'Outstanding'].map((t) => h('th', { style: 'padding:4px 8px;text-align:left' }, t))),
-        sf.people.map((x) => h('tr', {}, h('td', { style: 'padding:4px 8px' }, x.name + (x.active ? '' : ' (left)')), cell(x.present), cell(x.half_day), cell(x.leave), cell(x.absent),
-          cell(rs(x.asked)), cell(rs(x.paid)), cell(rs(x.recovered)), cell(h('b', {}, rs(x.balance))))))) : h('p', { class: 'muted' }, 'Add your staff below first.'),
-      sf.people.some((x) => x.entries.length) ? h('details', { style: 'margin:6px 0' }, h('summary', {}, 'Entries this month'),
-        sf.people.flatMap((x) => x.entries.map((en) => h('div', { class: 'row', style: 'gap:6px;font-size:13px' },
-          h('span', { class: 'grow' }, `${en.day} · ${x.name} · ${kindLabel[en.kind] || en.kind}${en.amount ? ' ' + rs(en.amount) : ''}${en.note ? ' — ' + en.note : ''} (${en.by})`),
-          h('button', { type: 'button', class: 'btn small', title: 'Delete this entry', onclick: guard(async () => { await api(`/api/staff/log/${en.id}`, { method: 'DELETE' }); viewSettings(); }) }, '✕'))))) : null,
-      sf.people.length ? h('form', { class: 'row', style: 'gap:6px;flex-wrap:wrap;margin:8px 0', onsubmit: guard(async (e) => {
-        e.preventDefault();
-        const f = e.target;
-        await api('/api/staff/log', { method: 'POST', body: { staff: f.staff.value, day: f.day.value, kind: f.kind.value, amount: f.amount.value || null, note: f.note.value } });
-        toast('Recorded');
-        viewSettings();
-      }) },
-        h('select', { name: 'staff', style: 'width:auto' }, sf.people.map((x) => h('option', { value: x.id }, x.name))),
-        h('input', { name: 'day', type: 'date', style: 'width:auto', value: new Date().toLocaleDateString('en-CA') }),
-        h('select', { name: 'kind', style: 'width:auto' }, ['advance_paid', 'recovered', 'leave', 'half_day', 'absent', 'present', 'advance_asked'].map((k) => h('option', { value: k }, kindLabel[k]))),
-        h('input', { name: 'amount', type: 'number', min: 0, placeholder: '₹', style: 'width:90px' }),
-        h('input', { name: 'note', placeholder: 'Note', class: 'grow', style: 'width:auto' }),
-        h('button', { class: 'btn primary', type: 'submit' }, 'Record')) : null,
-      h('h3', { style: 'margin:14px 0 4px' }, 'Staff'),
-      sfList,
-      h('div', { class: 'row', style: 'gap:6px' },
-        h('button', { type: 'button', class: 'btn', onclick: () => sfList.append(sfRow()) }, '+ Add staff'),
-        h('button', { type: 'button', class: 'btn primary', onclick: guard(async () => {
-          const items = [...sfList.querySelectorAll('.sf-row')].map((r) => ({ id: r.querySelector('[name=id]').value || undefined, name: r.querySelector('[name=name]').value,
-            phone: r.querySelector('[name=phone]').value, role: r.querySelector('[name=role]').value, salary: r.querySelector('[name=salary]').value,
-            attendance: r.querySelector('[name=attendance]').value, active: r.querySelector('[name=active]').checked }));
-          const r = await api('/api/staff', { method: 'PUT', body: { items } });
-          toast(`Saved ${r.items.length} staff`);
-          viewSettings();
-        }) }, 'Save staff')));
     const phoneForm = !pd ? null : h('form', { onsubmit: guard(async (e) => {
       e.preventDefault();
       const f = e.target;
@@ -2577,7 +2521,6 @@ ${laterText(shown)}` : ''}`)) return;
         fold('🔔 Connection alerts', alertForm),
         fold('✅ Send without approval to', trustedForm),
         fold('📋 Daily check-ins (staff photo reports)', checkinForm),
-        staffForm ? fold('👥 Staff: attendance & advances', staffForm) : null,
         phoneForm ? fold('📱 Drafts on the phone', phoneForm) : null,
         digestForm ? fold('☀️ Morning summary on WhatsApp', digestForm) : null,
         priceForm ? fold('💰 Meta message prices', priceForm) : null,
