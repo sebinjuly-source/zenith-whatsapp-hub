@@ -1140,6 +1140,7 @@ export async function requestJob(session, kind, payload) {
 
 const JOBS = {
   fetch_older: (session, { chat, count }) => session.fetchOlder(chat, count || 50),
+  phone_action: (session, p) => session.phoneAction(p.action, p),
 };
 
 /** Latest deep-history backfill job of an account (or null). */

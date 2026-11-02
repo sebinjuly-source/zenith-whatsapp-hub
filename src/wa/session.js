@@ -217,6 +217,8 @@ export class Session extends EventEmitter {
     sock.ev.on('groups.upsert', (g) => this.enqueue(() => this.saveGroups(g)));
     sock.ev.on('groups.update', (g) => this.enqueue(() => this.saveGroups(g)));
     sock.ev.on('lid-mapping.update', (m) => this.collect('lids', [m], (l) => store.saveLidMappings(this.id, l)));
+    // The phone's labels ("Lists" on the phone): needed to put a chat into a list without renaming one by accident
+    sock.ev.on('labels.edit', (l) => this.enqueue(() => this.saveLabel(l)));
     sock.ev.on('blocklist.set', ({ blocklist }) => this.enqueue(() => store.resetBlocklist(this.id, blocklist)));
     sock.ev.on('blocklist.update', ({ blocklist, type }) =>
       this.enqueue(() => store.setBlocked(this.id, blocklist, type === 'add')),
@@ -843,6 +845,99 @@ export class Session extends EventEmitter {
     if (typeof this.sock.addOrEditContact !== 'function') throw new Error('This WhatsApp version cannot save contacts from a linked device');
     const full = String(name).trim();
     await this.sock.addOrEditContact(jid, { fullName: full, firstName: full.split(/\s+/)[0], saveOnPrimaryAddressbook: true });
+  }
+
+  async saveLabel(l) {
+    if (!l?.id) return;
+    await query(
+      `INSERT INTO wa_labels (account_id, label_id, name, color, deleted) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (account_id, label_id) DO UPDATE SET name = EXCLUDED.name, color = EXCLUDED.color, deleted = EXCLUDED.deleted, updated_at = now()
+       WHERE (wa_labels.name, wa_labels.color, wa_labels.deleted) IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.color, EXCLUDED.deleted)`,
+      [this.id, String(l.id), String(l.name || ''), Number.isInteger(l.color) ? l.color : null, !!l.deleted],
+    );
+  }
+
+  /** Id of the phone's label (list) with this name; made on the phone when missing and create is set. */
+  async labelId(name, create) {
+    const n = String(name || '').trim();
+    if (!n) throw new Error('Give the list (label) name');
+    const [have] = await query(
+      `SELECT label_id FROM wa_labels WHERE account_id = $1 AND lower(name) = lower($2) AND NOT deleted ORDER BY updated_at DESC LIMIT 1`,
+      [this.id, n],
+    );
+    if (have) return have.label_id;
+    if (!create) return null;
+    const [mx] = await query(
+      `SELECT COALESCE(MAX(CASE WHEN label_id ~ '^[0-9]+$' THEN label_id::bigint END), 0) AS m FROM wa_labels WHERE account_id = $1`,
+      [this.id],
+    );
+    // a new id far above the phone's own (1, 2, 3 …): writing a label under an id the phone already uses renames that
+    // list, and the hub may not have seen all of the phone's lists yet
+    const id = String(Math.max(1000, Number(mx.m) + 1));
+    const label = { id, name: n, color: 1, deleted: false };
+    await withTimeout(this.sock.addLabel('', label), 30000, 'Making the list on the phone');
+    await this.saveLabel(label);
+    return id;
+  }
+
+  /**
+   * What a person can do by hand on the phone, done from this linked device so the person holding the phone sees it:
+   * pin/unpin a message (in that chat, for 1/7/30 days), pin/unpin a chat, star/unstar a message, mark a chat
+   * read/unread, archive/unarchive, put a chat into / take it out of a list (label). Throws with a plain reason.
+   */
+  async phoneAction(action, { jid, messageId, fromMe = false, days = 7, label } = {}) {
+    if (!this.sock || this.status !== 'open') throw new Error('The number is not connected right now');
+    const sock = this.sock;
+    const run = (p, what) => withTimeout(p, 30000, what);
+    const key = () => {
+      if (!messageId) throw new Error('Give the message id');
+      return { remoteJid: jid, id: messageId, fromMe: !!fromMe };
+    };
+    const lastMessages = async () => {
+      const [m] = await query(`SELECT id, from_me, ts FROM messages WHERE account_id = $1 AND chat_jid = $2 ORDER BY ts DESC LIMIT 1`, [this.id, jid]);
+      if (!m) throw new Error('No messages stored for that chat yet');
+      return [{ key: { remoteJid: jid, id: m.id, fromMe: m.from_me }, messageTimestamp: Number(m.ts) }];
+    };
+    const who = String(jid).split('@')[0];
+    switch (action) {
+      case 'pin_message': {
+        const d = [1, 7, 30].includes(Number(days)) ? Number(days) : 7;
+        await run(sock.sendMessage(jid, { pin: key(), type: 1, time: d * 86400 }), 'Pinning the message');
+        return `message pinned in ${who} for ${d} day${d > 1 ? 's' : ''}`;
+      }
+      case 'unpin_message':
+        await run(sock.sendMessage(jid, { pin: key(), type: 2 }), 'Unpinning the message');
+        return `message unpinned in ${who}`;
+      case 'pin_chat':
+      case 'unpin_chat':
+        await run(sock.chatModify({ pin: action === 'pin_chat' }, jid), 'Pinning the chat');
+        return `chat ${who} ${action === 'pin_chat' ? 'pinned to the top' : 'unpinned'}`;
+      case 'star':
+      case 'unstar':
+        await run(sock.star(jid, [{ id: key().id, fromMe: !!fromMe }], action === 'star'), 'Starring the message');
+        return `message ${action === 'star' ? 'starred' : 'unstarred'} in ${who}`;
+      case 'mark_unread':
+      case 'mark_read':
+        await run(sock.chatModify({ markRead: action === 'mark_read', lastMessages: await lastMessages() }, jid), 'Marking the chat');
+        return `chat ${who} marked ${action === 'mark_read' ? 'read' : 'unread'}`;
+      case 'archive':
+      case 'unarchive':
+        await run(sock.chatModify({ archive: action === 'archive', lastMessages: await lastMessages() }, jid), 'Archiving the chat');
+        return `chat ${who} ${action === 'archive' ? 'archived' : 'unarchived'}`;
+      case 'label_chat': {
+        const id = await this.labelId(label, true);
+        await run(sock.addChatLabel(jid, id), 'Adding the chat to the list');
+        return `chat ${who} added to the list "${label}"`;
+      }
+      case 'unlabel_chat': {
+        const id = await this.labelId(label, false);
+        if (!id) return `no list "${label}" known on this phone — nothing to remove`;
+        await run(sock.removeChatLabel(jid, id), 'Taking the chat out of the list');
+        return `chat ${who} taken out of the list "${label}"`;
+      }
+      default:
+        throw new Error(`Unknown phone action "${action}"`);
+    }
   }
 
   async send(jid, content, { typingMs = 0, quoted } = {}) {

@@ -185,10 +185,21 @@ queue reads hub links straight from the database (`files.js`, `media.js loadOutg
 
 **Drafts on the phone (31 Oct).** Settings → "📱 Drafts on the phone" (numbers, campaigns; on for Seema's number). An immediate
 reply the AI drafts there (they wrote in the last 24 h; not scheduled; not bulk) also goes to that phone: a note in its own
-"Message yourself" chat (pinned) with the text and a wa.me link that opens their chat with it already typed, and their chat
-marked unread. WhatsApp keeps unsent typing per device, so no linked device can type into the phone's box itself. Sent from
-the phone → the hub draft closes ("Answered on the phone"); the note deleted → draft dropped; approved/rejected in the hub →
-note removed. Checked every minute (`phonedrafts.js`, table `phone_drafts`, config `phone_drafts`).
+"Message yourself" chat with the text and a wa.me link that opens their chat with it already typed. Since 2 Nov the **note
+itself is pinned** at the top of that chat for 7 days (before, only the chat was pinned and errors were swallowed, so the owner
+saw a plain message with a link), their chat is marked unread and put in the phone's **"Draft waiting" list** (a WhatsApp label;
+config `label`, '' = off) until the draft is handled. WhatsApp keeps unsent typing per device, so no linked device can type
+into the phone's box itself. Sent from the phone → the hub draft closes ("Answered on the phone"); the note deleted → draft
+dropped; approved/rejected in the hub → note removed and the chat leaves the list. Checked every minute: a failed pin is
+retried 3 times, a missing label every 6 h, and each failing step is said once per 6 h in Activity ("Drafts on the phone:
+could not …" with WhatsApp's reason) (`phonedrafts.js`, table `phone_drafts`: pinned / pin_tries / labeled, config `phone_drafts`).
+
+**Phone actions (2 Nov).** The AI can do on a linked phone what a person does by hand, so whoever holds it sees it:
+`phone_action` pin_message / unpin_message (1, 7 or 30 days; WhatsApp shows 3 pins per chat), pin_chat / unpin_chat, star /
+unstar, label_chat / unlabel_chat (WhatsApp labels = the phone's chat "Lists"), mark_unread / mark_read, archive /
+unarchive. It runs on the server holding the number (job `phone_action`, otherwise queued). The phone's own lists are learnt
+from its `labels.edit` events (table `wa_labels`); a list the hub makes gets an id of 1000+ so it can never overwrite (rename)
+one of the phone's lists the hub has not seen yet (`session.js phoneAction / labelId`).
 
 **Files: saved, filed, cleaned up (31 Oct).** WhatsApp deletes a file from its servers after ~2 weeks and the phone often
 won't resend it, so auto-save (Settings, per number; on for the hotel and Seema; 1-to-1 chats only) keeps a copy; at start-up
@@ -510,6 +521,8 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
 | A list shows "elsewhere" / "held — the other server" | a deploy is switching servers (1–3 min): the number IS linked; check `events` for "Connected as" and `accounts.lease_owner` — do not tell the owner it is unlinked |
 | A "Follow up: X" card keeps coming back after being closed | fixed 1 Nov: closing it clears that person's due follow-up date (older rows: `update_list_member follow_up_at=""`) |
 | The AI missed a card | `list_tasks(due_now)` puts owner notes / PRIORITY / owner-written cards first and is one line per card when long; the routine must work EVERY due card (1 Nov: a VIP wish card fell off a cut-off list) |
+| A draft on the phone is not pinned / the chat is not in the "Draft waiting" list | Activity warn "Drafts on the phone: could not …" (WhatsApp's own reason); `phone_drafts` pinned / pin_tries / labeled; try it by hand with `phone_action` on that number to see the error |
+| `phone_action` says "could not … myAppStateKey" (or similar) | the linked device has no app-state keys yet (pins, labels, unread, archive all need them): they arrive from the phone after it is online for a while; if it persists, re-link the number |
 | Something is slow / the database works hard | `inspect_data` on `pg_stat_statements` ordered by `total_exec_time` (see 10.12) |
 | Anything else | Render logs (pino JSON), then reproduce in a test: `npm test` runs the whole hub on PGlite with a fake WhatsApp and a fake Meta server |
 

@@ -1963,6 +1963,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('save_media', { account: 'mcpall', chat: P, message_id: 'M2' });
   await run('open_file', { account: 'mcpall', chat: P, message_id: 'M2' });
   await run('unsend_message', { account: 'mcpall', chat: P, message_id: 'M1', reason: 'toolbox' });
+  await run('phone_action', { account: 'mcpall', chat: P, action: 'pin_message', message_id: 'M1', reason: 'toolbox' });
   await run('fetch_older_messages', { account: 'mcpall', chat: P, count: 10 });
   await run('backfill_history', { account: 'mcpall', since: '2026-01-01' });
   await run('recent_activity', { who: 'ai' });
@@ -2666,8 +2667,16 @@ test('drafts on the phone: an immediate reply drafted on an enabled number goes 
   const SELF = '919800077700@s.whatsapp.net';
   const mods = [];
   const revokes = [];
-  s.sock = { chatModify: async (m, jid) => mods.push({ m, jid }), sendMessage: async (jid, c) => { if (c.delete) revokes.push(c.delete.id); return {}; } };
-  await pdm.setPhoneDrafts({ enabled: true, accounts: ['pdx'], campaigns: [] });
+  const pins = [];
+  const labels = [];
+  s.sock = {
+    chatModify: async (m, jid) => mods.push({ m, jid }),
+    sendMessage: async (jid, c) => { if (c.delete) revokes.push(c.delete.id); if (c.pin) pins.push({ jid, ...c }); return {}; },
+    addLabel: async (jid, l) => labels.push({ add: l }),
+    addChatLabel: async (jid, id) => labels.push({ chat: jid, id }),
+    removeChatLabel: async (jid, id) => labels.push({ unchat: jid, id }),
+  };
+  await pdm.setPhoneDrafts({ enabled: true, accounts: ['pdx'], campaigns: [], label: 'Draft waiting' });
   const now = Math.floor(Date.now() / 1000);
   const G1 = '919800077701@s.whatsapp.net';
   const G2 = '919800077702@s.whatsapp.net';
@@ -2680,8 +2689,18 @@ test('drafts on the phone: an immediate reply drafted on an enabled number goes 
   assert.match(note.content.text, /Draft reply/);
   assert.match(note.content.text, /https:\/\/wa\.me\/919800077701\?text=Yes%2C%20a%20deluxe/);
   assert.ok(mods.some((x) => x.jid === SELF && x.m.pin), 'self chat pinned');
+  const [d1] = await until(async () => { const r = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1 AND p.note_id IS NOT NULL AND p.labeled`, [G1]); return r.length ? r : null; }, 5000);
   assert.ok(mods.some((x) => x.jid === G1 && x.m.markRead === false), 'their chat marked unread on the phone');
-  const [d1] = await until(async () => { const r = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1 AND p.note_id IS NOT NULL`, [G1]); return r.length ? r : null; }, 5000);
+  // 2 Nov: the NOTE itself is pinned (pin-in-chat, 7 days) — only the chat was pinned before, which showed nothing
+  const pin = pins.find((p) => p.jid === SELF && p.pin.id === d1.note_id);
+  assert.ok(pin, 'the note message is pinned in "Message yourself"');
+  assert.equal(pin.type, 1);
+  assert.equal(pin.time, 7 * 86400);
+  assert.equal(pin.pin.fromMe, true);
+  // their chat goes into the phone's "Draft waiting" list (label made once, with a high id that can't rename a phone list)
+  assert.ok(labels.some((l) => l.add?.name === 'Draft waiting' && Number(l.add.id) >= 1000), JSON.stringify(labels));
+  assert.ok(labels.some((l) => l.chat === G1 && l.id === labels.find((x) => x.add)?.add.id), 'chat added to the list');
+  assert.equal((await query(`SELECT pinned FROM phone_drafts WHERE outbox_id = $1`, [d1.id]))[0].pinned, true);
   // answered on the phone (a message of ours the hub did not send) → hub draft closes, note removed
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('pdx',$1,'PHONE1',true,$2,'text','Yes sir, holding it')`, [G1, now + 5]);
   const r1 = await pdm.syncPhoneDrafts(manager);
@@ -2690,6 +2709,7 @@ test('drafts on the phone: an immediate reply drafted on an enabled number goes 
   assert.equal(o1.status, 'rejected');
   assert.match(o1.error, /Answered on the phone/);
   assert.ok(revokes.includes(d1.note_id), 'note deleted from the phone');
+  assert.ok(labels.some((l) => l.unchat === G1), 'chat taken out of the "Draft waiting" list once handled');
   // rejected in the hub → note removed from the phone
   await mcp('send_message', { account: 'pdx', to: G2, text: 'Dear Mr Ravi, 2 nights are possible.' });
   const [d2] = await until(async () => { const r = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1 AND p.note_id IS NOT NULL`, [G2]); return r.length ? r : null; }, 5000);
@@ -2719,6 +2739,48 @@ test('drafts on the phone: an immediate reply drafted on an enabled number goes 
   s.sock = null;
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'pdx' AND status IN ('draft','queued')`);
   await manager.remove('pdx');
+});
+
+test('phone actions: the AI pins a message, puts a chat in a phone list, marks unread, stars — and a refusal says why', async () => {
+  await manager.create({ id: 'pa1', label: 'Phone actions' });
+  const s = fake('pa1');
+  s.account.phone = '919800088800';
+  const calls = [];
+  s.sock = {
+    sendMessage: async (jid, c) => { calls.push({ jid, ...c }); return {}; },
+    chatModify: async (m, jid) => calls.push({ jid, mod: m }),
+    star: async (jid, msgs, on) => calls.push({ jid, star: on, msgs }),
+    addLabel: async (jid, l) => calls.push({ addLabel: l }),
+    addChatLabel: async (jid, id) => calls.push({ jid, addChatLabel: id }),
+    removeChatLabel: async (jid, id) => calls.push({ jid, removeChatLabel: id }),
+  };
+  const J = '919800088801@s.whatsapp.net';
+  const now = Math.floor(Date.now() / 1000);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('pa1',$1,'PA1',false,$2,'text','Rate?'), ('pa1',$1,'PA2',true,$3,'text','Rs 2,500')`, [J, now - 60, now - 30]);
+  // no message id → the latest message of the chat (ours), pinned for 30 days
+  assert.match(await mcp('phone_action', { account: 'pa1', chat: '919800088801', action: 'pin_message', days: 30 }), /pinned .*30 days/);
+  const p = calls.find((c) => c.pin);
+  assert.deepEqual(p.pin, { remoteJid: J, id: 'PA2', fromMe: true });
+  assert.equal(p.type, 1);
+  assert.equal(p.time, 30 * 86400);
+  // a list the phone already has (learnt from its labels event) is reused, never made again
+  await s.saveLabel({ id: '3', name: 'Guest leads', color: 2, deleted: false });
+  assert.match(await mcp('phone_action', { account: 'pa1', chat: J, action: 'label_chat', label: 'guest leads' }), /added to the list/);
+  assert.ok(calls.some((c) => c.addChatLabel === '3') && !calls.some((c) => c.addLabel));
+  // a new list gets a high id, so it can never rename one of the phone's own lists
+  await mcp('phone_action', { account: 'pa1', chat: J, action: 'label_chat', label: 'VIP' });
+  assert.equal(calls.find((c) => c.addLabel)?.addLabel.id, '1000');
+  assert.match(await mcp('phone_action', { account: 'pa1', chat: J, action: 'unlabel_chat', label: 'Nope' }), /no list "Nope"/);
+  assert.match(await mcp('phone_action', { account: 'pa1', chat: J, action: 'mark_unread' }), /marked unread/);
+  assert.equal(calls.find((c) => c.mod?.markRead === false).mod.lastMessages[0].key.id, 'PA2');
+  assert.match(await mcp('phone_action', { account: 'pa1', chat: J, action: 'star', message_id: 'PA1' }), /starred/);
+  assert.match(await mcp('phone_action', { account: 'pa1', chat: J, action: 'label_chat' }), /Give label=/);
+  // WhatsApp refuses → the AI gets the reason and Activity shows it (pin failures were silent before 2 Nov)
+  s.sock.chatModify = async () => { throw new Error('myAppStateKey not present'); };
+  assert.match(await mcp('phone_action', { account: 'pa1', chat: J, action: 'pin_chat' }), /Could not pin chat .*myAppStateKey/);
+  assert.ok((await query(`SELECT 1 FROM events WHERE account_id = 'pa1' AND level = 'warn' AND text LIKE '%myAppStateKey%'`)).length);
+  s.sock = null;
+  await manager.remove('pa1');
 });
 
 test('check-ins: misspelt word counts ("chechlist"), the same photo sent to two numbers counts once, and the AI can mark today received after looking', async () => {

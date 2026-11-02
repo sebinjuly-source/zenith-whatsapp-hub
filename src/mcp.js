@@ -1566,6 +1566,41 @@ function buildServer(playbook = '', focus = '', { readOnly = false } = {}) {
     return `Deleted for everyone (${jid.split('@')[0]}). Reason logged: ${a.reason}`;
   });
 
+  const PHONE_ACTIONS = ['pin_message', 'unpin_message', 'pin_chat', 'unpin_chat', 'star', 'unstar', 'mark_unread', 'mark_read', 'archive', 'unarchive', 'label_chat', 'unlabel_chat'];
+  tool('phone_action', 'Do on the number\'s PHONE what a person would do by hand, so whoever holds the phone sees it: pin_message (pin a message at the top of its chat for 1, 7 or 30 days; WhatsApp keeps 3 pins per chat) / unpin_message; pin_chat (chat to the top of the chat list) / unpin_chat; star / unstar a message; label_chat / unlabel_chat (put a chat into a WhatsApp list, e.g. label="Guest leads", so it can be filtered on the phone; the list is made if it does not exist); mark_unread / mark_read; archive / unarchive. Linked numbers only. message_id: the WhatsApp id from get_messages — omitted, the latest message in that chat. Pin a note to the number\'s own number (its "Message yourself" chat) to leave something for the person holding the phone. Logged in Activity.', {
+    account: accountArg, chat: chatArg,
+    action: z.enum(PHONE_ACTIONS),
+    message_id: z.string().optional().describe('WhatsApp id of the message (pin/star); default the latest in the chat'),
+    days: z.number().int().optional().describe('How long a pin stays: 1, 7 or 30 days (default 7)'),
+    label: z.string().optional().describe('List (label) name for label_chat / unlabel_chat'),
+    reason: z.string().optional().describe('Why (shown in Activity)'),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    if (s.isCloud) return `"${s.id}" is a Meta Cloud API number — it has no phone to pin, star or label on.`;
+    const jid = await resolveChat(s.id, a.chat);
+    let mid = a.message_id;
+    let fromMe = false;
+    if (/^(pin_message|unpin_message|star|unstar)$/.test(a.action)) {
+      const [m] = mid
+        ? await query('SELECT id, from_me FROM messages WHERE account_id = $1 AND chat_jid = $2 AND id = $3', [s.id, jid, mid])
+        : await query('SELECT id, from_me FROM messages WHERE account_id = $1 AND chat_jid = $2 AND NOT deleted ORDER BY ts DESC LIMIT 1', [s.id, jid]);
+      if (!m) return mid ? 'No such message in that chat (get_messages shows the ids).' : 'No messages stored for that chat yet.';
+      mid = m.id;
+      fromMe = m.from_me;
+    }
+    if (/label/.test(a.action) && !String(a.label || '').trim()) return 'Give label= the list name, e.g. "Guest leads".';
+    const verb = a.action.replace('_', ' ');
+    try {
+      const r = await outbox.requestJob(s, 'phone_action', { action: a.action, jid, messageId: mid, fromMe, days: a.days, label: a.label });
+      if (!r.ran) return `"${s.id}" is not connected on this server right now — queued; it runs on the server holding the number (within ~10 s once connected).`;
+      await ai(s.id, `Phone: ${r.result}${a.reason ? ` — ${a.reason}` : ''}`);
+      return `Done on the phone: ${r.result}. (WhatsApp accepted it; the phone shows it within a few seconds when it is online.)`;
+    } catch (err) {
+      await logEvent(s.id, 'warn', `Could not ${verb} on the phone (${jid.split('@')[0]}): ${err.message}`, 'ai');
+      return `Could not ${verb} on "${s.id}": ${err.message}`;
+    }
+  });
+
   tool('fetch_older_messages', 'Ask the phone for older messages of a chat than what is stored (arrives in the background in ~1 min; phone must be online). Use when a chat\'s history looks cut off.', {
     account: accountArg, chat: chatArg, count: z.number().int().min(1).max(50).optional(),
   }, async (a) => {

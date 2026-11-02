@@ -404,6 +404,21 @@ CREATE TABLE IF NOT EXISTS phone_drafts (
   closed_at TIMESTAMPTZ,
   outcome TEXT
 );
+-- 2 Nov: the note itself is pinned in "Message yourself" (pinning only the chat did not show the owner anything),
+-- and the guest's chat goes into the phone's "Draft waiting" list (a WhatsApp label) while the draft is open
+ALTER TABLE phone_drafts ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE phone_drafts ADD COLUMN IF NOT EXISTS pin_tries INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE phone_drafts ADD COLUMN IF NOT EXISTS labeled BOOLEAN NOT NULL DEFAULT false;
+-- WhatsApp labels of each linked number (the phone shows them as chat "Lists"): learnt from the phone, or made by the hub
+CREATE TABLE IF NOT EXISTS wa_labels (
+  account_id TEXT NOT NULL,
+  label_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  color INTEGER,
+  deleted BOOLEAN NOT NULL DEFAULT false,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, label_id)
+);
 
 CREATE TABLE IF NOT EXISTS playbook_versions (
   id BIGSERIAL PRIMARY KEY,
