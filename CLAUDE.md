@@ -33,6 +33,10 @@ Node ≥ 20 ESM · Express 5 · Baileys 7 · Postgres (Supabase) / PGlite locall
 - The key: `keyOk()` (constant time) + `keyGuessBlocked()` (10 wrong / 15 min / IP) in `src/auth.js` — everywhere.
 - Writes: update only rows that changed (`IS DISTINCT FROM`), never "rewrite everything each minute".
 - Never message real people while testing; owner test messages go to the owner's alert phone only.
+- The owner's ✓ Done is a hand-over to the AI (status `review`), never a silent close; cards the hub closes itself stay direct.
+- Writing JS/regex from Python: use raw strings (r-strings) or write the script with the editor tool — backslash
+  escapes (newline, \s, carriage return) get mangled otherwise (2 Nov: four broken edits). Run `node --check` after
+  every scripted edit.
 - After a fix to the hub, sync the skill template and update `docs/HOW-IT-WORKS.md` (§10.10 recipes, §10.11 method).
 
 ## Where to read more (don't copy it here)

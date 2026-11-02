@@ -3,7 +3,7 @@
  *   header "x-api-key: <key>", or "?key=<key>" (handy for Apps Script), or the dashboard login cookie.
  */
 import express from 'express';
-import { keyOk, keyGuessBlocked } from './auth.js';
+import { keyOk, keyGuessBlocked, keyRole, READ_TOOLS, createReadonlyKey, revokeReadonlyKey, readonlyKeyInfo } from './auth.js';
 import * as scope from './scope.js';
 import { roleOf, roleFilter } from './campaign.js';
 import cookieParser from 'cookie-parser';
@@ -86,6 +86,36 @@ export function sendStoredFile(res, { buffer, mimetype, fileName, download = fal
   res.setHeader('Content-Disposition', `${download || active ? 'attachment' : 'inline'}; filename="${ascii}"${ascii !== fname ? `; filename*=UTF-8''${encodeURIComponent(fname)}` : ''}`);
   if (cache) res.setHeader('Cache-Control', cache);
   res.send(buffer);
+}
+
+/**
+ * The conversation a Board card is about: from its ref (reply / remind / followup / visit / nextstep / checkin), else
+ * the first phone number in its title or details. The chat on the card's own number wins, else the latest one.
+ */
+async function taskChat(t) {
+  const [k, x, j] = String(t.ref || '').split(':');
+  let jid = null;
+  let prefer = t.account_id;
+  if (['reply', 'remind'].includes(k) && j?.includes('@')) { jid = j; prefer = x; }
+  else if (['followup', 'visit', 'nextstep'].includes(k) && j?.includes('@')) {
+    jid = j;
+    const [l] = await query('SELECT account_id FROM lists WHERE id = $1', [x]);
+    if (l) prefer = l.account_id;
+  } else if (k === 'checkin') {
+    const c = (await (await import('./checkins.js')).getCheckins()).find((y) => y.id === x);
+    if (c) { jid = `${c.phone}@s.whatsapp.net`; prefer = ''; } // staff write to any number: show the latest chat
+  }
+  let guessed = false;
+  if (!jid) {
+    // a number standing on its own (same rule as the Board's tap-to-call): "Rohith 9677038744" yes, "2026-11-01" no
+    const m = `${t.title} ${t.details || ''}`.match(/(?<![\w+\-/])(?:\+?\d{1,3} ?)?(\d{5} ?\d{5})(?![\w\-/])/);
+    if (m) { jid = store.toJid(m[0].replace(/\D/g, '')); guessed = true; }
+  }
+  if (!jid) return null;
+  const [c] = await query(
+    `SELECT account_id, jid, name FROM chats WHERE jid = $1 ORDER BY (account_id = $2) DESC, last_ts DESC NULLS LAST LIMIT 1`, [jid, prefer]);
+  if (!c && guessed) return null; // a number in the text that we never chatted with: no chat to show
+  return c ? { account: c.account_id, jid: c.jid, name: c.name || null } : { account: prefer, jid, name: null };
 }
 
 export function buildApp() {
@@ -171,8 +201,15 @@ export function buildApp() {
   }));
 
   const api = express.Router();
-  api.use((req, res, next) => {
+  api.use(async (req, res, next) => {
     if (authed(req)) return next();
+    // the read-only key (scripts, sheets, routines that only read): GET, and the AI tools that only read
+    if ((await keyRole(req.get('x-api-key') || req.query.key).catch(() => null)) === 'read') {
+      req.readOnly = true;
+      const tool = req.method === 'POST' && /^\/tools\/([a-z_]+)$/.exec(req.path);
+      if (req.method === 'GET' || (tool && READ_TOOLS.has(tool[1]))) return next();
+      return res.status(403).json({ error: 'This is the read-only key: it can read, never send or change anything' });
+    }
     // a script with an old key retries a few times a minute: only real guessing reaches the limit
     // (no key at all = a logged-out dashboard polling: never counted, or it would lock the login page)
     // (an old login cookie after a key change is cleared, not counted — the login page then works again)
@@ -184,7 +221,19 @@ export function buildApp() {
 
   // Every AI tool over plain REST (Apps Script, a second app): the same checks and answers as MCP.
   // GET /api/tools → catalogue; POST /api/tools/person_context {"person":"9876543210"} → { text, images, isError }
-  api.get('/tools', wrap(async (req, res) => res.json({ tools: toolCatalog() })));
+  api.get('/tools', wrap(async (req, res) => res.json({ tools: toolCatalog().filter((t) => !req.readOnly || READ_TOOLS.has(t.name)) })));
+  // The read-only key: made / revoked by the owner (full key only); shown once, only its hash is kept
+  api.get('/keys/readonly', wrap(async (req, res) => res.json(await readonlyKeyInfo())));
+  api.post('/keys/readonly', wrap(async (req, res) => {
+    const key = await createReadonlyKey();
+    await act(req, null, 'Made a new read-only key (the old one, if any, stopped working)');
+    res.json({ key });
+  }));
+  api.delete('/keys/readonly', wrap(async (req, res) => {
+    await revokeReadonlyKey();
+    await act(req, null, 'Revoked the read-only key');
+    res.json({ ok: true });
+  }));
   api.post('/tools/:name', wrap(async (req, res) => {
     const r = await runTool(req.params.name, req.body || {});
     res.status(r.isError ? 422 : 200).json(r);
@@ -849,6 +898,24 @@ export function buildApp() {
   }));
   // A card's history (what happened and why) and its notes
   api.get('/tasks/:id/log', wrap(async (req, res) => (await scope.assertTask(req.focus, req.params.id)) || res.json(await tasks.taskLog(req.params.id))));
+  // A card with its conversation (2 Nov, the Board's side pane): the card, its history, the chat it is about (last
+  // messages) and any drafts waiting for that person — so the owner reads, sends and decides on one screen.
+  api.get('/tasks/:id/context', wrap(async (req, res) => {
+    await scope.assertTask(req.focus, req.params.id);
+    const [t] = await query('SELECT * FROM tasks WHERE id = $1', [req.params.id]);
+    if (!t) return res.status(404).json({ error: 'Task not found' });
+    const log = await tasks.taskLog(t.id);
+    const chat = await taskChat(t).catch(() => null);
+    let messages = [];
+    let drafts = [];
+    if (chat) {
+      messages = await store.getMessages(chat.account, chat.jid, { limit: 25 }).catch(() => []);
+      drafts = await query(
+        `SELECT id, account_id, status, payload->>'text' AS text, payload->'attachment'->>'fileName' AS file, scheduled_at, note
+         FROM outbox WHERE to_jid = $1 AND status IN ('draft','queued') ORDER BY id`, [chat.jid]);
+    }
+    res.json({ task: t, log, chat, messages, drafts });
+  }));
   api.post('/tasks/:id/notes', wrap(async (req, res) => {
     await scope.assertTask(req.focus, req.params.id);
     // dashboard and the owner's scripts write as the owner; the AI writes through MCP (add_task_note)

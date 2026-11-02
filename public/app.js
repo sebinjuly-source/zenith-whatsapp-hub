@@ -775,6 +775,7 @@
                 h('div', { class: 'top' }, h('span', { class: 'name' }, c.is_group ? '👥 ' : '', c.name || c.jid), h('span', { class: 'time' }, fmtShort(c.last_ts))),
                 h('div', { class: 'prev' }, c.last_from_me ? 'You: ' : '', c.last_preview || ''),
                 !state.campaign && c.campaign ? h('div', {}, h('span', { class: 'tag campaign-tag' }, '🎯 ', campaignLabel(c.campaign))) : null,
+                c.card ? h('div', { class: 'chat-card', title: 'The open Board card about this person' }, '🗂️ ', c.card) : null,
                 c.due ? h('div', {}, h('span', { class: 'tag', style: 'background:var(--warn-soft);color:var(--ink)' }, '⏰ Reminder due', c.snooze_note ? ': ' + c.snooze_note : '')) : null,
                 c.state === 'snoozed' && !c.due ? h('div', {}, h('span', { class: 'tag' }, '⏰ ' + new Date(c.snoozed_until).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }), c.snooze_note ? ' · ' + c.snooze_note : '')) : null,
                 c.tags?.length || c.is_blocked ? h('div', {}, c.is_blocked ? h('span', { class: 'tag' }, 'blocked') : null, (c.tags || []).map((t) => h('span', { class: 'tag' }, t))) : null,
@@ -1108,9 +1109,103 @@
     const due = (t) => t.due_at || (t.kind === 'bulk' && t.next_at) || null;
     const isNow = (t) => (t.kind === 'bulk' ? t.status === 'waiting' || (!t.pending && !t.next_at) : !due(t) || new Date(due(t)) <= endOfToday);
     const running = active.filter((t) => mine(t) && t.kind === 'bulk' && t.status === 'in_progress');
-    const now = active.filter((t) => mine(t) && !running.includes(t) && isNow(t))
+    // the owner tapped Done: the AI reads the card and its notes, acts, then closes it (2 Nov)
+    const reviewing = active.filter((t) => t.status === 'review');
+    const now = active.filter((t) => mine(t) && !running.includes(t) && !reviewing.includes(t) && isNow(t))
       .sort((x, y) => (y.priority - x.priority) || ((due(x) ? new Date(due(x)) : 0) - (due(y) ? new Date(due(y)) : 0)));
-    const future = active.filter((t) => mine(t) && !running.includes(t) && !isNow(t)).sort((x, y) => new Date(due(x)) - new Date(due(y)));
+    const future = active.filter((t) => mine(t) && !running.includes(t) && !reviewing.includes(t) && !isNow(t)).sort((x, y) => new Date(due(x)) - new Date(due(y)));
+
+    // ---- the card's pane (2 Nov, from Perisclaw): the matter, its drafts and its chat side by side, so the owner reads,
+    // sends, reschedules and tells the AI what to do on one screen. Phones: full screen; desktop: beside the Board.
+    const closePane = () => { state.boardPane = null; document.querySelector('.board-pane')?.remove(); document.querySelector('.app')?.classList.remove('pane-open'); };
+    async function openPane(t) {
+      state.boardPane = t.id;
+      document.querySelector('.board-pane')?.remove();
+      const pane = h('aside', { class: 'board-pane', role: 'dialog', 'aria-label': 'Card' }, h('div', { class: 'muted', style: 'padding:16px' }, 'Loading…'));
+      document.querySelector('.app')?.classList.add('pane-open');
+      document.body.append(pane);
+      const ctx = await api(`/api/tasks/${t.id}/context`).catch((e) => ({ error: e.message }));
+      if (ctx.error) return fill(pane, h('div', { style: 'padding:16px' }, h('p', {}, ctx.error), h('button', { class: 'btn', onclick: closePane }, 'Close')));
+      const k = ctx.task;
+      const refresh = () => { openPane(k); viewBoard(); };
+      const local = (iso) => new Date(new Date(iso).getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      const dueIn = h('input', { type: 'datetime-local', 'aria-label': 'New date and time', value: k.due_at ? local(k.due_at) : '' });
+      const setDue = (iso, msg) => guard(async () => { await api(`/api/tasks/${k.id}`, { method: 'PATCH', body: { dueAt: iso } }); toast(msg); refresh(); });
+      const reschedule = h('details', { class: 'pane-resched' }, h('summary', { class: 'btn small', title: 'Change the date' }, '🕒 ', k.due_at ? fmtWhen(k.due_at) : 'Set a date'),
+        h('div', { class: 'row', style: 'gap:6px;margin-top:6px' }, dueIn,
+          h('button', { class: 'btn small primary', onclick: () => setDue(dueIn.value ? new Date(dueIn.value).toISOString() : '', 'Date changed')() }, 'Save'),
+          h('button', { class: 'btn small', onclick: () => setDue(new Date((k.due_at && new Date(k.due_at) > new Date() ? new Date(k.due_at).getTime() : Date.now()) + 86400000).toISOString(), 'Moved one day later')() }, '+1 day')));
+      const doneBtn = ['done', 'cancelled', 'review'].includes(k.status) ? null
+        : h('button', { class: 'btn small primary', title: 'Done — the AI reads your notes, does what they ask, then closes the card', onclick: guard(async () => {
+            await api(`/api/tasks/${k.id}`, { method: 'PATCH', body: { status: 'review' } });
+            toast('Done — the AI reviews it, acts on your notes, then closes it');
+            closePane();
+            viewBoard();
+          }) }, '✓ Done');
+      const story = String(k.story || '').split('\n').filter(Boolean);
+      const draftEls = (ctx.drafts || []).map((d) => {
+        const ta = h('textarea', { rows: 4 }, d.text || '');
+        return h('div', { class: 'pane-draft' },
+          h('div', { class: 'muted', style: 'font-size:12px' }, d.status === 'draft' ? '✍️ Draft · not sent' : `🕒 Queued${d.scheduled_at ? ' for ' + fmtWhen(d.scheduled_at) : ''}`, d.file ? ` · 📎 ${d.file}` : '', ` · ${labelOf(d.account_id)}`),
+          ta,
+          h('div', { class: 'row', style: 'gap:6px;justify-content:flex-end' },
+            h('button', { class: 'btn small', onclick: guard(async () => {
+              if (!confirm('Reject this draft?')) return;
+              await api(`/api/outbox/${d.id}/reject`, { body: { reason: '' } });
+              toast('Rejected');
+              refresh();
+            }) }, '🗑 Reject'),
+            d.status === 'draft'
+              ? h('button', { class: 'btn small primary', onclick: guard(async () => {
+                  await api(`/api/outbox/${d.id}/approve`, { body: ta.value.trim() !== (d.text || '').trim() ? { text: ta.value } : {} });
+                  toast('Approved — it goes out now');
+                  refresh();
+                }) }, '➤ Send')
+              : h('button', { class: 'btn small', onclick: guard(async () => { await api(`/api/outbox/${d.id}`, { method: 'PATCH', body: { text: ta.value } }); toast('Saved'); }) }, 'Save')));
+      });
+      const msgs = (ctx.messages || []).slice().sort((a, b2) => a.ts - b2.ts).map((m) => h('div', { class: 'pane-msg ' + (m.from_me ? 'me' : 'them') },
+        h('div', {}, m.body || `[${m.type}]`), h('div', { class: 'muted', style: 'font-size:11px;text-align:right' }, fmtWhen(Number(m.ts) * 1000))));
+      const replyTa = h('textarea', { rows: 2, placeholder: ctx.chat ? `Write a message — it goes from ${labelOf(ctx.chat.account)}` : '' });
+      const noteTa = h('textarea', { rows: 2, placeholder: 'Tell the AI what to do (e.g. "send him the bill PDF tomorrow 10 am") — it acts in its next run' });
+      fill(pane,
+        h('header', { class: 'pane-head' },
+          h('button', { class: 'btn small', onclick: closePane, 'aria-label': 'Close' }, '✕'),
+          h('b', { class: 'grow' }, k.title),
+          k.status === 'review' ? h('span', { class: 'tag' }, '🤖 AI reviewing') : null,
+          doneBtn),
+        h('div', { class: 'pane-body' },
+          k.summary ? h('p', { class: 'pane-summary' }, k.summary) : k.details ? h('p', { class: 'muted', style: 'white-space:pre-wrap' }, withPhones(k.details)) : null,
+          k.next_step ? h('div', { class: 'pane-next' }, h('div', { class: 'muted pane-label' }, 'YOUR NEXT STEP'),
+            h('div', {}, '○ ', k.next_step, k.due_at ? h('span', { class: 'muted' }, ' · due ' + fmtWhen(k.due_at)) : null)) : null,
+          h('div', { class: 'row', style: 'gap:6px;margin:6px 0' }, reschedule,
+            ctx.chat ? h('button', { class: 'btn small', onclick: () => { closePane(); goChat({ kind: 'reply', account: ctx.chat.account, jid: ctx.chat.jid }); } }, '💬 Full chat') : null),
+          story.length ? h('details', { class: 'pane-story', open: true }, h('summary', { class: 'muted pane-label' }, 'HOW WE GOT HERE'), h('ul', {}, story.map((l) => h('li', {}, l)))) : null,
+          draftEls.length ? h('div', {}, h('div', { class: 'muted pane-label' }, 'WAITING TO GO'), draftEls) : null,
+          h('div', {}, h('div', { class: 'muted pane-label' }, '🤖 NOTE FOR THE AI'), noteTa,
+            h('button', { class: 'btn small', onclick: guard(async () => {
+              if (!noteTa.value.trim()) return;
+              await api(`/api/tasks/${k.id}/notes`, { body: { text: noteTa.value.trim() } });
+              toast('Saved — the AI acts on it in its next run');
+              refresh();
+            }) }, 'Save note')),
+          ctx.chat ? h('div', { class: 'pane-chat' },
+            h('div', { class: 'muted pane-label' }, `CHAT · ${ctx.chat.name || ctx.chat.jid.split('@')[0]} · ${labelOf(ctx.chat.account)}`),
+            h('div', { class: 'pane-msgs' }, msgs.length ? msgs : h('p', { class: 'muted' }, 'No messages stored yet.')),
+            replyTa,
+            h('button', { class: 'btn small primary', onclick: guard(async () => {
+              const text = replyTa.value.trim();
+              if (!text) return;
+              await api('/api/send', { body: { account: ctx.chat.account, to: ctx.chat.jid, text, source: 'dashboard' } });
+              toast('Sent');
+              replyTa.value = '';
+              setTimeout(() => openPane(k), 900);
+            }) }, '➤ Send')) : null,
+          h('details', {}, h('summary', { class: 'muted pane-label' }, 'HISTORY & NOTES'),
+            (ctx.log || []).map((r) => h('div', { style: 'font-size:12px;padding:3px 0;border-bottom:1px solid var(--line)' },
+              h('span', { class: 'muted' }, fmtWhen(r.at), ' · ', { you: '👤 You', ai: '🤖 AI', hub: '⚙️ Hub', rule: '⚙️ Rule' }[r.actor] || r.actor, ' · '), r.kind === 'note' ? '📝 ' : '', r.text)))));
+      const msgBox = pane.querySelector('.pane-msgs');
+      if (msgBox) msgBox.scrollTop = msgBox.scrollHeight;
+    }
 
     // one card: title line + one action; everything else under "More"
     const card = (t) => {
@@ -1180,11 +1275,18 @@
             .map(([k, l]) => h('button', { class: 'btn small', type: 'button', onclick: guard(() => sendResult(k)) }, l))),
         whenBox);
       const showCalls = () => { openCalls.add(t.id); if (callRow) callRow.hidden = false; };
-      const doneBtn = closed ? null : h('button', { class: 'btn small', title: 'Mark done (a note you typed is saved first)', onclick: guard(async () => {
-        await flushNote();
-        await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: 'done' } });
-        viewBoard();
-      }) }, '✓ Done');
+      // Done = hand it to the AI: it reads the card and your notes, does what they ask, then closes it (2 Nov)
+      const doneBtn = closed ? null : t.status === 'review'
+        ? h('button', { class: 'btn small', title: 'Close it now without the AI review', onclick: guard(async () => {
+            await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: 'done' } });
+            viewBoard();
+          }) }, 'Close now')
+        : h('button', { class: 'btn small', title: 'Done — the AI reads your notes, does what they ask, then closes the card', onclick: guard(async () => {
+            await flushNote();
+            await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: 'review' } });
+            toast('Done — the AI reviews it, acts on your notes, then closes it');
+            viewBoard();
+          }) }, '✓ Done');
       // More: details, latest note, history & notes, flag, move
       const logBox = h('div', { style: 'font-size:12px;margin-top:6px' });
       const noteIn = h('textarea', { rows: 2, placeholder: 'Add a note (e.g. call notes: what was discussed) — saved when you leave the box', style: 'margin-top:6px',
@@ -1204,10 +1306,11 @@
         } else await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: v } });
         viewBoard();
       }) }, h('option', { value: '' }, 'Move…'),
-        ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'].filter((s) => s !== t.status).map((s) => h('option', { value: s }, s.replace('_', ' '))));
+        ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'].filter((s) => s !== t.status).map((s) => h('option', { value: s }, s === 'done' ? 'done (skip the AI review)' : s.replace('_', ' '))));
       const more = h('details', { class: 'more', 'data-key': `more:${t.id}`, ontoggle: (e) => { if (e.target.open) loadLog(); } },
         h('summary', {}, t.notes ? `More · 📝 ${t.notes}` : 'More'),
         t.details ? h('p', { class: 'muted', style: 'margin:6px 0;white-space:pre-wrap' }, withPhones(t.details)) : null,
+        t.story ? h('ul', { class: 'tc-story' }, String(t.story).split('\n').filter(Boolean).map((l) => h('li', {}, l))) : null,
         closed ? null : h('div', { class: 'row', style: 'margin:6px 0' },
           h('button', { class: 'btn small', onclick: guard(async () => { await flushNote(); await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { priority: !t.priority } }); viewBoard(); }) }, t.priority ? '☆ Remove priority' : '⭐ Make priority'),
           tel ? h('button', { class: 'btn small', type: 'button', title: 'You called them from another phone? Log what happened', onclick: showCalls }, '📞 Log a call result') : null,
@@ -1224,8 +1327,11 @@
           pick,
           t.priority ? icon(['⭐', 'Priority — must do']) : null,
           icon(KIND[t.kind] || KIND.todo),
-          h('b', { class: 'grow tc-title' }, withPhones(t.title)),
-          whoIcon(t)),
+          h('b', { class: 'grow tc-title', role: 'button', tabindex: 0, title: 'Open the card with its chat',
+            onclick: (e) => { if (selecting || e.target.closest('a')) return; openPane(t); }, onkeydown: (e) => e.key === 'Enter' && openPane(t) }, withPhones(t.title)),
+          t.status === 'review' ? h('span', { class: 'tag', title: 'You marked it done; the AI acts on your notes and closes it' }, '🤖 reviewing') : whoIcon(t)),
+        t.summary ? h('div', { class: 'tc-summary' }, t.summary) : null,
+        t.next_step ? h('div', { class: 'tc-next' }, '→ ', t.next_step) : null,
         h('div', { class: 'tc-meta muted' },
           due(t) ? h('span', { style: overdue ? 'color:var(--bad);font-weight:600' : '' }, t.kind === 'reply' ? 'Wrote ' : overdue ? 'Overdue · ' : '', fmtWhen(due(t))) : null,
           !b.account ? h('span', {}, ' · ', labelOf(t.account_id)) : null,
@@ -1420,12 +1526,17 @@
         { hint: selecting ? 'tap cards to select' : priorityNow ? `${priorityNow} must-do` : '', cards: now }),
       section('📅', 'Future', future.length, h('div', {}, futureEl), { hint: 'by day' }),
       running.length ? section('⏳', 'Sending now', running.length, h('div', { class: 'cardlist' }, running.map(card)), { open: false }) : null,
+      reviewing.length ? section('🤖', 'Done — the AI is reviewing', reviewing.length, h('div', { class: 'cardlist' }, reviewing.map(card)), { open: false, hint: 'it acts on your notes, then closes them' }) : null,
       b.past ? section('✅', 'Done & cancelled', past.length, h('div', { class: 'cardlist' }, past.map(card)), { open: false }) : null,
       h('details', { class: 'section' }, h('summary', {}, h('span', { class: 'sec-title' }, '➕ New to-do')), newTask),
       h('details', { class: 'section' }, h('summary', {}, h('span', { class: 'sec-title' }, '📤 Bulk send')), bulk),
       pickBar,
     ]);
     drawPickBar();
+    if (state.boardPane && !document.querySelector('.board-pane')) {
+      const t = [...active, ...past].find((x) => x.id === state.boardPane);
+      if (t) openPane(t); else closePane();
+    }
     if (wasBoard) {
       const m = document.querySelector('main');
       m.querySelectorAll('details[data-key]').forEach((d) => { if (openFolds.has(d.dataset.key)) d.open = true; else if (shutFolds.has(d.dataset.key)) d.open = false; });
@@ -2543,6 +2654,26 @@ ${laterText(shown)}` : ''}`)) return;
 
   // ---------- connect ----------
   async function viewConnect() {
+    // Read-only key (2 Nov): made here, shown once, revocable
+    const roBox = h('div', {});
+    const drawRo = async (fresh) => {
+      const info = await api('/api/keys/readonly').catch(() => ({ exists: false }));
+      const make = h('button', { class: 'btn small primary', onclick: guard(async () => {
+        if (info.exists && !confirm('Make a new read-only key? The old one stops working.')) return;
+        drawRo((await api('/api/keys/readonly', { body: {} })).key);
+      }) }, info.exists ? '↻ Make a new one' : '🔑 Make a read-only key');
+      const revoke = info.exists ? h('button', { class: 'btn small', onclick: guard(async () => {
+        if (!confirm('Revoke the read-only key? Scripts using it stop working.')) return;
+        await api('/api/keys/readonly', { method: 'DELETE' });
+        drawRo();
+      }) }, 'Revoke') : null;
+      fill(roBox,
+        fresh ? [h('p', {}, h('b', {}, 'Copy it now — it is shown only this once:')), code(fresh)] : null,
+        h('p', { class: 'muted' }, info.exists ? `A read-only key exists (made ${new Date(info.created_at).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })}).` : 'No read-only key yet.'),
+        h('div', { class: 'row', style: 'gap:6px' }, make, revoke));
+    };
+    drawRo();
+
     await loadAccounts();
     const base = location.origin;
     const code = (t) => h('pre', { class: 'mono card', style: 'white-space:pre-wrap;margin:8px 0 16px' }, t);
@@ -2572,6 +2703,9 @@ ${laterText(shown)}` : ''}`)) return;
       h('p', { class: 'muted' }, 'Anything the AI can do, a script can too — same checks, same answers. The list of tools: GET /api/tools. Run one (e.g. everything about a person):'),
       code(`curl -X POST -H "x-api-key: YOUR_API_KEY" -H "content-type: application/json" \\\n  -d '{"person":"9876543210"}' ${base}/api/tools/person_context`),
       h('p', { class: 'muted' }, 'Ready-made Google Sheet: apps-script/HubCommandCenter.gs in the repo (Leads with ₹ won, Today\'s cards, Send rows as drafts, Ask any tool).'),
+      h('h2', {}, 'Read-only key'),
+      h('p', { class: 'muted' }, 'For scripts, sheets and routines that only need to read (reports, lead numbers): it can look at everything but never send or change anything — if it leaks, nothing can be sent with it. Use it as x-api-key, ?key= or in the MCP address.'),
+      roBox,
       h('h2', {}, 'Keep the free Render server awake'),
       h('p', { class: 'muted' }, 'Apps Script → Triggers → time-driven, every 10 minutes:'),
       code(`function keepAwake() { UrlFetchApp.fetch('${base}/health', { muteHttpExceptions: true }); }`),

@@ -2636,7 +2636,7 @@ test('daily check-ins: checklist photos with the word count; at the deadline one
   const [o] = await query(`SELECT status, source, payload FROM outbox WHERE account_id = 'ckh' AND to_jid = $1`, [J]);
   assert.ok(['queued', 'sending', 'sent'].includes(o.status), 'no approval needed: ' + o.status);
   assert.match(o.payload.text, /checklist/);
-  const card = (await call('GET', '/api/tasks?for=you')).data.find((t) => t.ref === 'checkin:mallesh');
+  const card = (await call('GET', '/api/tasks?for=you')).data.find((t) => t.ref === `checkin:mallesh:${day}`);
   assert.ok(card && /1\/2/.test(card.title), JSON.stringify(card?.title));
   // the reminder is not held by the 19:00 sending-hours cut-off (it is the owner's own message)
   const st = await outbox.queueStatus?.('ckh').catch(() => null);
@@ -2645,7 +2645,7 @@ test('daily check-ins: checklist photos with the word count; at the deadline one
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
     ('hiring',$1,'CK3',false,$2,'image',''), ('hiring',$1,'CK4',false,$3,'text','front desk check list')`, [J, at('21:20'), at('21:22')]);
     await ck.runCheckins(localDate(`${day} 21:30`));
-  const [t] = await query(`SELECT status FROM tasks WHERE ref = 'checkin:mallesh'`);
+  const [t] = await query(`SELECT status FROM tasks WHERE ref = $1`, [`checkin:mallesh:${day}`]);
   assert.equal(t.status, 'done');
   // MCP: the AI sees it; changing it needs the owner's words
   // (the photos are at 21:20 today, so the tool — which looks at the real clock — shows DONE only late in the day)
@@ -2889,4 +2889,93 @@ test('safety net respects a decision: an interested person whose follow-up card 
   const open = async (p) => (await query(`SELECT id FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled')`, [`followup:${l.id}:${p}@s.whatsapp.net`])).length;
   assert.equal(await open('919733322222'), 0, 'decision respected');
   assert.equal(await open('919733322223'), 1, 'a truly forgotten person still gets the safety-net card');
+});
+
+test('check-ins, the real 1 Nov evening: word first, video, photos an hour later → counted; each day has its own card; the day before closes after midnight', async () => {
+  const ck = await import('../src/checkins.js');
+  const { localDate } = await import('../src/util.js');
+  await manager.create({ id: 'ck2', label: 'CK two' });
+  fake('ck2');
+  await call('PUT', '/api/checkins', { items: [{ name: 'Mallu', phone: '9866600077', what: 'the checklists', account: 'ck2' }] });
+  const J = '919866600077@s.whatsapp.net';
+  const D = '2026-11-01';
+  const at = (d, hm) => Math.floor(localDate(`${d} ${hm}`).getTime() / 1000);
+  // the card for 1 Nov exists (deadline passed with nothing), then: 21:51 "today chechlist", 21:53 video, 22:49 + 22:50 photos
+  await ck.runCheckins(localDate(`${D} 21:05`));
+  const open = async (ref) => (await query(`SELECT id FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled')`, [ref])).length;
+  assert.equal(await open(`checkin:mallu:${D}`), 1);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
+    ('ck2',$1,'N1',false,$2,'text','Hi sir today chechlist'), ('ck2',$1,'N2',false,$3,'video',''),
+    ('ck2',$1,'N3',false,$4,'image',''), ('ck2',$1,'N4',false,$5,'image','')`, [J, at(D, '21:51'), at(D, '21:53'), at(D, '22:49'), at(D, '22:50')]);
+  assert.equal((await ck.photosOn({ id: 'mallu', phone: '919866600077', keyword: 'checklist', minPhotos: 2 }, D, localDate(`${D} 23:00`))).count, 3);
+  // the next morning (another day): 1 Nov's card still closes, no stale card for 1 Nov is reused for 2 Nov
+  await ck.runCheckins(localDate('2026-11-02 08:00'));
+  assert.equal(await open(`checkin:mallu:${D}`), 0, '1 Nov closed with its own photos');
+  // a photo of the dal at noon with no word, and no reminder yet, does not count
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('ck2',$1,'N5',false,$2,'image','dal')`, [J, at('2026-11-02', '12:00')]);
+  assert.equal((await ck.photosOn({ id: 'mallu', phone: '919866600077', keyword: 'checklist', minPhotos: 2 }, '2026-11-02', localDate('2026-11-02 13:00'))).count, 0);
+  await call('PUT', '/api/checkins', { items: [] });
+  await manager.remove('ck2');
+});
+
+test('Done by the owner = AI review: the card goes first in the AI list, the AI acts and closes it; matter fields; the card pane context', async () => {
+  // a card the owner wrote with a phone in it, and a chat with that person
+  const J = '919733344444@s.whatsapp.net';
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
+    ('hotel',$1,'PX1',false,$2,'text','Please send the bill as one PDF'), ('hotel',$1,'PX2',true,$3,'text','Sure')`, [J, Math.floor(Date.now() / 1000) - 600, Math.floor(Date.now() / 1000) - 500]);
+  await query(`INSERT INTO chats (account_id, jid, name, is_group, last_ts) VALUES ('hotel',$1,'Rohith Test',false,$2) ON CONFLICT (account_id, jid) DO UPDATE SET last_ts = EXCLUDED.last_ts`, [J, Math.floor(Date.now() / 1000) - 500]);
+  const t = (await call('POST', '/api/tasks', { account: 'hotel', title: 'Bill for Rohith 9733344444', assignee: 'you' })).data;
+  // the AI writes the matter fields
+  assert.match(await mcp('update_task', { id: t.id, campaign: 'all', summary: 'Advance paid, room held 3–7 Nov', next_step: 'Give one PDF bill at checkout', story: ['Booked 1 Nov', '₹2,625 advance paid'] }), /Task #/);
+  const [row] = await query('SELECT summary, next_step, story FROM tasks WHERE id = $1', [t.id]);
+  assert.equal(row.summary, 'Advance paid, room held 3–7 Nov');
+  assert.equal(row.story, 'Booked 1 Nov\n₹2,625 advance paid');
+  assert.match(await mcp('list_tasks', { campaign: 'all', for: 'you' }), /NOW: Advance paid.*NEXT: Give one PDF bill/);
+  // the pane: the card, its chat (found from the phone in the title) and history
+  const ctx = (await call('GET', `/api/tasks/${t.id}/context`)).data;
+  assert.equal(ctx.chat.jid, J);
+  assert.equal(ctx.chat.account, 'hotel');
+  assert.ok(ctx.messages.some((m) => m.body === 'Please send the bill as one PDF'));
+  // the Inbox shows the open card under the chat
+  await query(`UPDATE tasks SET ref = $2 WHERE id = $1`, [t.id, `remind:hotel:${J}`]);
+  const chats = (await call('GET', '/api/accounts/hotel/chats?limit=100&state=')).data;
+  assert.equal(chats.find((c) => c.jid === J)?.card, 'Bill for Rohith 9733344444');
+  // the owner taps Done with a note: status review, the AI sees it FIRST in its due list, does it, closes it
+  await call('POST', `/api/tasks/${t.id}/notes`, { text: 'Send him the PDF tomorrow 10 am' });
+  await call('PATCH', `/api/tasks/${t.id}`, { status: 'review' });
+  const due = await mcp('list_tasks', { campaign: 'all', for: 'ai', due_now: true });
+  assert.match(due, new RegExp(`#${t.id} .*OWNER MARKED DONE — REVIEW`));
+  assert.match(await mcp('update_task', { id: t.id, campaign: 'all', status: 'done' }), /done/);
+  assert.equal((await query('SELECT status FROM tasks WHERE id = $1', [t.id]))[0].status, 'done');
+});
+
+test('read-only key: reads (REST GET, reading tools, MCP) work; sending or changing anything is refused; revoke', async () => {
+  const made = await call('POST', '/api/keys/readonly', {});
+  const ro = made.data.key;
+  assert.match(ro, /^ro_[0-9a-f]{48}$/);
+  assert.equal((await call('GET', '/api/keys/readonly')).data.exists, true);
+  assert.equal((await call('GET', '/api/accounts', null, { key: ro })).status, 200);
+  assert.equal((await call('POST', '/api/tools/list_accounts', {}, { key: ro })).status, 200);
+  assert.equal((await call('POST', '/api/tools/send_message', { account: 'hotel', to: '9733300001', text: 'x' }, { key: ro })).status, 403);
+  assert.equal((await call('POST', '/api/send', { account: 'hotel', to: '9733300001', text: 'x' }, { key: ro })).status, 403);
+  assert.equal((await call('POST', '/api/keys/readonly', {}, { key: ro })).status, 403);
+  assert.ok((await call('GET', '/api/tools', null, { key: ro })).data.tools.every((x) => x.name !== 'send_message'));
+  // MCP with the read-only key: the reading tools only
+  const list = await fetch(`${base}/mcp/${ro}`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) }).then((r) => r.json());
+  const names = list.result.tools.map((x) => x.name);
+  assert.ok(names.includes('list_tasks') && !names.includes('send_message') && !names.includes('update_task'), names.join(','));
+  // the login page does not accept it (the dashboard needs the main key)
+  assert.equal((await call('POST', '/login', { key: ro }, { key: null })).status, 401);
+  await call('DELETE', '/api/keys/readonly');
+  const { resetKeyGuesses } = await import('../src/auth.js');
+  resetKeyGuesses();
+  assert.equal((await call('GET', '/api/accounts', null, { key: ro })).status, 401);
+  resetKeyGuesses();
+});
+
+test('card pane: a date in the title is not a phone number (no empty "chat 20261101")', async () => {
+  const t = (await call('POST', '/api/tasks', { account: 'hotel', title: "Mallesh hasn't sent the checklists for 2026-11-01 (0/2)" })).data;
+  assert.equal((await call('GET', `/api/tasks/${t.id}/context`)).data.chat, null);
+  await call('PATCH', `/api/tasks/${t.id}`, { status: 'done' });
 });

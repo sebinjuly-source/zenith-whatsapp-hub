@@ -9,9 +9,10 @@ import { toJid } from './store.js';
 import config from './config.js';
 import { PHONE_RE } from './util.js';
 
-export const COLUMNS = ['upcoming', 'in_progress', 'waiting', 'done', 'cancelled'];
+// review = the owner tapped Done: the AI reads the card (notes, instructions), does what it asks, then closes it (2 Nov)
+export const COLUMNS = ['upcoming', 'in_progress', 'waiting', 'review', 'done', 'cancelled'];
 
-const LABEL = { upcoming: 'Upcoming', in_progress: 'In progress', waiting: 'Waiting for approval', done: 'Done', cancelled: 'Cancelled' };
+const LABEL = { upcoming: 'Upcoming', in_progress: 'In progress', waiting: 'Waiting for approval', review: 'Done by the owner — AI to review', done: 'Done', cancelled: 'Cancelled' };
 
 /** One line in a card's history. Never throws: history must not break the action it records. */
 export async function logTask(taskId, text, { actor = 'hub', kind = 'event' } = {}) {
@@ -114,13 +115,22 @@ export async function guessRole(accountId, text) {
   return null;
 }
 
-export async function createTask({ account, title, details, kind = 'todo', dueAt, createdBy = 'you', idemKey = null, role = null, assignee, priority = false }) {
+const clean = (v) => (v == null ? null : String(v).trim().slice(0, 600) || null);
+/** "How we got here": bullets as one line each (an array or text with line breaks); at most 8 */
+const storyText = (v) => {
+  if (v == null) return null;
+  const lines = (Array.isArray(v) ? v : String(v).split(/\r?\n/)).map((l) => String(l).replace(/^\s*[-•*]\s*/, '').trim()).filter(Boolean);
+  return lines.slice(-8).map((l) => l.slice(0, 300)).join('\n') || null;
+};
+
+export async function createTask({ account, title, details, kind = 'todo', dueAt, createdBy = 'you', idemKey = null, role = null, assignee, priority = false, summary, nextStep, story }) {
   if (!title?.trim()) throw new Error('A task needs a title');
   if (!role) role = await guessRole(account, `${title} ${details || ''}`).catch(() => null);
   const [row] = await query(
-    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, idem_key, role, assignee, priority)
-     VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8,$9,$10) RETURNING *`,
-    [account, title.trim(), details || null, kind, dueAt || null, createdBy, idemKey ? String(idemKey) : null, role, who(assignee) || (kind === 'bulk' ? 'ai' : 'you'), !!priority],
+    `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, idem_key, role, assignee, priority, summary, next_step, story)
+     VALUES ($1,$2,$3,$4,'upcoming',$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+    [account, title.trim(), details || null, kind, dueAt || null, createdBy, idemKey ? String(idemKey) : null, role, who(assignee) || (kind === 'bulk' ? 'ai' : 'you'), !!priority,
+      clean(summary), clean(nextStep), storyText(story)],
   );
   await logTask(row.id, 'Created', { actor: createdBy });
   return row;
@@ -165,8 +175,14 @@ export async function closeRefTasks(refs, status = 'done', reason = '') {
   return rows.length;
 }
 
-export async function updateTask(id, { title, details, status, dueAt, assignee, priority, actor = 'you', role }) {
+export async function updateTask(id, { title, details, status, dueAt, assignee, priority, actor = 'you', role, summary, nextStep, story }) {
   if (role !== undefined) await query('UPDATE tasks SET role = $2 WHERE id = $1', [id, role || null]);
+  // the matter fields: undefined = keep, '' = clear
+  if (summary !== undefined || nextStep !== undefined || story !== undefined) {
+    await query(`UPDATE tasks SET summary = CASE WHEN $2 THEN $3 ELSE summary END, next_step = CASE WHEN $4 THEN $5 ELSE next_step END,
+        story = CASE WHEN $6 THEN $7 ELSE story END, updated_at = now() WHERE id = $1`,
+      [id, summary !== undefined, clean(summary), nextStep !== undefined, clean(nextStep), story !== undefined, storyText(story)]);
+  }
   if (status && !COLUMNS.includes(status)) throw new Error(`Status must be one of ${COLUMNS.join(', ')}`);
   const [before] = await query('SELECT status, due_at, priority, assignee FROM tasks WHERE id = $1', [id]);
   const [row] = await query(
@@ -209,12 +225,14 @@ export async function listTasks({ account, past = false, limit = 200, role, assi
   const where = [];
   if (assignee) {
     p.push(who(assignee));
-    where.push(`COALESCE(t.assignee, 'you') = $${p.length}`);
+    // a card the owner marked Done waits for the AI's review, whoever it was for
+    where.push(`(COALESCE(t.assignee, 'you') = $${p.length}${who(assignee) === 'ai' ? ` OR t.status = 'review'` : ''})`);
   }
   if (dueBefore) {
     p.push(new Date(dueBefore).toISOString());
-    // an undated to-do is due now (else an AI card made without a date would never come up); bulk sends aren't to-dos
-    where.push(`(t.due_at <= $${p.length}::timestamptz OR (t.due_at IS NULL AND t.kind <> 'bulk'))`);
+    // an undated to-do is due now (else an AI card made without a date would never come up); bulk sends aren't to-dos;
+    // a card waiting for the AI's review is due now
+    where.push(`(t.due_at <= $${p.length}::timestamptz OR (t.due_at IS NULL AND t.kind <> 'bulk') OR t.status = 'review')`);
   }
   if (role) {
     p.push(role);

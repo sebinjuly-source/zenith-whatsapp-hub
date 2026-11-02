@@ -279,6 +279,10 @@ CREATE INDEX IF NOT EXISTS tasks_ref ON tasks (ref) WHERE ref IS NOT NULL;
 -- Who does it ('you' = the owner, 'ai' = the AI / hub) and whether it's a must-do (interviews, calls to make)
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee TEXT;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority BOOLEAN NOT NULL DEFAULT FALSE;
+-- A card as a "matter" (2 Nov, from Perisclaw): where it stands, the owner's next step, how we got here (one bullet per line)
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS summary TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS next_step TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS story TEXT;
 UPDATE tasks SET assignee = CASE WHEN kind IN ('reply','bulk') THEN 'ai' ELSE 'you' END,
   priority = (kind = 'visit' OR title LIKE 'Did % come?%' OR title LIKE 'Call %' OR title LIKE 'Call notes needed%')
   WHERE assignee IS NULL;

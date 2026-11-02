@@ -374,7 +374,10 @@ export async function listChats(accountId, { q, kind, tag, limit = 30, offset = 
             ch.participants, ct.phone, ct.tags, ct.lead_status, ct.summary, ct.is_blocked, ct.is_business,
             ch.state, ch.snoozed_until, ch.snooze_note,
             (ch.state = 'snoozed' AND ch.snoozed_until <= now()) AS due,
-            ${roleOf('ch.account_id', 'ch.jid')} AS campaign
+            ${roleOf('ch.account_id', 'ch.jid')} AS campaign,
+            -- the open Board card about this person (the Inbox shows its title under the chat)
+            (SELECT t.title FROM tasks t WHERE split_part(t.ref, ':', 3) = ch.jid AND t.status NOT IN ('done','cancelled')
+               ORDER BY t.priority DESC, t.id DESC LIMIT 1) AS card
      FROM chats ch LEFT JOIN contacts ct ON ct.account_id = ch.account_id AND ct.jid = ch.jid
      WHERE ${where.join(' AND ')}
      ORDER BY (ch.state = 'snoozed' AND ch.snoozed_until <= now()) DESC, ch.last_ts DESC NULLS LAST

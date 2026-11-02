@@ -9,7 +9,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import config from './config.js';
-import { keyOk, keyGuessBlocked } from './auth.js';
+import { keyOk, keyGuessBlocked, keyRole, READ_TOOLS } from './auth.js';
 import { query, tx } from './db.js';
 import { manager } from './wa/manager.js';
 import * as store from './store.js';
@@ -271,14 +271,15 @@ export async function enforceScope(focus, name, a) {
   }
 }
 
-function buildServer(playbook = '', focus = '') {
+function buildServer(playbook = '', focus = '', { readOnly = false } = {}) {
 
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). Work only with people on campaign lists: they get "Reply to" cards, and inbox_summary shows every one of them waiting for an answer (also those whose card was closed before a new message) — look at it before deciding and read the chat (get_messages) before drafting. Chats of people on no list are the staff's everyday chats: leave them alone unless the owner asks; never answer the hub's own numbers or the owner's phones. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. EVERY REPLY ENDS IN A RECORD: after any conversation (yours or the owner's own reply by hand) record what was agreed — a day → update_list_member visit_at (with time) or available_from; interested, no day → stage interested + follow_up_at; not interested → that stage. "Next step missing: X" cards are the hub's safety net for people who replied with nothing recorded (27 Oct: a chef the owner told "come on the 10th" had no card). NAMES: the name a person writes themselves (signature, "my name is", booking details) beats their WhatsApp profile name, which beats the name saved on the phone or the list (31 Oct: a guest saved as "Suvijaya" signs "Sujit" — he was addressed as "Ms Suvijaya"). Never guess gender from a name: use Mr/Ms only when the chat makes it clear (they wrote it, or were called Sir/Madam and answered), else "Dear <name> ji". When a list or contact name is wrong, fix it (update_list_member name, update_contact name). FILES: open_file shows you a photo/screenshot/ID someone sent (as the picture) or a PDF's text — read them before replying; save_media / open_file also give a link to forward the file. A message sent by mistake → unsend_message (linked numbers, 2 days). You can send any file yourself — send_message(attachment_base64=<the file as base64>, file_name="X.pdf") or upload_file then attachment_url; never ask the owner to upload to Drive or send it by hand. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who wrote to us in the last 30 days (interested candidates, interview follow-ups) → everyone else → nudges to non-repliers. On a linked number only people who wrote in the last 30 days skip the daily limit, and at most hourlyCap (10) automated messages go out per hour — a burst to old contacts got the hotel number logged out (26 Oct). Never plan big batches to old contacts from a linked number. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). Work only with people on campaign lists: they get "Reply to" cards, and inbox_summary shows every one of them waiting for an answer (also those whose card was closed before a new message) — look at it before deciding and read the chat (get_messages) before drafting. Chats of people on no list are the staff's everyday chats: leave them alone unless the owner asks; never answer the hub's own numbers or the owner's phones. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. THE BOARD (2 Nov): a card in status "review" was marked Done by the owner — read it and its notes (task_history), do what they ask, then update_task done; never leave one. Keep every card you work on readable as a MATTER: update_task summary (where it stands, one line), next_step (the owner's next step) and story (2–4 bullets: how we got here) — the owner reads these instead of the chat. EVERY REPLY ENDS IN A RECORD: after any conversation (yours or the owner's own reply by hand) record what was agreed — a day → update_list_member visit_at (with time) or available_from; interested, no day → stage interested + follow_up_at; not interested → that stage. "Next step missing: X" cards are the hub's safety net for people who replied with nothing recorded (27 Oct: a chef the owner told "come on the 10th" had no card). NAMES: the name a person writes themselves (signature, "my name is", booking details) beats their WhatsApp profile name, which beats the name saved on the phone or the list (31 Oct: a guest saved as "Suvijaya" signs "Sujit" — he was addressed as "Ms Suvijaya"). Never guess gender from a name: use Mr/Ms only when the chat makes it clear (they wrote it, or were called Sir/Madam and answered), else "Dear <name> ji". When a list or contact name is wrong, fix it (update_list_member name, update_contact name). FILES: open_file shows you a photo/screenshot/ID someone sent (as the picture) or a PDF's text — read them before replying; save_media / open_file also give a link to forward the file. A message sent by mistake → unsend_message (linked numbers, 2 days). You can send any file yourself — send_message(attachment_base64=<the file as base64>, file_name="X.pdf") or upload_file then attachment_url; never ask the owner to upload to Drive or send it by hand. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who wrote to us in the last 30 days (interested candidates, interview follow-ups) → everyone else → nudges to non-repliers. On a linked number only people who wrote in the last 30 days skip the daily limit, and at most hourlyCap (10) automated messages go out per hour — a burst to old contacts got the hotel number logged out (26 Oct). Never plan big batches to old contacts from a linked number. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
   );
   const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter for this call: a campaign name, "none" (hotel / no campaign) or "all". Default: ${focus ? `"${focus}" (the campaign the owner has open)` : 'all campaigns'}.`);
   const tool = (name, description, inputSchema, fn) => {
+    if (readOnly && !READ_TOOLS.has(name)) return; // the read-only key sees only the tools that read
     const shape = { ...inputSchema };
     if (!shape.campaign) shape.campaign = CAMPAIGN_FILTER;
     if (name === 'update_task') shape.in_campaign = CAMPAIGN_FILTER.describe('Older name of campaign (the filter)');
@@ -1576,18 +1577,25 @@ function buildServer(playbook = '', focus = '') {
       : 'Queued for the server connected to this number (runs within ~10 s). Call get_messages again in a minute or two.';
   });
 
+  // A card as a "matter" (2 Nov, from Perisclaw): the owner reads where it stands without opening the chat
+  const MATTER = {
+    summary: z.string().optional().describe('Where it stands, one line the owner reads first (e.g. "Advance paid, room held 3–7 Nov; final bill due at checkout"); "" clears'),
+    next_step: z.string().optional().describe('The owner\'s next step, short (e.g. "Give Rohith one PDF bill for 4 days at checkout"); "" clears'),
+    story: z.union([z.array(z.string()), z.string()]).optional().describe('How we got here: 2–4 short bullets (array, or one per line), facts with dates; replaces the old ones; "" clears'),
+  };
   const taskLine = (t) =>
     [
       `#${t.id}`,
       t.account_id,
-      t.status,
+      t.status === 'review' ? 'OWNER MARKED DONE — REVIEW: do what the card and its notes ask (task_history), then update_task done' : t.status,
       t.owner_note_pending ? 'OWNER NOTE TO ACT ON' : null,
       t.priority ? 'PRIORITY' : null,
       (t.assignee || 'you') === 'ai' ? 'for AI' : 'for owner',
       trim(t.title, 80),
       t.total ? `sent ${t.sent}/${t.total}${t.drafts ? `, ${t.drafts} awaiting approval` : ''}${t.failed ? `, ${t.failed} failed` : ''}${t.replied ? `, ${t.replied} replied` : ''}` : null,
       t.due_at ? `due ${fmtTime(Math.floor(new Date(t.due_at).getTime() / 1000))}` : null,
-      t.details ? `— ${trim(t.details, 160)}` : null,
+      t.summary ? `NOW: ${trim(t.summary, 160)}` : t.details ? `— ${trim(t.details, 160)}` : null,
+      t.next_step ? `NEXT: ${trim(t.next_step, 120)}` : null,
       t.notes ? `${t.notes} note(s), latest: "${trim(t.last_note, 300)}"` : null,
     ].filter(Boolean).join(' | ');
 
@@ -1627,19 +1635,20 @@ function buildServer(playbook = '', focus = '') {
     };
     // most important first, so a cut-off long list never hides them (1 Nov: the owner's PRIORITY card was below 28
     // stale follow-ups and fell into "… 9 more lines not shown"): owner notes → priority → cards the owner wrote → the rest
-    const rank = (t) => (t.owner_note_pending ? 0 : t.priority ? 1 : t.created_by === 'you' && t.kind === 'todo' ? 2 : 3);
+    const rank = (t) => (t.status === 'review' || t.owner_note_pending ? 0 : t.priority ? 1 : t.created_by === 'you' && t.kind === 'todo' ? 2 : 3);
     rows = rows.map((t, i) => [t, i]).sort((x, y) => rank(x[0]) - rank(y[0]) || x[1] - y[1]).map(([t]) => t);
     // a long list gets one short line per card (the full card: task_history / person_context) so all of it fits
     const compact = rows.length > 15;
     const line = (t) => (compact
-      ? [`#${t.id}`, t.account_id, t.status, t.owner_note_pending ? 'OWNER NOTE TO ACT ON' : null, t.priority ? 'PRIORITY' : null,
+      ? [`#${t.id}`, t.account_id, t.status === 'review' ? 'OWNER MARKED DONE — REVIEW: do what the card and its notes ask, then close it' : t.status, t.owner_note_pending ? 'OWNER NOTE TO ACT ON' : null, t.priority ? 'PRIORITY' : null,
         (t.assignee || 'you') === 'ai' ? 'for AI' : 'for owner', trim(t.title, 70),
+        t.summary ? `NOW: ${trim(t.summary, 90)}` : null, t.next_step ? `NEXT: ${trim(t.next_step, 70)}` : null,
         t.due_at ? `due ${fmtTime(Math.floor(new Date(t.due_at).getTime() / 1000))}` : null,
         t.notes ? `last note: "${trim(t.last_note, 90)}"` : null].filter(Boolean).join(' | ') + chatOf(t)
       : `${taskLine(t)}${chatOf(t)}${nowLine(t)}`);
     if (rows.length) {
       const top = rows.filter((t) => rank(t) < 3).length;
-      const head = compact ? `${rows.length} cards${top ? ` — ${top} need attention first (owner notes / PRIORITY / written by the owner)` : ''}; one line each — task_history(id) or person_context for the full story:\n` : '';
+      const head = compact ? `${rows.length} cards${top ? ` — ${top} need attention first (marked Done by the owner for your review / owner notes / PRIORITY / written by the owner)` : ''}; one line each — task_history(id) or person_context for the full story:\n` : '';
       return head + rows.map(line).join('\n');
     }
     if (a.past) return 'No finished tasks match.';
@@ -1651,25 +1660,29 @@ function buildServer(playbook = '', focus = '') {
     account: accountArg, title: z.string(), details: z.string().optional(), due: z.string().optional().describe('"YYYY-MM-DD HH:MM" (India time) or ISO'),
     for: z.enum(['you', 'ai']).optional(), priority: z.boolean().optional(),
     campaign: z.string().optional().describe('Campaign (job role) the card belongs to, e.g. Chef, Front office. Found automatically when the card names a phone number on a list.'),
+    ...MATTER,
   }, async (a) => {
     const s = await manager.resolve(a.account);
-    const t = await tasks.createTask({ account: s.id, title: a.title, details: a.details, dueAt: localTime(a.due) || null, createdBy: 'ai', assignee: a.for, priority: a.priority, role: a.campaign || null });
+    const t = await tasks.createTask({ account: s.id, title: a.title, details: a.details, dueAt: localTime(a.due) || null, createdBy: 'ai', assignee: a.for, priority: a.priority, role: a.campaign || null,
+      summary: a.summary, nextStep: a.next_step, story: a.story });
     await ai(s.id, `Created task #${t.id} "${t.title}"`);
     return `Task #${t.id} created on ${s.id} (for ${t.assignee === 'ai' ? 'AI' : 'owner'}${t.priority ? ', priority' : ''}${t.due_at ? `, due ${d(t.due_at)}` : ''}).`;
   });
 
-  tool('update_task', 'Move or edit a task card (status: upcoming, in_progress, waiting, done, cancelled). Cancelling also stops its unsent messages.', {
+  tool('update_task', 'Move or edit a task card (status: upcoming, in_progress, waiting, done, cancelled), and keep its matter fields current (summary = where it stands, next_step = the owner\'s next step, story = how we got here). Cancelling also stops its unsent messages. A card in status "review" was marked Done by the owner: do what it and its notes ask, then set done.', {
     id: z.number().int(), status: z.enum(['upcoming', 'in_progress', 'waiting', 'done', 'cancelled']).optional(),
     title: z.string().optional(), details: z.string().optional(), due: z.string().optional(),
     for: z.enum(['you', 'ai']).optional(), priority: z.boolean().optional(),
     // 1 Nov: this used to be "campaign", so routines passing campaign="all" (the filter on every other tool) re-tagged cards to a campaign "all"
     move_to_campaign: z.string().optional().describe('Move the card to this campaign (job role); "" clears it. (campaign= is only the filter, as on every tool)'),
+    ...MATTER,
   }, async (a) => {
     if (a.move_to_campaign !== undefined) {
       if (/^(all|none)$/i.test(a.move_to_campaign.trim())) throw new Error('"all" / "none" are filters, not campaigns — pass a campaign name, or "" to clear');
       await tasks.updateTask(a.id, { role: a.move_to_campaign, actor: 'ai' });
     }
-    const t = a.status === 'cancelled' ? await tasks.cancelTask(a.id, 'ai') : await tasks.updateTask(a.id, { status: a.status, title: a.title, details: a.details, dueAt: localTime(a.due), assignee: a.for, priority: a.priority, actor: 'ai' });
+    const t = a.status === 'cancelled' ? await tasks.cancelTask(a.id, 'ai') : await tasks.updateTask(a.id, { status: a.status, title: a.title, details: a.details, dueAt: localTime(a.due), assignee: a.for, priority: a.priority, actor: 'ai',
+      summary: a.summary, nextStep: a.next_step, story: a.story });
     return `Task #${t.id}: ${t.status} — ${t.title}`;
   });
 
@@ -1806,7 +1819,8 @@ export function mountMcp(app) {
   const handler = async (req, res) => {
     const key = req.params.key || req.get('x-api-key') || req.query.key;
     if (keyGuessBlocked(req.ip)) return res.status(429).set('Retry-After', '900').json({ error: 'Too many wrong keys — try again in 15 minutes' });
-    if (!keyOk(key)) {
+    const role = await keyRole(key).catch(() => null);
+    if (!role) {
       keyGuessBlocked(req.ip, Boolean(key));
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -1826,7 +1840,7 @@ export function mountMcp(app) {
       // the main playbook in full; campaign playbooks by name only (the AI reads the one it works on)
       instructions = camps.length ? `${main}\n\nCAMPAIGN PLAYBOOKS (own rules per campaign — read the one you work on with get_playbook(campaign=…) or hub_overview(campaign=…)): ${camps.map((c) => c.campaign).join(', ')}` : main;
     }
-    const server = buildServer(instructions, focus);
+    const server = buildServer(instructions, focus, { readOnly: role === 'read' });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => {
       transport.close();

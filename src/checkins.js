@@ -1,7 +1,8 @@
 /**
  * Daily check-ins: a staff member sends a photo report every day (e.g. Mallesh: the room checklist and the front
- * desk checklist). A photo counts when he writes the word (default "checklist") with it — in its caption or in a
- * message within 15 minutes after it — because he sends many other photos (food, orders, rooms) all day.
+ * desk checklist). A photo counts when he writes the word (default "checklist") with it — in its caption or a message
+ * from 90 min before to 15 min after it — or sends it in answer to the reminder, because he sends many other photos
+ * (food, orders, rooms) all day.
  * Messages to ANY hub number count. If fewer than the photos needed have come by the deadline, one reminder goes
  * to him from the chosen number WITHOUT approval (the owner set it up — it is the owner's own message, so the
  * number's sending hours and daily limits don't hold it), and the owner gets a Board card that closes by itself
@@ -83,31 +84,47 @@ export function hasWord(text, keyword) {
 }
 
 /**
- * Photos with the word that came today (on any hub number): { count, last, marked }. The same photo sent to two
- * numbers counts once (same file fingerprint). "marked" = the AI looked at the photos and marked today received
+ * Photos with the word for one day (on any hub number): { count, last, marked }. The same photo sent to two numbers
+ * counts once (same file fingerprint). "marked" = the AI looked at the photos and marked that day received
  * (daily_checkins mark_received) — counts as done whatever the captions say.
+ * A photo (or video / document — he sometimes films the sheet) counts when (2 Nov: Mallesh wrote "today chechlist" at
+ * 21:51 and sent the photos at 22:49 — none counted, the card said he never sent them):
+ *  - the word is in its caption, or in a message of his on that number from 90 minutes before to 15 minutes after it;
+ *  - or it came within 3 hours after that day's reminder (he answers the reminder with the sheets).
+ * A day's photos may come until 06:00 the next morning.
  */
-export async function photosToday(c, now = new Date()) {
-  const day = today(now);
+export async function photosOn(c, day, now = new Date()) {
   const start = Math.floor(localDate(`${day} 00:00`).getTime() / 1000);
+  const end = Math.min(Math.floor(now.getTime() / 1000), Math.floor(localDate(`${day} 00:00`).getTime() / 1000) + 30 * 3600);
   const jid = `${c.phone}@s.whatsapp.net`;
   const rows = await query(
     `SELECT account_id, id, ts, type, body, media->>'fileSha256' AS sha FROM messages
      WHERE chat_jid = $1 AND NOT from_me AND ts >= $2 AND ts <= $3 ORDER BY ts`,
-    [jid, start, Math.floor(now.getTime() / 1000)],
+    [jid, start, end],
   );
+  const [rem] = await query(`SELECT sent_at FROM outbox WHERE idem_key = $1 AND sent_at IS NOT NULL LIMIT 1`, [`checkin:${c.id}:${day}`]);
+  // the reminder goes at the deadline: only photos after BOTH count as answers to it
+  const remTs = rem ? Math.max(Math.floor(new Date(rem.sent_at).getTime() / 1000), Math.floor(localDate(`${day} ${c.deadline || DEFAULTS.deadline}`).getTime() / 1000)) : null;
+  const words = rows.filter((t) => hasWord(t.body, c.keyword));
+  // a word written BEFORE the photos only counts from a typed message ("today chechlist"), not another photo's caption
+  const typed = words.filter((t) => !['image', 'document', 'video'].includes(t.type));
   const photos = new Map();
   for (const p of rows) {
-    if (!['image', 'document'].includes(p.type)) continue;
-    // the word in its caption, or in a message of theirs on that number within 15 minutes after it
-    const named = hasWord(p.body, c.keyword) || rows.some((t) => t.account_id === p.account_id && t.ts >= p.ts && t.ts <= Number(p.ts) + 900 && t.id !== p.id && hasWord(t.body, c.keyword));
-    if (named) photos.set(p.sha || p.id, Number(p.ts));
+    if (!['image', 'document', 'video'].includes(p.type)) continue;
+    const ts = Number(p.ts);
+    const named = hasWord(p.body, c.keyword)
+      || words.some((t) => t.account_id === p.account_id && t.id !== p.id && Number(t.ts) >= ts && Number(t.ts) <= ts + 900)
+      || typed.some((t) => t.account_id === p.account_id && Number(t.ts) >= ts - 5400 && Number(t.ts) < ts)
+      || (remTs && ts >= remTs && ts <= remTs + 3 * 3600);
+    if (named) photos.set(p.sha || p.id, ts);
   }
   const [m] = await query(`SELECT value FROM config WHERE key = 'checkin_marks'`).catch(() => []);
   const marked = m?.value?.[c.id]?.date === day ? m.value[c.id] : null;
   const last = photos.size ? Math.max(...photos.values()) : null;
   return { count: marked ? Math.max(photos.size, c.minPhotos) : photos.size, last, marked };
 }
+/** Today's photos (see photosOn). */
+export const photosToday = (c, now = new Date()) => photosOn(c, today(now), now);
 
 /** The AI looked at today's photos and saw the checklists (spelling or captions aside): count today as received. */
 export async function markReceived(id, note = '', now = new Date()) {
@@ -137,20 +154,26 @@ export async function checkinStatus(now = new Date()) {
 
 /**
  * Every minute: after the deadline, anyone short of photos gets ONE reminder (idempotent per day, so several servers
- * or restarts can't send twice) and the owner a Board card; the card closes when the photos arrive.
+ * or restarts can't send twice) and the owner a Board card for THAT day; the card closes when that day's photos arrive
+ * (also late at night, after midnight, or when the AI marks the day received). One card per day (2 Nov: a single
+ * card for every day stayed open for ever once its day had passed).
  */
 export async function runCheckins(now = new Date()) {
   const items = await getCheckins();
   if (!items.length) return 0;
   const day = today(now);
+  const yesterday = today(new Date(localDate(`${day} 12:00`).getTime() - 86400000));
   const { enqueue } = await import('./outbox.js');
   const { upsertRefTask, closeRefTasks } = await import('./tasks.js');
   let sent = 0;
   for (const c of items) {
-    const ref = `checkin:${c.id}`;
-    const got = await photosToday(c, now);
+    // yesterday's card (and the old one-card-for-all-days ref) closes when yesterday's photos are complete
+    const prev = await photosOn(c, yesterday, now);
+    if (prev.count >= c.minPhotos) await closeRefTasks([`checkin:${c.id}:${yesterday}`, `checkin:${c.id}`], 'done', `${prev.count} checklist photo(s) for ${yesterday} came in`);
+    const ref = `checkin:${c.id}:${day}`;
+    const got = await photosOn(c, day, now);
     if (got.count >= c.minPhotos) {
-      await closeRefTasks([ref], 'done', `${got.count} photo(s) with "${c.keyword}" came in`);
+      await closeRefTasks([ref], 'done', `${got.count} checklist photo(s) came in`);
       continue;
     }
     if (!c.enabled || now < localDate(`${day} ${c.deadline}`)) continue;
@@ -161,8 +184,8 @@ export async function runCheckins(now = new Date()) {
     if (!row.duplicate) sent++;
     await upsertRefTask(ref, {
       account: c.account, kind: 'todo', assignee: 'you', dueAt: now.toISOString(),
-      title: `${c.name} hasn't sent ${c.what} (${got.count}/${c.minPhotos}) — reminder sent`,
-      details: `By ${c.deadline} only ${got.count} of ${c.minPhotos} photo(s) with the word "${c.keyword}" came from +${c.phone}. A reminder went to him from "${c.account}" at ${now.toLocaleTimeString('en-IN', { timeZone: config.tz, hour: 'numeric', minute: '2-digit' })}. This card closes by itself when the photos come.`,
+      title: `${c.name} hasn't sent ${c.what} for ${day} (${got.count}/${c.minPhotos}) — reminder sent`,
+      details: `By ${c.deadline} only ${got.count} of ${c.minPhotos} checklist photo(s) came from +${c.phone}. A reminder went to him from "${c.account}" at ${now.toLocaleTimeString('en-IN', { timeZone: config.tz, hour: 'numeric', minute: '2-digit' })}. This card closes by itself when the photos come (also late tonight), or when the AI marks the day received.`,
     });
   }
   return sent;

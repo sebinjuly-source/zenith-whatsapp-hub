@@ -553,3 +553,29 @@ characters — the AI pays for every character) and the database's own statistic
   limits (one server), Sentry (Render logs + `events` table are enough at this size), staging environment (tests run
   the whole hub on PGlite with fake WhatsApp/Meta).
 
+### 10.13 Cards as "matters", Done = AI review, read-only key, check-ins per day (2 Nov)
+Ideas taken from Perisclaw's dashboard (each conversation shown as a matter with its next step) — small, general changes:
+- **Matter fields on every card** (`tasks.summary`, `next_step`, `story`): where it stands (one line), the owner's next
+  step, how we got here (2–4 bullets). The AI keeps them current with `update_task` / `create_task` (`summary`,
+  `next_step`, `story`); the Board shows them on the card, `list_tasks` shows `NOW:` / `NEXT:`.
+- **The card's pane** (tap a card's title): the matter, the drafts waiting for that person (edit, ➤ Send = approve,
+  Reject), the last messages of the chat with a reply box, a note for the AI, 🕒 reschedule (+1 day from the card's
+  date) and ✓ Done — side by side with the Board on a wide screen, full screen on a phone. `GET /api/tasks/:id/context`
+  returns the card, its history, the chat (from the card's ref, a check-in's staff phone, or a phone number standing
+  on its own in the title — never a date), its last 25 messages and its waiting drafts. The Inbox shows each chat's
+  open card title under the chat.
+- **Done = AI review.** The owner's ✓ Done (card or pane) sets status `review`, not `done`: the card goes to "Done —
+  the AI is reviewing", appears FIRST in the AI's `list_tasks(for="ai", due_now=true)` whoever it was for, marked
+  "OWNER MARKED DONE — REVIEW", and the AI does what the card and its notes ask, then closes it. "Close now" (or Move →
+  done) skips the review. Hub-closed cards (a reply went out, photos came) still close directly.
+- **Read-only key** (Connect AI & apps → Read-only key): made, shown once, revocable; only its SHA-256 is stored. It
+  can GET any `/api/*`, run the reading tools via `/api/tools/<name>` and connect MCP with only the reading tools
+  (`READ_TOOLS` in `src/auth.js`). Anything that sends or changes → 403. The dashboard login refuses it.
+- **Daily check-ins** (Mallesh's two checklist photos): a photo, video or document counts when the word is in its
+  caption, in a message of his from 90 min before (typed messages only) to 15 min after it, or when it comes within 3 h
+  after that day's reminder (after the deadline). One card per day (`checkin:<id>:<date>`); a day's photos may come until
+  06:00 next morning and still close that day's card. Before: the word had to come AFTER the photo and one card served
+  every day, so 1 Nov ("today chechlist" 21:51, video 21:53, photos 22:49) counted 0 and the card stayed open for ever.
+- **Weekly review**: routine "Zenith hub – weekly review" (Sundays 18:00) — small read-only queries, one WhatsApp to the
+  owner: what the AI did, guests won by source, hiring, coming due, carrying over.
+
