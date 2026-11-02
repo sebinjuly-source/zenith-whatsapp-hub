@@ -409,6 +409,9 @@ CREATE TABLE IF NOT EXISTS phone_drafts (
 ALTER TABLE phone_drafts ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE phone_drafts ADD COLUMN IF NOT EXISTS pin_tries INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE phone_drafts ADD COLUMN IF NOT EXISTS labeled BOOLEAN NOT NULL DEFAULT false;
+-- 2 Nov: one note lists every open draft with a short link /d/<token> (was: one note per draft with the full text)
+ALTER TABLE phone_drafts ADD COLUMN IF NOT EXISTS token TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS phone_drafts_token ON phone_drafts (token) WHERE token IS NOT NULL;
 -- WhatsApp labels of each linked number (the phone shows them as chat "Lists"): learnt from the phone, or made by the hub
 CREATE TABLE IF NOT EXISTS wa_labels (
   account_id TEXT NOT NULL,

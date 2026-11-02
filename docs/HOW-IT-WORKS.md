@@ -183,16 +183,19 @@ either way for 3 days gets a "Follow up" card due now (history: "Added by the sa
 send. Scripts: `curl -H "x-api-key: …" --data-binary @file.pdf "<hub>/api/files?name=file.pdf"` → `{ url }`. The send
 queue reads hub links straight from the database (`files.js`, `media.js loadOutgoing`).
 
-**Drafts on the phone (31 Oct).** Settings → "📱 Drafts on the phone" (numbers, campaigns; on for Seema's number). An immediate
-reply the AI drafts there (they wrote in the last 24 h; not scheduled; not bulk) also goes to that phone: a note in its own
-"Message yourself" chat with the text and a wa.me link that opens their chat with it already typed. Since 2 Nov the **note
-itself is pinned** at the top of that chat for 7 days (before, only the chat was pinned and errors were swallowed, so the owner
-saw a plain message with a link), their chat is marked unread and put in the phone's **"Draft waiting" list** (a WhatsApp label;
-config `label`, '' = off) until the draft is handled. WhatsApp keeps unsent typing per device, so no linked device can type
-into the phone's box itself. Sent from the phone → the hub draft closes ("Answered on the phone"); the note deleted → draft
-dropped; approved/rejected in the hub → note removed and the chat leaves the list. Checked every minute: a failed pin is
-retried 3 times, a missing label every 6 h, and each failing step is said once per 6 h in Activity ("Drafts on the phone:
-could not …" with WhatsApp's reason) (`phonedrafts.js`, table `phone_drafts`: pinned / pin_tries / labeled, config `phone_drafts`).
+**Drafts on the phone (31 Oct; one list note since 2 Nov).** Settings → "📱 Drafts on the phone" (numbers, campaigns; on for
+Seema's number). A reply the AI drafts there (to someone who has written to that number before — not only in the last 24 h
+since 2 Nov, when Rajesh's reply drafted two days after his message never reached the phone; not scheduled; not bulk) also
+goes to that phone as **one note** in its own "Message yourself" chat listing every draft waiting: name · campaign and a short
+link `<hub>/d/<token>` that opens their chat with the reply already typed (the full text and the long wa.me link per draft
+made the note unreadable — owner, 2 Nov). The note is replaced when the list changes (old one deleted) and **pinned** for 7
+days; their chat is marked unread and put in the phone's **"Draft waiting" list** (a WhatsApp label; config `label`, '' =
+off). A handled draft's link answers "already sent, answered or dropped". WhatsApp keeps unsent typing per device, so no
+linked device can type into the phone's box itself. Real tap buttons (CTA-URL messages) exist only on the official API: a
+linked number's button messages don't show on phones, so the hub uses links. Sent from the phone → the hub draft closes
+("Answered on the phone"); approved/rejected in the hub → it leaves the note and the chat leaves the list. Checked every
+minute; a failed pin is retried 3 times, a missing label every 6 h, and each failing step is said once per 6 h in Activity
+(`phonedrafts.js`, route `/d/:token` in `api.js`, table `phone_drafts`: token / note_id / pinned / labeled, config `phone_drafts`).
 
 **Phone actions (2 Nov).** The AI can do on a linked phone what a person does by hand, so whoever holds it sees it:
 `phone_action` pin_message / unpin_message (1, 7 or 30 days; WhatsApp shows 3 pins per chat), pin_chat / unpin_chat, star /
@@ -522,6 +525,7 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
 | A "Follow up: X" card keeps coming back after being closed | fixed 1 Nov: closing it clears that person's due follow-up date (older rows: `update_list_member follow_up_at=""`) |
 | The AI missed a card | `list_tasks(due_now)` puts owner notes / PRIORITY / owner-written cards first and is one line per card when long; the routine must work EVERY due card (1 Nov: a VIP wish card fell off a cut-off list) |
 | A draft on the phone is not pinned / the chat is not in the "Draft waiting" list | Activity warn "Drafts on the phone: could not …" (WhatsApp's own reason); `phone_drafts` pinned / pin_tries / labeled; try it by hand with `phone_action` on that number to see the error |
+| A draft never reached the phone | Is the number in config `phone_drafts`.accounts? Has the person ever written to that number (first messages to strangers stay in the hub)? Scheduled for later? Drafted by a bulk send (source ≠ mcp)? Older than 3 days? — `SELECT * FROM phone_drafts WHERE outbox_id = <id>` (no row = never offered) |
 | `phone_action` says "could not … myAppStateKey" (or similar) | the linked device has no app-state keys yet (pins, labels, unread, archive all need them): they arrive from the phone after it is online for a while; if it persists, re-link the number |
 | Something is slow / the database works hard | `inspect_data` on `pg_stat_statements` ordered by `total_exec_time` (see 10.12) |
 | Anything else | Render logs (pino JSON), then reproduce in a test: `npm test` runs the whole hub on PGlite with a fake WhatsApp and a fake Meta server |

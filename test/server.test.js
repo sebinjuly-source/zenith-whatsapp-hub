@@ -2659,7 +2659,7 @@ test('daily check-ins: checklist photos with the word count; at the deadline one
   await manager.remove('ckh');
 });
 
-test('drafts on the phone: an immediate reply drafted on an enabled number goes to its "Message yourself" chat with a tap-to-type link; phone and hub stay in step', async () => {
+test('drafts on the phone: ONE pinned note in "Message yourself" lists every open draft with a short link that opens their chat with the reply typed; phone and hub stay in step', async () => {
   const pdm = await import('../src/phonedrafts.js');
   await manager.create({ id: 'pdx', label: 'Seema PD' });
   const s = fake('pdx');
@@ -2680,57 +2680,63 @@ test('drafts on the phone: an immediate reply drafted on an enabled number goes 
   const now = Math.floor(Date.now() / 1000);
   const G1 = '919800077701@s.whatsapp.net';
   const G2 = '919800077702@s.whatsapp.net';
+  // G2 wrote three days ago: still a reply worth putting on the phone (2 Nov: Rajesh's draft two days later was left out)
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES
-    ('pdx',$1,'PD1',false,$3,'text','Room available tonight?'), ('pdx',$2,'PD2',false,$3,'text','Rate for 2 nights?')`, [G1, G2, now - 120]);
+    ('pdx',$1,'PD1',false,$3,'text','Room available tonight?'), ('pdx',$2,'PD2',false,$4,'text','Rate for 2 nights?')`, [G1, G2, now - 120, now - 3 * 86400]);
+  await query(`INSERT INTO chats (account_id, jid, name, is_group, last_ts) VALUES ('pdx',$1,'Ravi Guest',false,$2) ON CONFLICT (account_id, jid) DO UPDATE SET name = EXCLUDED.name`, [G2, now]);
   const before = sent.length;
   await mcp('send_message', { account: 'pdx', to: G1, text: 'Yes, a deluxe room is free tonight. Shall I hold it for you?' });
-  const note = await until(() => sent.slice(before).find((x) => x.account === 'pdx' && x.jid === SELF), 5000);
-  assert.ok(note, 'note sent to the own chat of the number');
-  assert.match(note.content.text, /Draft reply/);
-  assert.match(note.content.text, /https:\/\/wa\.me\/919800077701\?text=Yes%2C%20a%20deluxe/);
+  const n1 = await until(() => sent.slice(before).find((x) => x.account === 'pdx' && x.jid === SELF), 5000);
+  assert.match(n1.content.text, /1 reply waiting/);
+  assert.ok(!n1.content.text.includes('deluxe room'), 'the note does not repeat the draft text');
+  assert.ok(!n1.content.text.includes('wa.me'), 'no long wa.me link in the note');
+  const tok1 = n1.content.text.match(/\/d\/([0-9a-f]{16})/)[1];
+  // the short link opens their chat with the reply typed
+  const r = await fetch(`${base}/d/${tok1}`, { redirect: 'manual' });
+  assert.equal(r.status, 302);
+  assert.match(r.headers.get('location'), /^https:\/\/wa\.me\/919800077701\?text=Yes%2C%20a%20deluxe/);
   assert.ok(mods.some((x) => x.jid === SELF && x.m.pin), 'self chat pinned');
-  const [d1] = await until(async () => { const r = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1 AND p.note_id IS NOT NULL AND p.labeled`, [G1]); return r.length ? r : null; }, 5000);
+  const [d1] = await until(async () => { const q = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1 AND p.note_id IS NOT NULL AND p.labeled`, [G1]); return q.length ? q : null; }, 5000);
   assert.ok(mods.some((x) => x.jid === G1 && x.m.markRead === false), 'their chat marked unread on the phone');
-  // 2 Nov: the NOTE itself is pinned (pin-in-chat, 7 days) — only the chat was pinned before, which showed nothing
   const pin = pins.find((p) => p.jid === SELF && p.pin.id === d1.note_id);
-  assert.ok(pin, 'the note message is pinned in "Message yourself"');
-  assert.equal(pin.type, 1);
+  assert.ok(pin, 'the note is pinned in "Message yourself"');
   assert.equal(pin.time, 7 * 86400);
-  assert.equal(pin.pin.fromMe, true);
-  // their chat goes into the phone's "Draft waiting" list (label made once, with a high id that can't rename a phone list)
-  assert.ok(labels.some((l) => l.add?.name === 'Draft waiting' && Number(l.add.id) >= 1000), JSON.stringify(labels));
-  assert.ok(labels.some((l) => l.chat === G1 && l.id === labels.find((x) => x.add)?.add.id), 'chat added to the list');
-  assert.equal((await query(`SELECT pinned FROM phone_drafts WHERE outbox_id = $1`, [d1.id]))[0].pinned, true);
-  // answered on the phone (a message of ours the hub did not send) → hub draft closes, note removed
+  assert.ok(labels.some((l) => l.chat === G1), 'chat added to the "Draft waiting" list');
+  // a second draft → the note is replaced by one listing both (the old one deleted)
+  const before2 = sent.length;
+  await mcp('send_message', { account: 'pdx', to: G2, text: 'Dear Mr Ravi, 2 nights are possible.' });
+  const n2 = await until(() => sent.slice(before2).find((x) => x.account === 'pdx' && x.jid === SELF), 5000);
+  assert.match(n2.content.text, /2 replies waiting/);
+  assert.match(n2.content.text, /Ravi Guest/);
+  assert.equal(n2.content.text.match(/\/d\/[0-9a-f]{16}/g).length, 2);
+  assert.ok(revokes.includes(d1.note_id), 'the old note was deleted');
+  const [d2] = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1`, [G2]);
+  // answered on the phone (a message of ours the hub did not send) → hub draft closes; the note lists only Ravi
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('pdx',$1,'PHONE1',true,$2,'text','Yes sir, holding it')`, [G1, now + 5]);
+  const before3 = sent.length;
   const r1 = await pdm.syncPhoneDrafts(manager);
   assert.equal(r1.answered, 1);
   const [o1] = await query(`SELECT status, error FROM outbox WHERE id = $1`, [d1.id]);
   assert.equal(o1.status, 'rejected');
   assert.match(o1.error, /Answered on the phone/);
-  assert.ok(revokes.includes(d1.note_id), 'note deleted from the phone');
   assert.ok(labels.some((l) => l.unchat === G1), 'chat taken out of the "Draft waiting" list once handled');
-  // rejected in the hub → note removed from the phone
-  await mcp('send_message', { account: 'pdx', to: G2, text: 'Dear Mr Ravi, 2 nights are possible.' });
-  const [d2] = await until(async () => { const r = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1 AND p.note_id IS NOT NULL`, [G2]); return r.length ? r : null; }, 5000);
+  const n3 = sent.slice(before3).find((x) => x.account === 'pdx' && x.jid === SELF);
+  assert.match(n3.content.text, /1 reply waiting/);
+  assert.ok(revokes.includes(d2.note_id));
+  assert.equal((await fetch(`${base}/d/${tok1}`, { redirect: 'manual' })).status, 410, 'a handled draft link says so');
+  // rejected in the hub → the last note is taken down, no new one
   await query(`UPDATE outbox SET status = 'rejected' WHERE id = $1`, [d2.id]);
+  const [cur] = await query(`SELECT note_id FROM phone_drafts WHERE outbox_id = $1`, [d2.id]);
+  const before4 = sent.length;
   const r2 = await pdm.syncPhoneDrafts(manager);
   assert.equal(r2.removed, 1);
-  assert.ok(revokes.includes(d2.note_id));
-  // a message for later, or to someone who has not written in 24 h, stays in the hub only
+  assert.ok(revokes.includes(cur.note_id));
+  assert.ok(!sent.slice(before4).some((x) => x.account === 'pdx' && x.jid === SELF), 'no empty note');
+  // a message for later, or a first message to someone who never wrote, stays in the hub only
   await mcp('send_message', { account: 'pdx', to: G2, text: 'Reminder for tomorrow', schedule_at: '2099-01-01 10:00' });
   await mcp('send_message', { account: 'pdx', to: '919800077703', text: 'Hello, cold' });
   await pdm.syncPhoneDrafts(manager);
   assert.equal((await query(`SELECT count(*)::int n FROM phone_drafts p JOIN outbox o ON o.id = p.outbox_id WHERE o.account_id = 'pdx' AND (o.scheduled_at > now() + interval '1 day' OR o.to_jid = '919800077703@s.whatsapp.net')`))[0].n, 0);
-  // the note deleted on the phone → the draft is dropped
-  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('pdx',$1,'PD3',false,$2,'text','And breakfast?')`, [G2, now + 10]);
-  await mcp('send_message', { account: 'pdx', to: G2, text: 'Breakfast is included.' });
-  const [d3] = await until(async () => { const r = await query(`SELECT o.id, p.note_id FROM outbox o JOIN phone_drafts p ON p.outbox_id = o.id WHERE o.to_jid = $1 AND p.closed_at IS NULL AND p.note_id IS NOT NULL`, [G2]); return r.length ? r : null; }, 5000);
-  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body, deleted) VALUES ('pdx',$1,$2,true,$3,'text','note',true) ON CONFLICT DO NOTHING`, [SELF, d3.note_id, now]);
-  await query(`UPDATE messages SET deleted = true WHERE account_id = 'pdx' AND id = $1`, [d3.note_id]);
-  const r3 = await pdm.syncPhoneDrafts(manager);
-  assert.equal(r3.dropped, 1);
-  assert.equal((await query(`SELECT status FROM outbox WHERE id = $1`, [d3.id]))[0].status, 'rejected');
   // settings API
   const st = await call('PUT', '/api/phone-drafts', { enabled: false });
   assert.equal(st.data.enabled, false);

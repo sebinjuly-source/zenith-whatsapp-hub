@@ -143,6 +143,14 @@ export function buildApp() {
     sendStoredFile(res, { buffer: f.buffer, mimetype: f.mimetype, fileName: f.fileName, download: req.query.download === '1', cache: null });
   });
 
+  // A draft on the phone (phonedrafts.js): the short link in the note opens their chat with the reply typed
+  app.get('/d/:token', async (req, res) => {
+    const { draftLinkTarget } = await import('./phonedrafts.js');
+    const to = await draftLinkTarget(req.params.token).catch(() => null);
+    if (!to) return res.status(410).type('text').send('This draft was already sent, answered or dropped.');
+    res.redirect(302, to);
+  });
+
   // Always 200 (Render restarts on a failing health check); problems are reported in the body
   app.get('/health', async (req, res) => {
     const { lastSync } = await import('./board.js');
