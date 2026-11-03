@@ -514,6 +514,7 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
 | Follow-ups never go | number setting "Follow-ups not before", daily max, new outreach today, list follow-up on? |
 | "deadlock detected" | two servers overlapping in a deploy — statements are retried automatically now |
 | Wrong number drafted | `send_message` refuses numbers whose chat is elsewhere unless `other_number_ok` |
+| Same person got two pitches / a pitch right after they replied | fixed 3 Nov (Rohan, Ixora): `send_message` refuses a second AI draft while one to that person waits unanswered (`outbox.waitingFor`; `also_send=true` overrides; "send by" wishes exempt), and the worker puts an AI/campaign message back to **Drafts** if they wrote after it was approved (error "Held: they wrote to us at …") — approve again after reading their reply |
 | Dashboard says "out of scope" | the open campaign changed on another device or by the AI — any page change follows it; or pick All campaigns |
 | A message waits although "only 10 sent today" | it is cold (never wrote to this number) and the cold limit counts the last 24 h, not the calendar day; or a higher-ranked message is ahead (send order) — Drafts shows ≈ when it goes |
 | A festival wish was "rejected — Expired" | it had a "send by" time and the number's limit could not fit it in time (a warning showed beforehand) |

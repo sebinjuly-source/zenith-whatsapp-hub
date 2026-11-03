@@ -3047,3 +3047,43 @@ test('card pane: a date in the title is not a phone number (no empty "chat 20261
   assert.equal((await call('GET', `/api/tasks/${t.id}/context`)).data.chat, null);
   await call('PATCH', `/api/tasks/${t.id}`, { status: 'done' });
 });
+
+test('no double pitch: one waiting AI message per person, and a queued one is held when they write back first', async () => {
+  // 3 Nov: two sessions drafted the same first message to Rohan; both were approved, the second went out seconds
+  // after he replied. Now the second draft is refused, and a queued AI message is held if they wrote after approval.
+  const first = await mcp('send_message', { account: 'hiring', to: '919844400001', text: 'Pitch one', note: 'test' });
+  assert.match(first, /Draft #\d+/);
+  const second = await mcp('send_message', { account: 'hiring', to: '919844400001', text: 'Pitch two', note: 'test' });
+  assert.match(second, /Not drafted: #\d+ .* already waiting/);
+  // a retry with the same idempotency key is not blocked by its own earlier draft
+  const k1 = await mcp('send_message', { account: 'hiring', to: '919844400002', text: 'Once', idempotency_key: 'dup-k' });
+  assert.match(k1, /Draft #\d+/);
+  assert.match(await mcp('send_message', { account: 'hiring', to: '919844400002', text: 'Once', idempotency_key: 'dup-k' }), /Already handled/);
+  // day-bound wishes and explicit also_send are allowed
+  const wish = await mcp('send_message', { account: 'hiring', to: '919844400001', text: 'Happy Deepavali', expires_at: new Date(Date.now() + 86400e3).toISOString() });
+  assert.match(wish, /Draft #\d+/);
+  assert.match(await mcp('send_message', { account: 'hiring', to: '919844400001', text: 'Both please', also_send: true }), /Draft #\d+/);
+  // once they have written back, a new draft (a reply) is allowed again
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hiring','919844400001@s.whatsapp.net','RW1',false, extract(epoch from now())::bigint + 1, 'text','Let us connect tomorrow')`);
+  await sleep(1100);
+  assert.match(await mcp('send_message', { account: 'hiring', to: '919844400001', text: 'Great, what time suits you?' }), /Draft #\d+/);
+
+  // Worker: an AI message approved before their reply is held back to Drafts, not sent
+  const jid = '919844400003@s.whatsapp.net';
+  const before = sent.length;
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hiring',$1,'RW2',false, extract(epoch from now())::bigint - 30, 'text','Sure')`, [jid]);
+  const [held] = await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, scheduled_at) VALUES ('hiring',$1,'{"text":"Old pitch"}','mcp','queued', now() - interval '60 seconds') RETURNING id`, [jid]);
+  // the same situation for your own send and for a day-bound wish: those still go out
+  const [own] = await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, scheduled_at) VALUES ('hiring',$1,'{"text":"Owner text"}','api','queued', now() - interval '60 seconds') RETURNING id`, [jid]);
+  const [day] = await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, scheduled_at, expires_at) VALUES ('hiring',$1,'{"text":"Wish"}','mcp','queued', now() - interval '60 seconds', now() + interval '1 day') RETURNING id`, [jid]);
+  outbox.wakeAccount('hiring');
+  await until(async () => (await query(`SELECT count(*)::int AS n FROM outbox WHERE id = ANY($1) AND status IN ('sent','draft')`, [[held.id, own.id, day.id]]))[0].n === 3, 20000);
+  const [h] = await query('SELECT status, error FROM outbox WHERE id = $1', [held.id]);
+  assert.equal(h.status, 'draft');
+  assert.match(h.error, /they wrote to us/);
+  const texts = sent.slice(before).filter((x) => x.jid === jid).map((x) => x.content.text);
+  assert.deepEqual(texts.sort(), ['Owner text', 'Wish']);
+  // approved again after reading their reply: it goes out
+  assert.equal((await call('POST', `/api/outbox/${held.id}/approve`, {})).status, 200);
+  await until(() => sent.slice(before).some((x) => x.content.text === 'Old pitch'), 20000);
+});

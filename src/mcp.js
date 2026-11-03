@@ -615,10 +615,19 @@ function buildServer(playbook = '', focus = '', { readOnly = false } = {}) {
       schedule_at: z.string().optional().describe('Send later: "YYYY-MM-DD HH:MM" (India time) or ISO. It shows on the Board as "Scheduled: …" until it goes out. In approve mode the owner still approves it first.'),
       other_number_ok: z.boolean().optional().describe('Only if the owner asked: start a chat on this number although the person already chats with another number'),
       expires_at: z.string().optional().describe('"Send by": if it has not gone out by this time ("YYYY-MM-DD HH:MM" owner time or ISO) it is dropped — set it for anything tied to a day (festival / birthday wishes, offers ending, reminders before an interview). Such messages go out before other outreach; the hub warns the owner if the number\'s daily limit can\'t fit them in time.'),
+      also_send: z.boolean().optional().describe('Only when BOTH messages should reach them: draft this although another AI message to the same person is still waiting (normally you change that one with edit_messages instead)'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
       const jid = await resolveChat(s.id, a.to);
+      // Duplicate guard: one waiting AI message per person (3 Nov: two sessions drafted the same pitch to Rohan and
+      // both went out). Day-bound messages ("send by": wishes, reminders) are exempt.
+      if (!a.also_send && !a.expires_at) {
+        const w = await outbox.waitingFor(s.id, jid);
+        if (w && !(a.idempotency_key && w.idem_key === String(a.idempotency_key))) {
+          return `Not drafted: #${w.id} to ${jid.split('@')[0]} is already waiting (${w.status}, made ${d(w.created_at)}): "${trim(w.payload?.text || w.payload?.attachment?.caption || '', 120)}". Change that one with edit_messages, or reject it first. Use also_send=true only if both messages should reach them.`;
+        }
+      }
       // Wrong-number guard: a person who chats with another number is answered from that number
       if (!a.other_number_ok && !jid.endsWith('@g.us')) {
         const [here] = await query('SELECT 1 FROM messages WHERE account_id = $1 AND chat_jid = $2 LIMIT 1', [s.id, jid]);

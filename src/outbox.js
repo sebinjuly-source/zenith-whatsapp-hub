@@ -567,6 +567,24 @@ export async function listOutbox({ account, status, taskId, limit = 50, role, id
  * for days when this is true. Replies to people already in a chat don't count (a pending AI reply draft used to
  * hold every follow-up back), nor does a forgotten old draft.
  */
+/**
+ * An AI / campaign message to this person that is still waiting (draft or queued) and that they have not answered
+ * since it was made — a second one would reach them as a duplicate (3 Nov: two sessions drafted the same pitch to
+ * Rohan, both were approved). Messages tied to a day ("send by") don't count.
+ */
+export async function waitingFor(accountId, jid) {
+  const [row] = await query(
+    `SELECT o.id, o.status, o.created_at, o.scheduled_at, o.payload, o.idem_key FROM outbox o
+     WHERE o.account_id = $1 AND o.to_jid = $2 AND o.status IN ('draft','queued') AND o.source = ANY($3)
+       AND o.expires_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.account_id = o.account_id AND m.chat_jid = o.to_jid AND NOT m.from_me
+                       AND m.ts > extract(epoch FROM o.created_at))
+     ORDER BY o.created_at LIMIT 1`,
+    [accountId, jid, NEEDS_APPROVAL],
+  );
+  return row || null;
+}
+
 export async function newOutreachToday(accountId) {
   const [r] = await query(
     `SELECT 1 FROM outbox o WHERE o.account_id = $1 AND o.source = ANY($2) AND o.note IS DISTINCT FROM 'follow-up'
@@ -1057,6 +1075,25 @@ function startWorker(accountId) {
       );
       if (wrote) {
         await query(`UPDATE outbox SET status = 'rejected', error = 'Not retried: they wrote to us in the meantime' WHERE id = $1`, [row.id]);
+        if (row.task_id) await refreshTask(row.task_id).catch(() => {});
+        return;
+      }
+    }
+    // An AI / campaign message approved before the person wrote back is out of date by the time it goes out (3 Nov:
+    // a second pitch reached Rohan seconds after he replied "let us connect tomorrow"). Back to Drafts for a fresh
+    // look. Messages tied to a day ("send by": wishes, reminders) still go.
+    if (NEEDS_APPROVAL.includes(row.source) && !row.expires_at) {
+      const [wrote] = await query(
+        `SELECT ts FROM messages WHERE account_id = $1 AND chat_jid = $2 AND NOT from_me AND ts > extract(epoch FROM $3::timestamptz)
+         ORDER BY ts DESC LIMIT 1`,
+        [accountId, row.to_jid, row.scheduled_at],
+      );
+      if (wrote) {
+        await query(
+          `UPDATE outbox SET status = 'draft', sent_at = NULL, error = $2 WHERE id = $1`,
+          [row.id, `Held: they wrote to us at ${fmtLocal(new Date(Number(wrote.ts) * 1000))}, after this was approved — check it still fits, then approve again`],
+        );
+        await logEvent(accountId, 'info', `Held #${row.id} to ${row.to_jid.split('@')[0]}: they wrote after it was approved — back in Drafts`);
         if (row.task_id) await refreshTask(row.task_id).catch(() => {});
         return;
       }
