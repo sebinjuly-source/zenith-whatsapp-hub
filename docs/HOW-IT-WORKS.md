@@ -735,3 +735,22 @@ tokens, but **a complete and accurate answer matters more than tokens**; non-rep
 | A call length looks 1000× too long or short | the unit guess in `callLogRow` — compare with the raw values in the "call log record" log line |
 | Cold messages wait although "last hour 7/10" | the hourly reserve: 3 are kept for warm and "send by" messages |
 | The owner got "⏳ … must go out soon" | a draft with a send-by time within 3 h is waiting for approval — approve or reject it in Drafts |
+
+
+### 10.16 Desks — a home-screen page for whoever holds one number (6 Nov)
+- **What:** `/desk?k=<key>` is an installable page (its own manifest per key, so "Add to Home screen" opens straight
+  into it under the person's own title). It shows ONLY that number's drafts — each with the last four messages of the
+  chat and the AI's reason — with Send (after an optional edit), Don't send (with a reason the AI reads in
+  `owner_feedback`) and "Approve all N" (the ids on the screen, never "everything"). A second tab can show one outside
+  https page (e.g. an Apps Script web app) so the person has a single icon.
+- **Why:** on Dr Farooq's number 30 drafts (10 new-patient leads, 20 recall messages) had waited for days because
+  only the owner's dashboard could approve them. The person who owns the conversations approves them now.
+- **Key:** `src/desk.js`. Random, shown once, only its SHA-256 in config `desks`; it is NOT a hub key (the API and MCP
+  refuse it), it reaches `/desk/api/*` only, every call re-checks that the draft is on that desk's number, wrong keys
+  count towards the guess limit. Owner (main key): `POST /api/desks {account,label,appName?,appUrl?}` → `{key, link}`
+  (a new link replaces the old one), `PATCH /api/desks/<account>`, `DELETE /api/desks/<account>`, `GET /api/desks`.
+- **Recipes:** "link no longer valid" → a newer link was made, or the desk was revoked; drafts missing on the desk →
+  they are on another number (the desk filters by `outbox.account_id`); the extra tab is blank → the outside page
+  forbids being embedded (an Apps Script page needs `setXFrameOptionsMode(ALLOWALL)`).
+- `public/dental/adhp-plan.png` is the Annual Dental Health Plan poster the clinic's sheet attaches to its welcome
+  message (like the hiring and sales posters; business files, not hub logic).

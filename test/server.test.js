@@ -3212,3 +3212,73 @@ test('a draft with a "send by" time that still waits for approval: the owner is 
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'dl1' AND status IN ('draft','queued')`);
   await manager.remove('dl1');
 });
+
+test('desk: a home-screen page for one number — its key opens only that number\'s drafts (read, edit, approve, reject)', async () => {
+  await manager.create({ id: 'dk1', label: 'Dk1' });
+  await manager.create({ id: 'dk2', label: 'Dk2' });
+  fake('dk1'); fake('dk2');
+  const all = { aiMode: 'approve', sendStart: '00:00', sendEnd: '23:59', sendDays: [0, 1, 2, 3, 4, 5, 6], hourlyCap: 60 };
+  await manager.update('dk1', { settings: all });
+  await manager.update('dk2', { settings: all });
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('dk1','919788000001@s.whatsapp.net','DK1',false,$1,'text','Do you do root canals?')`, [Math.floor(Date.now() / 1000) - 3600]);
+  const idOf = (t) => Number(t.match(/#(\d+)/)[1]);
+  const a = idOf(await mcp('send_message', { account: 'dk1', to: '9788000001', text: 'Yes — which day suits you?', note: 'asked about root canal', campaign: 'all' }));
+  const b = idOf(await mcp('send_message', { account: 'dk1', to: '9788000002', text: 'Hello, time for a check-up', campaign: 'all' }));
+  const c = idOf(await mcp('send_message', { account: 'dk1', to: '9788000003', text: 'Third one', campaign: 'all' }));
+  const other = idOf(await mcp('send_message', { account: 'dk2', to: '9788000009', text: 'Another number\'s draft', campaign: 'all' }));
+  // only the main key makes a desk; the key is shown once, only its hash is stored
+  assert.equal((await call('POST', '/api/desks', { account: 'dk1', label: 'Dr Test' }, { key: 'wrong' })).status, 401);
+  const made = (await call('POST', '/api/desks', { account: 'dk1', label: 'Dr Test', appName: 'Plan', appUrl: 'https://example.com/app' })).data;
+  assert.match(made.link, /\/desk\?k=[0-9a-f]{48}$/);
+  assert.deepEqual((await call('GET', '/api/desks')).data.map((d) => [d.account, d.label, d.appName]), [['dk1', 'Dr Test', 'Plan']]);
+  assert.ok(!JSON.stringify((await query(`SELECT value FROM config WHERE key = 'desks'`))[0].value).includes(made.key));
+  assert.equal((await call('POST', '/api/desks', { account: 'dk1', appUrl: 'http://plain.example' })).status, 400);
+  const desk = async (method, p, body, key = made.key) => {
+    const r = await fetch(base + '/desk/api' + p, { method, headers: { 'content-type': 'application/json', 'x-desk-key': key }, body: body ? JSON.stringify(body) : undefined });
+    return { status: r.status, data: await r.json() };
+  };
+  // the page and its manifest need no key; everything else does — and the main key is not a desk key
+  assert.equal((await fetch(base + '/desk')).status, 200);
+  const man = await (await fetch(base + '/desk/manifest.webmanifest?k=' + made.key)).json();
+  assert.equal(man.name, 'Dr Test');
+  assert.equal(man.start_url, '/desk?k=' + made.key);
+  assert.equal((await desk('GET', '/drafts', null, 'k')).status, 401);
+  assert.equal((await desk('GET', '/drafts', null, 'f'.repeat(48))).status, 401);
+  assert.equal((await call('GET', '/api/accounts', null, { key: made.key })).status, 401, 'a desk key opens nothing else of the hub');
+  const me = (await desk('GET', '/me')).data;
+  assert.deepEqual([me.label, me.appName, me.appUrl, me.connected], ['Dr Test', 'Plan', 'https://example.com/app', true]);
+  // this number's drafts only, oldest first, with the last messages of the chat
+  const list = (await desk('GET', '/drafts')).data.drafts;
+  assert.deepEqual(list.map((d) => d.id), [a, b, c]);
+  assert.equal(list[0].note, 'asked about root canal');
+  assert.deepEqual(list[0].chat.map((m) => [m.me, m.text]), [[false, 'Do you do root canals?']]);
+  // another number's draft cannot be touched
+  assert.equal((await desk('POST', `/drafts/${other}/approve`, {})).status, 409);
+  assert.equal((await desk('POST', `/drafts/${other}/reject`, { reason: 'x' })).status, 409);
+  assert.equal((await desk('POST', '/drafts/approve', { ids: [b, other] })).status, 409);
+  assert.equal((await query('SELECT status FROM outbox WHERE id = $1', [other]))[0].status, 'draft');
+  // approve with an edit → it goes out with the new words
+  const before = sent.length;
+  assert.equal((await desk('POST', `/drafts/${a}/approve`, { text: 'Yes we do. Tomorrow 6 pm?' })).status, 200);
+  const out = await until(() => sent.slice(before).find((m) => m.account === 'dk1' && m.jid === '919788000001@s.whatsapp.net'));
+  assert.equal(out.content.text, 'Yes we do. Tomorrow 6 pm?');
+  // reject with a reason (the AI reads it), approve the rest that are on the screen
+  assert.equal((await desk('POST', `/drafts/${b}/reject`, { reason: 'Already came last week' })).status, 200);
+  assert.equal((await query('SELECT status FROM outbox WHERE id = $1', [b]))[0].status, 'rejected');
+  assert.equal((await desk('POST', '/drafts/approve', { ids: [c] })).data.approved, 1);
+  assert.deepEqual((await desk('GET', '/drafts')).data.drafts, []);
+  assert.match((await call('GET', '/api/events?limit=30')).data.map((e) => e.text).join('\n'), /Dr Test approved #\d+ to 919788000001 from the desk[\s\S]*|Dr Test rejected/);
+  // a new link replaces the old one; revoking closes the desk
+  const again = (await call('POST', '/api/desks', { account: 'dk1', label: 'Dr Test' })).data;
+  assert.equal((await desk('GET', '/me')).status, 401, 'the old link stopped working');
+  assert.equal((await desk('GET', '/me', null, again.key)).status, 200);
+  assert.equal((await call('PATCH', '/api/desks/dk1', { appName: 'Annual Plan', appUrl: 'https://example.com/x' })).data.appName, 'Annual Plan');
+  assert.equal((await desk('GET', '/me', null, again.key)).data.appName, 'Annual Plan', 'changing the extra page keeps the key');
+  await call('DELETE', '/api/desks/dk1');
+  assert.equal((await desk('GET', '/me', null, again.key)).status, 401);
+  const { resetKeyGuesses } = await import('../src/auth.js');
+  resetKeyGuesses();
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id IN ('dk1','dk2') AND status IN ('draft','queued')`);
+  await manager.remove('dk1');
+  await manager.remove('dk2');
+});

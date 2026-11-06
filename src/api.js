@@ -27,6 +27,7 @@ import * as lists from './lists.js';
 import { getPlaybook, savePlaybook } from './playbook.js';
 import * as notify from './notify.js';
 import { logEvent } from './db.js';
+import { mountDesk, listDesks, createDesk, updateDesk, revokeDesk } from './desk.js';
 import { normalizeSettings } from './settings.js';
 import { priceRows, getPricing, savePricing } from './pricing.js';
 
@@ -189,6 +190,9 @@ export function buildApp() {
   // MCP for AI agents: <server>/mcp/<API_KEY>
   mountMcp(app);
 
+  // A desk: the home-screen page of whoever holds one number (its own key; only that number's drafts)
+  mountDesk(app);
+
   app.use(express.static(publicDir, { index: false }));
 
   // ---- Legacy endpoint: same body as the old whatsapp-form-bot, so Apps Script only needs a URL change.
@@ -241,6 +245,23 @@ export function buildApp() {
     await revokeReadonlyKey();
     await act(req, null, 'Revoked the read-only key');
     res.json({ ok: true });
+  }));
+  // Desks (desk.js): one per number; the key and link are shown once. Main key only (a read-only key can list them).
+  api.get('/desks', wrap(async (req, res) => res.json(await listDesks())));
+  api.post('/desks', wrap(async (req, res) => {
+    const d = await createDesk(req.body || {});
+    await act(req, d.account, 'Made a desk link for this number (the old link, if any, stopped working)');
+    res.json(d);
+  }));
+  api.patch('/desks/:account', wrap(async (req, res) => {
+    const d = await updateDesk(req.params.account, req.body || {});
+    await act(req, d.account, 'Changed this number\'s desk (name / extra page)');
+    res.json(d);
+  }));
+  api.delete('/desks/:account', wrap(async (req, res) => {
+    const r = await revokeDesk(req.params.account);
+    await act(req, req.params.account, 'Revoked this number\'s desk link');
+    res.json(r);
   }));
   api.post('/tools/:name', wrap(async (req, res) => {
     const r = await runTool(req.params.name, req.body || {});

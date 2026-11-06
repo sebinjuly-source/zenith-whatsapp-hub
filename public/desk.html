@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="robots" content="noindex">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<title>Desk</title>
+<style>
+  :root { --ink:#16302b; --ink2:#51645f; --line:#dbe5e2; --bg:#f4f8f7; --brand:#0f766e; --brand2:#e3f3f0; --warn:#b45309; --warnbg:#fef3c7; --bad:#b91c1c; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; font-family:"Segoe UI",Roboto,Arial,sans-serif; color:var(--ink); background:var(--bg); font-size:16px; display:flex; flex-direction:column; }
+  header { background:var(--brand); color:#fff; padding:12px 14px; padding-top:calc(12px + env(safe-area-inset-top)); display:flex; align-items:center; gap:10px; }
+  header h1 { font-size:17px; margin:0; flex:1; font-weight:600; }
+  header small { opacity:.85; font-size:12.5px; display:block; font-weight:400; }
+  header button { background:rgba(255,255,255,.18); color:#fff; border:0; border-radius:8px; padding:8px 10px; font:inherit; }
+  nav { display:flex; background:#fff; border-bottom:1px solid var(--line); }
+  nav button { flex:1; border:0; background:none; padding:12px 6px; font:inherit; color:var(--ink2); border-bottom:3px solid transparent; }
+  nav button.on { color:var(--brand); border-color:var(--brand); font-weight:600; }
+  main { flex:1; overflow:auto; padding:12px; -webkit-overflow-scrolling:touch; }
+  iframe { flex:1; border:0; width:100%; display:none; background:#fff; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:12px 14px; margin:0 auto 12px; max-width:640px; }
+  .who { display:flex; justify-content:space-between; gap:8px; align-items:baseline; }
+  .who b { font-size:17px; }
+  .muted { color:var(--ink2); font-size:13px; }
+  .chat { margin:8px 0; display:flex; flex-direction:column; gap:4px; }
+  .chat div { max-width:88%; padding:6px 9px; border-radius:10px; font-size:14px; white-space:pre-wrap; word-break:break-word; background:#eef2f1; align-self:flex-start; }
+  .chat div.me { background:var(--brand2); align-self:flex-end; }
+  textarea { width:100%; font:inherit; border:1px solid var(--line); border-radius:10px; padding:10px; min-height:110px; color:var(--ink); background:#fbfdfc; }
+  .row { display:flex; gap:8px; margin-top:8px; }
+  button.act { font:inherit; border-radius:10px; border:1px solid var(--line); background:#fff; padding:12px 14px; color:var(--ink); }
+  button.send { background:var(--brand); border-color:var(--brand); color:#fff; font-weight:600; flex:1; }
+  button.no { color:var(--bad); }
+  .banner { background:var(--warnbg); color:var(--warn); padding:9px 12px; border-radius:10px; margin:0 auto 12px; max-width:640px; font-size:14px; }
+  .info { background:var(--brand2); color:var(--ink); }
+  .empty { text-align:center; color:var(--ink2); padding:48px 16px; }
+  #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#16302b; color:#fff; padding:10px 16px; border-radius:10px; display:none; max-width:92%; z-index:5; }
+</style>
+</head>
+<body>
+<header><h1><span id="title">Desk</span><small id="sub"></small></h1><button id="refresh" onclick="load(true)">↻</button></header>
+<nav id="nav" style="display:none"><button id="n-drafts" class="on" onclick="tab('drafts')">Drafts</button><button id="n-app" onclick="tab('app')"></button></nav>
+<main id="main"><div class="empty">Opening…</div></main>
+<iframe id="app" title="app" allow="clipboard-write"></iframe>
+<div id="toast"></div>
+<script>
+var KEY = new URLSearchParams(location.search).get('k') || '';
+try { if (KEY) localStorage.setItem('deskKey', KEY); else KEY = localStorage.getItem('deskKey') || ''; } catch (e) {}
+if (KEY) { var l = document.createElement('link'); l.rel = 'manifest'; l.href = '/desk/manifest.webmanifest?k=' + encodeURIComponent(KEY); document.head.appendChild(l); }
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(function () {});
+var ME = null, DRAFTS = [], editing = false;
+function $(id) { return document.getElementById(id); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+function toast(t) { var e = $('toast'); e.textContent = t; e.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(function () { e.style.display = 'none'; }, 4000); }
+function when(iso) { return new Date(iso).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); }
+function api(method, path, body) {
+  return fetch('/desk/api' + path, { method: method, headers: { 'x-desk-key': KEY, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+    .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || 'Something went wrong'); return j; }); });
+}
+function tab(name) {
+  $('n-drafts').className = name === 'drafts' ? 'on' : '';
+  $('n-app').className = name === 'app' ? 'on' : '';
+  $('main').style.display = name === 'drafts' ? 'block' : 'none';
+  $('refresh').style.visibility = name === 'drafts' ? 'visible' : 'hidden';
+  var f = $('app');
+  f.style.display = name === 'app' ? 'block' : 'none';
+  if (name === 'app' && !f.src && ME && ME.appUrl) f.src = ME.appUrl;
+}
+function render(q) {
+  $('n-drafts').textContent = 'Drafts' + (DRAFTS.length ? ' (' + DRAFTS.length + ')' : '');
+  var h = '';
+  if (ME && !ME.connected) h += '<div class="banner">This WhatsApp number is not connected to the hub right now — approved messages go out when it is.</div>';
+  if (q && q.queued && q.state === 'held') h += '<div class="banner">' + q.queued + ' approved message' + (q.queued > 1 ? 's are' : ' is') + ' waiting: ' + esc(q.reason) + '</div>';
+  else if (q && q.queued) h += '<div class="banner info">' + q.queued + ' approved message' + (q.queued > 1 ? 's are' : ' is') + ' going out one by one.</div>';
+  if (!DRAFTS.length) { $('main').innerHTML = h + '<div class="empty">✅ Nothing is waiting for you.<br><span class="muted">New drafts appear here by themselves.</span></div>'; return; }
+  if (DRAFTS.length > 1) h += '<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:10px"><span>' + DRAFTS.length + ' messages wait for your OK</span><button class="act" onclick="approveAll()">Approve all ' + DRAFTS.length + '</button></div>';
+  DRAFTS.forEach(function (d) {
+    h += '<div class="card" id="d' + d.id + '"><div class="who"><b>' + esc(d.name || '+' + d.phone) + '</b><span class="muted">' + esc(d.campaign) + '</span></div>' +
+      '<div class="muted">+' + esc(d.phone) + (d.sendBy ? ' · must go by ' + esc(when(d.sendBy)) : '') + '</div>' +
+      (d.note ? '<div class="muted" style="margin-top:4px">Why: ' + esc(d.note) + '</div>' : '') +
+      (d.held ? '<div class="banner" style="margin-top:8px">' + esc(d.held) + '</div>' : '');
+    if (d.chat.length) { h += '<div class="chat">'; d.chat.forEach(function (m) { h += '<div class="' + (m.me ? 'me' : '') + '">' + esc(m.text) + '<span class="muted"> · ' + esc(when(m.at)) + '</span></div>'; }); h += '</div>'; }
+    else h += '<div class="muted" style="margin:6px 0">No earlier messages with this person on this number.</div>';
+    h += (d.attachment ? '<div class="muted">📎 with ' + esc(d.attachment) + '</div>' : '') +
+      '<textarea id="t' + d.id + '" onfocus="editing=true" onblur="editing=false"' + (d.template ? ' readonly' : '') + '>' + esc(d.text) + '</textarea>' +
+      '<div class="row"><button class="act send" onclick="approve(' + d.id + ')">Send</button><button class="act no" onclick="reject(' + d.id + ')">Don\'t send</button></div></div>';
+  });
+  $('main').innerHTML = h;
+}
+function load(manual) {
+  if (!KEY) { $('main').innerHTML = '<div class="empty">Open this page from the link you were given.</div>'; return; }
+  if (editing && !manual) return;
+  api('GET', '/drafts').then(function (r) { DRAFTS = r.drafts; render(r.queue); if (manual) toast('Up to date'); }).catch(function (e) { $('main').innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; });
+}
+function approve(id) {
+  var text = $('t' + id).value;
+  api('POST', '/drafts/' + id + '/approve', { text: text }).then(function () { toast('Sending'); DRAFTS = DRAFTS.filter(function (d) { return d.id !== id; }); load(true); }).catch(function (e) { toast(e.message); });
+}
+function reject(id) {
+  var reason = prompt('Why not? (the assistant learns from this — optional)');
+  if (reason === null) return;
+  api('POST', '/drafts/' + id + '/reject', { reason: reason }).then(function () { toast('Not sent'); load(true); }).catch(function (e) { toast(e.message); });
+}
+function approveAll() {
+  var ids = DRAFTS.map(function (d) { return d.id; });
+  if (!confirm('Send all ' + ids.length + ' messages as they are written?')) return;
+  api('POST', '/drafts/approve', { ids: ids }).then(function (r) { toast(r.approved + ' approved'); load(true); }).catch(function (e) { toast(e.message); });
+}
+api('GET', '/me').then(function (m) {
+  ME = m;
+  $('title').textContent = m.label; document.title = m.label;
+  $('sub').textContent = m.number ? '+' + m.number : '';
+  if (m.appUrl) { $('nav').style.display = 'flex'; $('n-app').textContent = m.appName || 'More'; }
+  load();
+  setInterval(load, 60000);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) load(); });
+}).catch(function (e) { $('main').innerHTML = '<div class="empty">' + esc(KEY ? e.message : 'Open this page from the link you were given.') + '</div>'; });
+</script>
+</body>
+</html>
