@@ -748,6 +748,17 @@ export function buildApp() {
     res.json(r);
   }));
 
+  // Are these numbers on WhatsApp? { account, phones: [...] } → { results: [{ phone, exists }] }. Nothing is sent.
+  api.post('/check-numbers', wrap(async (req, res) => {
+    const phones = [].concat(req.body?.phones || req.body?.phone || []).slice(0, 50);
+    if (!phones.length) throw new Error('Missing "phones" (up to 50 numbers)');
+    const s = await manager.resolve(req.body?.account);
+    const clean = phones.map((p) => store.toJid(String(p)).split('@')[0]);
+    if (s.isCloud) return res.json({ account: s.id, checked: false, note: 'A Meta Cloud API number cannot check in advance; a send to a number without WhatsApp fails with the reason.', results: clean.map((phone) => ({ phone, exists: null })) });
+    if (s.status !== 'open' || !s.sock) return res.json({ account: s.id, checked: false, note: `"${s.id}" is not connected on this server right now — try again in a minute.`, results: clean.map((phone) => ({ phone, exists: null })) });
+    res.json({ account: s.id, checked: true, results: await s.checkNumbers(clean) });
+  }));
+
   // ---- Sending
   api.post('/send', wrap(async (req, res) => {
     const { account, to, wait: waitArg = true, template, vars, replyTo, waTemplate } = req.body || {};

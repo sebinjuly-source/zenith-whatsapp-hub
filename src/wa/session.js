@@ -968,6 +968,19 @@ export class Session extends EventEmitter {
     }
   }
 
+  /**
+   * Which of these numbers have WhatsApp: [{ phone, exists: true | false | null }] — null = WhatsApp did not answer
+   * for that one. Asks WhatsApp only (no message, nothing shown to the person). A send does the same check itself.
+   */
+  async checkNumbers(phones) {
+    if (!this.sock || this.status !== 'open') throw new Error(`Number "${this.id}" is not connected`);
+    const list = [...new Set(phones.map((p) => String(p).split('@')[0].replace(/\D/g, '')).filter(Boolean))];
+    const found = await withTimeout(this.sock.onWhatsApp(...list.map((p) => `${p}@s.whatsapp.net`)), 30000, 'Number check').catch(() => null);
+    const by = new Map((found || []).map((r) => [String(r.jid || '').split('@')[0].split(':')[0], !!r.exists]));
+    // numbers WhatsApp leaves out of its answer are not registered; no answer at all = unknown
+    return list.map((p) => ({ phone: p, exists: found ? (by.has(p) ? by.get(p) : false) : null }));
+  }
+
   async send(jid, content, { typingMs = 0, quoted } = {}) {
     if (!this.sock || this.status !== 'open') throw new Error(`Number "${this.id}" is not connected`);
     if (!isJidGroup(jid)) {

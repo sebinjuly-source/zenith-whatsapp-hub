@@ -754,3 +754,12 @@ tokens, but **a complete and accurate answer matters more than tokens**; non-rep
   forbids being embedded (an Apps Script page needs `setXFrameOptionsMode(ALLOWALL)`).
 - `public/dental/adhp-plan.png` is the Annual Dental Health Plan poster the clinic's sheet attaches to its welcome
   message (like the hiring and sales posters; business files, not hub logic).
+
+### 10.17 Is this number on WhatsApp? (6 Nov, late)
+A send to a linked number has always asked WhatsApp first (`session.send` → "… is not on WhatsApp", the message ends as
+failed). But a caller that queues without waiting (`wait:false`, e.g. a sheet) only hears "accepted". So the question can
+now be asked by itself, nothing sent: `POST /api/check-numbers { account, phones:[…up to 50] }` →
+`{ checked, results:[{ phone, exists: true|false|null }] }`, and the AI tool `check_numbers` (menu: Chats & people).
+`exists: null` / `checked:false` = could not ask (Meta Cloud number, number not connected here, WhatsApp silent) — treat it
+as "unknown", never as "not on WhatsApp". Code: `session.checkNumbers`. Test: "check numbers: which phones are on WhatsApp".
+Known: the "morning summary" test fails when the suite runs late in the evening (an item two hours ahead falls on "tomorrow").

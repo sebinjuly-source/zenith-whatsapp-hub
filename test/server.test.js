@@ -2005,6 +2005,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('open_file', { account: 'mcpall', chat: P, message_id: 'M2' });
   await run('unsend_message', { account: 'mcpall', chat: P, message_id: 'M1', reason: 'toolbox' });
   await run('phone_action', { account: 'mcpall', chat: P, action: 'pin_message', message_id: 'M1', reason: 'toolbox' });
+  await run('check_numbers', { account: 'mcpall', phones: [P] });
   await run('fetch_older_messages', { account: 'mcpall', chat: P, count: 10 });
   await run('backfill_history', { account: 'mcpall', since: '2026-01-01' });
   await run('recent_activity', { who: 'ai' });
@@ -3211,6 +3212,29 @@ test('a draft with a "send by" time that still waits for approval: the owner is 
   await call('PUT', '/api/alerts', { phones: '' });
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'dl1' AND status IN ('draft','queued')`);
   await manager.remove('dl1');
+});
+
+test('check numbers: which phones are on WhatsApp, without sending anything (REST + AI tool)', async () => {
+  await manager.create({ id: 'chk', label: 'Check' });
+  const s = fake('chk');
+  const asked = [];
+  const real = { sock: s.sock, status: s.status };
+  s.sock = { onWhatsApp: async (...jids) => { asked.push(jids); return jids.filter((j) => !j.startsWith('919800000002')).map((jid) => ({ jid, exists: true })); } };
+  s.status = 'open';
+  const r = await (await fetch(`${base}/api/check-numbers`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'k' }, body: JSON.stringify({ account: 'chk', phones: ['98000 00001', '9800000002'] }) })).json();
+  assert.equal(r.checked, true);
+  assert.deepEqual(r.results, [{ phone: '919800000001', exists: true }, { phone: '919800000002', exists: false }]);
+  assert.deepEqual(asked[0], ['919800000001@s.whatsapp.net', '919800000002@s.whatsapp.net']);
+  assert.match(await mcp('check_numbers', { account: 'chk', phones: ['9800000002'] }), /919800000002: NOT on WhatsApp/);
+  // WhatsApp does not answer: unknown, never "not on WhatsApp"
+  s.sock = { onWhatsApp: async () => { throw new Error('timeout'); } };
+  assert.match(await mcp('check_numbers', { account: 'chk', phones: ['9800000001'] }), /no answer from WhatsApp/);
+  s.status = 'close';
+  const off = await (await fetch(`${base}/api/check-numbers`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'k' }, body: JSON.stringify({ account: 'chk', phones: ['9800000001'] }) })).json();
+  assert.equal(off.checked, false);
+  assert.equal(off.results[0].exists, null);
+  s.sock = real.sock; s.status = real.status;
+  await manager.remove('chk');
 });
 
 test('desk: a home-screen page for one number — its key opens only that number\'s drafts (read, edit, approve, reject)', async () => {

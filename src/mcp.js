@@ -284,7 +284,7 @@ export const CORE_TOOLS = new Set(['hub_overview', 'owner_feedback', 'get_playbo
   'describe_data', 'more_tools', 'use_tool']);
 const MENU_TOOLS = new Set(['more_tools', 'use_tool']);
 const MENU_GROUPS = [
-  ['Chats & people', ['list_chats', 'search_messages', 'find_people', 'find_followups', 'get_contact', 'update_contact', 'set_chat_state', 'fetch_older_messages', 'list_shared_contacts', 'save_contact', 'find_contacts', 'log_call_result']],
+  ['Chats & people', ['list_chats', 'search_messages', 'find_people', 'find_followups', 'get_contact', 'update_contact', 'set_chat_state', 'fetch_older_messages', 'list_shared_contacts', 'save_contact', 'check_numbers', 'find_contacts', 'log_call_result']],
   ['Drafts & sending', ['approve_draft', 'approve_task', 'edit_draft', 'move_messages', 'unsend_message', 'bulk_send', 'send_to_list', 'upload_file', 'phone_action']],
   ['Lists, follow-ups & funnel', ['pipeline', 'set_pipeline', 'set_followup', 'known_candidates', 'remove_list_member', 'archive_list']],
   ['Templates & rules', ['list_templates', 'save_template', 'list_rules', 'save_rule', 'list_meta_templates', 'create_meta_template', 'delete_meta_template']],
@@ -1642,6 +1642,17 @@ ${p.text}` : `(No playbook for campaign "${camp}" — follow the main rules.)`;
   });
 
   const PHONE_ACTIONS = ['pin_message', 'unpin_message', 'pin_chat', 'unpin_chat', 'star', 'unstar', 'mark_unread', 'mark_read', 'archive', 'unarchive', 'label_chat', 'unlabel_chat'];
+  tool('check_numbers', 'Are these phone numbers on WhatsApp? Asks WhatsApp only — nothing is sent and the person sees nothing. Use it before importing a list or when two numbers are on file for one person. Linked numbers only (a send checks this by itself too).', {
+    account: accountArg,
+    phones: z.array(z.string()).min(1).max(50).describe('Phone numbers (country code added when missing)'),
+  }, async (a) => {
+    const s = await manager.resolve(a.account);
+    if (s.isCloud) return `"${s.id}" is a Meta Cloud API number — it cannot check in advance; a send to a number without WhatsApp fails with the reason.`;
+    if (s.status !== 'open' || !s.sock) return `"${s.id}" is not connected on this server right now — cannot check; try again in a minute.`;
+    const r = await s.checkNumbers(a.phones.map((p) => store.toJid(p).split('@')[0]));
+    return r.map((x) => `${x.phone}: ${x.exists === true ? 'on WhatsApp' : x.exists === false ? 'NOT on WhatsApp' : 'no answer from WhatsApp'}`).join('\n');
+  });
+
   tool('phone_action', 'Do on the number\'s PHONE what a person would do by hand, so whoever holds the phone sees it: pin_message (pin a message at the top of its chat for 1, 7 or 30 days; WhatsApp keeps 3 pins per chat) / unpin_message; pin_chat (chat to the top of the chat list) / unpin_chat; star / unstar a message; label_chat / unlabel_chat (put a chat into a WhatsApp list, e.g. label="Guest leads", so it can be filtered on the phone; the list is made if it does not exist); mark_unread / mark_read; archive / unarchive. Linked numbers only. message_id: the WhatsApp id from get_messages — omitted, the latest message in that chat. Pin a note to the number\'s own number (its "Message yourself" chat) to leave something for the person holding the phone. Logged in Activity.', {
     account: accountArg, chat: chatArg,
     action: z.enum(PHONE_ACTIONS),
