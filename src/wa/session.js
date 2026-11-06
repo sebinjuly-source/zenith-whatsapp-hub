@@ -21,7 +21,7 @@ import logger from '../logger.js';
 import config from '../config.js';
 import { query, logEvent } from '../db.js';
 import { useDbAuthState, clearAuthState, hasAuthState } from './auth-state.js';
-import { parseMessage, mediaMessageFromRow } from './parse.js';
+import { parseMessage, mediaMessageFromRow, liveCallLine, callLogRow } from './parse.js';
 import * as store from '../store.js';
 import { putMedia, mediaPath } from '../media.js';
 import { normalizeSettings } from '../settings.js';
@@ -177,10 +177,19 @@ export class Session extends EventEmitter {
     await store.warmLidCache(this.id);
     this.setStatus('connecting');
 
+    // The phone's own call log (real length, calls made from the phone) is synced to linked devices, but Baileys only
+    // decodes it and hands it to its logger as an "unprocessable update" — so we listen there.
+    const libLog = this.log.child({ lib: 'baileys' }, { level: process.env.BAILEYS_LOG_LEVEL || 'warn' });
+    const libDebug = libLog.debug.bind(libLog);
+    libLog.debug = (obj, ...rest) => {
+      const rec = obj?.syncAction?.syncAction?.value?.callLogAction?.callLogRecord;
+      if (rec) this.enqueue(() => this.onCallLog(rec));
+      return libDebug(obj, ...rest);
+    };
     const sock = makeWASocket({
       version: cachedVersion,
       auth: { creds: state.creds, keys: state.keys },
-      logger: this.log.child({ lib: 'baileys' }, { level: process.env.BAILEYS_LOG_LEVEL || 'warn' }),
+      logger: libLog,
       // A "Desktop" companion with requireFullSync asks the phone for the FULL history, not just recent chats.
       // (macOS/Windows Desktop currently get rejected with 428 at connect; Ubuntu Desktop is accepted.)
       browser: Browsers.ubuntu('Desktop'),
@@ -693,11 +702,7 @@ export class Session extends EventEmitter {
       if (cur.group) continue;
       const end = c.date ? new Date(c.date) : new Date();
       const secs = cur.accepted ? Math.max(0, Math.round((end - cur.accepted) / 1000)) : 0;
-      const kind = cur.video ? 'video' : 'voice';
-      const answered = !!cur.accepted && secs > 0;
-      const body = answered
-        ? `📞 ${kind[0].toUpperCase()}${kind.slice(1)} call — answered, ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
-        : `📞 ${c.status === 'reject' ? 'Declined' : 'Missed'} ${kind} call`;
+      const body = liveCallLine({ accepted: !!cur.accepted, secs, status: c.status, video: cur.video });
       const chatJid = await store.canonicalJid(this.id, cur.chat);
       if (!chatJid) continue;
       const fromMe = !!(this.myJid && cur.from && jidNormalizedUser(cur.from) === this.myJid);
@@ -711,6 +716,29 @@ export class Session extends EventEmitter {
         const board = await import('../board.js');
         await board.noteIncoming(this.id, row).catch(() => {});
       }
+    }
+  }
+
+  /**
+   * One record of the phone's call log: the accurate line for the chat (outcome, real length, calls we made). It
+   * replaces the line the live call events wrote for the same call; a call the hub never saw live gets its line now.
+   */
+  async onCallLog(rec) {
+    const r = callLogRow(rec, this.myJid);
+    this.log.info({ callLog: { id: rec.callId, result: rec.callResult, duration: String(rec.duration ?? ''), start: String(rec.startTime ?? ''), incoming: rec.isIncoming }, line: r?.body }, 'call log record');
+    if (!r) return;
+    const chatJid = await store.canonicalJid(this.id, r.peer);
+    if (!chatJid || chatJid.endsWith('@g.us')) return;
+    const [seen] = await query('SELECT 1 FROM messages WHERE account_id = $1 AND chat_jid = $2 AND id = $3', [this.id, chatJid, r.id]);
+    const row = {
+      id: r.id, fromMe: r.fromMe, ts: r.ts, chatJid, senderJid: r.fromMe ? this.myJid : chatJid, senderName: r.fromMe ? 'me' : null,
+      type: 'call', body: r.body, quotedId: null, quotedBody: null, forwarded: false, media: null, vcards: null, status: null,
+      fromHistory: r.ts < Math.floor(Date.now() / 1000) - 3600, // an old log entry (first sync) never raises a card
+    };
+    await store.insertMessages(this.id, [row]);
+    if (!seen && !row.fromMe && !row.fromHistory) {
+      const board = await import('../board.js');
+      await board.noteIncoming(this.id, row).catch(() => {});
     }
   }
 

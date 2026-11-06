@@ -107,6 +107,7 @@ async function inboxRows({ since, account, campaign, waitingOnly = true, limit =
     `WITH ib AS (
        SELECT DISTINCT ON (account_id, chat_jid) account_id, chat_jid, from_me, ts, body, type FROM messages
        WHERE ts > $1 AND chat_jid NOT LIKE '%@g.us' AND chat_jid NOT LIKE '%broadcast%' AND chat_jid NOT LIKE '%@newsletter'
+         AND type <> 'secretEncrypted' /* an unreadable edit / event update is not "they spoke last" */
        ORDER BY account_id, chat_jid, ts DESC)
      SELECT ib.*, ${roleOf('ib.account_id', 'ib.chat_jid')} AS campaign,
        COALESCE(NULLIF(ct.name, ''), NULLIF(ch.name, ''), (SELECT NULLIF(m.name, '') FROM list_members m WHERE m.jid = ib.chat_jid AND COALESCE(m.name, '') <> '' LIMIT 1), ct.notify) AS name,
@@ -271,15 +272,40 @@ export async function enforceScope(focus, name, a) {
   }
 }
 
-function buildServer(playbook = '', focus = '', { readOnly = false } = {}) {
+/**
+ * The tools every session needs (the Board, the inbox, drafts, lists, a person, files, data) — like the dashboard's top
+ * bar. All other tools stay registered but are not listed to the AI: more_tools shows them, use_tool runs one. The
+ * full list was 93 KB (≈ 23,000 tokens) in every session of an app that loads all tools (6 Nov).
+ * /mcp/<key>?tools=all lists everything, as before.
+ */
+export const CORE_TOOLS = new Set(['hub_overview', 'owner_feedback', 'get_playbook', 'inbox_summary', 'list_tasks', 'create_task', 'update_task',
+  'add_task_note', 'task_history', 'get_messages', 'person_context', 'find_person', 'send_message', 'list_outbox', 'edit_messages', 'reject_draft',
+  'reschedule_messages', 'list_lists', 'list_members', 'import_list', 'update_list_member', 'list_campaigns', 'open_file', 'inspect_data',
+  'describe_data', 'more_tools', 'use_tool']);
+const MENU_TOOLS = new Set(['more_tools', 'use_tool']);
+const MENU_GROUPS = [
+  ['Chats & people', ['list_chats', 'search_messages', 'find_people', 'find_followups', 'get_contact', 'update_contact', 'set_chat_state', 'fetch_older_messages', 'list_shared_contacts', 'save_contact', 'find_contacts', 'log_call_result']],
+  ['Drafts & sending', ['approve_draft', 'approve_task', 'edit_draft', 'move_messages', 'unsend_message', 'bulk_send', 'send_to_list', 'upload_file', 'phone_action']],
+  ['Lists, follow-ups & funnel', ['pipeline', 'set_pipeline', 'set_followup', 'known_candidates', 'remove_list_member', 'archive_list']],
+  ['Templates & rules', ['list_templates', 'save_template', 'list_rules', 'save_rule', 'list_meta_templates', 'create_meta_template', 'delete_meta_template']],
+  ['Campaigns, playbooks & settings', ['create_campaign', 'switch_campaign', 'set_campaign_stages', 'save_playbook', 'get_settings', 'update_settings', 'list_accounts', 'daily_checkins']],
+  ['Files', ['save_media', 'catalog_file', 'find_files', 'storage_status']],
+  ['Checking & fixing', ['recent_activity', 'message_timeline', 'meta_health_check', 'backfill_history', 'hub_api']],
+];
+
+function buildServer(playbook = '', focus = '', { readOnly = false, allTools = false } = {}) {
 
   const server = new McpServer(
     { name: 'zenith-whatsapp-hub', version: '0.1.0' },
-    { instructions: `${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). EVERY RECENT CHAT IS YOURS TO SORT (owner, 6 Nov): inbox_summary shows every chat waiting for an answer on every number — people on campaign lists (they also get "Reply to" cards) AND people on no list (guests, patients, leads, staff). Read each one (get_messages) and decide: a reply is due → draft it; the owner must act (a price, a decision, a call) → create_task for="you"; a guest / patient / lead / candidate who needs following up → put them on that campaign's list (import_list) with follow_up_at, so the Board keeps them; staff chatter that is already handled or needs nothing → leave it. Never answer the hub's own numbers or the owner's phones. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. THE BOARD (2 Nov): a card in status "review" was marked Done by the owner — read it and its notes (task_history), do what they ask, then update_task done; never leave one. Keep every card you work on readable as a MATTER: update_task summary (where it stands, one line), next_step (the owner's next step) and story (2–4 bullets: how we got here) — the owner reads these instead of the chat. EVERY REPLY ENDS IN A RECORD: after any conversation (yours or the owner's own reply by hand) record what was agreed — a day → update_list_member visit_at (with time) or available_from; interested, no day → stage interested + follow_up_at; not interested → that stage. "Next step missing: X" cards are the hub's safety net for people who replied with nothing recorded (27 Oct: a chef the owner told "come on the 10th" had no card). NAMES: the name a person writes themselves (signature, "my name is", booking details) beats their WhatsApp profile name, which beats the name saved on the phone or the list (31 Oct: a guest saved as "Suvijaya" signs "Sujit" — he was addressed as "Ms Suvijaya"). Never guess gender from a name: use Mr/Ms only when the chat makes it clear (they wrote it, or were called Sir/Madam and answered), else "Dear <name> ji". When a list or contact name is wrong, fix it (update_list_member name, update_contact name). FILES: open_file shows you a photo/screenshot/ID someone sent (as the picture) or a PDF's text — read them before replying; save_media / open_file also give a link to forward the file. A message sent by mistake → unsend_message (linked numbers, 2 days). You can send any file yourself — send_message(attachment_base64=<the file as base64>, file_name="X.pdf") or upload_file then attachment_url; never ask the owner to upload to Drive or send it by hand. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who wrote to us in the last 30 days (interested candidates, interview follow-ups) → everyone else → nudges to non-repliers. On a linked number only people who wrote in the last 30 days skip the daily limit, and at most hourlyCap (10) automated messages go out per hour — a burst to old contacts got the hotel number logged out (26 Oct). Never plan big batches to old contacts from a linked number. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. Follow the owner's playbook below (also via get_playbook).\n\n${playbook}` },
+    // The first lines must stand on their own: some apps cut server instructions after ~2,000 characters (6 Nov: the
+    // desktop app stopped mid-sentence, so the owner's playbook — then 20 KB further down — never reached the AI).
+    // The playbook itself is no longer sent here (it was paid for twice: here and again via get_playbook).
+    { instructions: `WhatsApp Hub. START every session: 1) hub_overview (what is due now, in priority order, on every number) 2) owner_feedback 3) get_playbook — the owner's rules (the main playbook plus the open campaign's). They are NOT in these instructions: read them before you draft, send or change anything. TOOLS: the everyday tools are listed; everything else (templates, rules, settings, bulk sends, follow-up and pipeline set-up, files, phone actions, Meta, campaign set-up, search, the REST bridge) is one step away — more_tools shows the menu, use_tool(name, args) runs any of them. Drafts wait for the owner: never approve unless told. Never answer the hub's own numbers or the owner's phones. An answer that says NOT SHOWN or "more line(s) not shown" is incomplete: narrow it (account, campaign, limit) and call again before concluding anything.\n\n${focus ? `CAMPAIGN FILTER: the owner has ${scope.label(focus)} open, so every tool shows only its chats, drafts, Board cards, lists, contacts, templates and rules (numbers are shared), and refuses to change items of another campaign by accident. This keeps your context small — it is a filter, not a wall: to look at or work on another campaign pass campaign="<name>" (or "all") to the tool; list_campaigns shows them; create_campaign / switch_campaign when the owner asks.\n\n` : 'CAMPAIGNS: every tool takes campaign="<name>" to filter to one campaign (list_campaigns shows them). create_campaign / switch_campaign when the owner asks.\n\n'}Zenith WhatsApp Hub: several WhatsApp numbers, chats, candidate lists with a funnel, a Board (shared calendar of owner + AI), templates and rules. START every session with hub_overview — it shows what needs doing now, in priority order, across ALL numbers — then owner_feedback (the owner's card notes, rejection reasons and Drafts-page requests: act on the open ones). EVERY RECENT CHAT IS YOURS TO SORT (owner, 6 Nov): inbox_summary shows every chat waiting for an answer on every number — people on campaign lists (they also get "Reply to" cards) AND people on no list (guests, patients, leads, staff). Read each one (get_messages) and decide: a reply is due → draft it; the owner must act (a price, a decision, a call) → create_task for="you"; a guest / patient / lead / candidate who needs following up → put them on that campaign's list (import_list) with follow_up_at, so the Board keeps them; staff chatter that is already handled or needs nothing → leave it. Never answer the hub's own numbers or the owner's phones. Funnel stages differ per campaign (list_campaigns; set_campaign_stages / create_campaign stages). ZOOM IN as far as you need: list_outbox(ids=[…] or full=true) shows whole messages, get_messages(full_text=true) whole chats, task_history a card's story, describe_data + inspect_data (read-only SQL) anything else. CHANGE what the owner asks: edit_messages (text, find/replace, picture) on drafts and approved-unsent messages, update_settings (owner-only settings with owner_asked), save_playbook (includes), reschedule_messages, move_messages. THE BOARD (2 Nov): a card in status "review" was marked Done by the owner — read it and its notes (task_history), do what they ask, then update_task done; never leave one. Keep every card you work on readable as a MATTER: update_task summary (where it stands, one line), next_step (the owner's next step) and story (2–4 bullets: how we got here) — the owner reads these instead of the chat. EVERY REPLY ENDS IN A RECORD: after any conversation (yours or the owner's own reply by hand) record what was agreed — a day → update_list_member visit_at (with time) or available_from; interested, no day → stage interested + follow_up_at; not interested → that stage. "Next step missing: X" cards are the hub's safety net for people who replied with nothing recorded (27 Oct: a chef the owner told "come on the 10th" had no card). NAMES: the name a person writes themselves (signature, "my name is", booking details) beats their WhatsApp profile name, which beats the name saved on the phone or the list (31 Oct: a guest saved as "Suvijaya" signs "Sujit" — he was addressed as "Ms Suvijaya"). Never guess gender from a name: use Mr/Ms only when the chat makes it clear (they wrote it, or were called Sir/Madam and answered), else "Dear <name> ji". When a list or contact name is wrong, fix it (update_list_member name, update_contact name). FILES: open_file shows you a photo/screenshot/ID someone sent (as the picture) or a PDF's text — read them before replying; save_media / open_file also give a link to forward the file. A message sent by mistake → unsend_message (linked numbers, 2 days). You can send any file yourself — send_message(attachment_base64=<the file as base64>, file_name="X.pdf") or upload_file then attachment_url; never ask the owner to upload to Drive or send it by hand. Lists and tasks live on different numbers: never conclude something is missing after filtering by one number. SEND ORDER (the hub does it, whatever the campaign): replies to people who wrote in 24 h → owner's own → messages with a "send by" time → people who wrote to us in the last 30 days (interested candidates, interview follow-ups) → everyone else → nudges to non-repliers. On a linked number only people who wrote in the last 30 days skip the daily limit, and at most hourlyCap (10) automated messages go out per hour — a burst to old contacts got the hotel number logged out (26 Oct). Never plan big batches to old contacts from a linked number. Give expires_at ("send by") to anything tied to a day (festival wishes, offers, reminders); hub_overview shows "NOT ENOUGH CAPACITY" when they won't fit — tell the owner. The owner's playbook: get_playbook.${playbook ? `\n\n${playbook}` : ''}` },
   );
-  const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter for this call: a campaign name, "none" (hotel / no campaign) or "all". Default: ${focus ? `"${focus}" (the campaign the owner has open)` : 'all campaigns'}.`);
+  // kept short: it is repeated on every tool (76 × the long wording was ~11 KB of each session's tool list)
+  const CAMPAIGN_FILTER = z.string().optional().describe(`Campaign filter: a name, "none" or "all" (default ${focus ? `"${focus}"` : 'all'})`);
   const tool = (name, description, inputSchema, fn) => {
-    if (readOnly && !READ_TOOLS.has(name)) return; // the read-only key sees only the tools that read
+    if (readOnly && !READ_TOOLS.has(name) && !MENU_TOOLS.has(name)) return; // the read-only key sees only the tools that read
     const shape = { ...inputSchema };
     if (!shape.campaign) shape.campaign = CAMPAIGN_FILTER;
     if (name === 'update_task') shape.in_campaign = CAMPAIGN_FILTER.describe('Older name of campaign (the filter)');
@@ -289,8 +315,8 @@ function buildServer(playbook = '', focus = '', { readOnly = false } = {}) {
       a._c = c; // handlers filter by it
       return fn(a);
     }, name === 'get_playbook' ? Infinity : RESPONSE_BUDGET); // the owner's rules are never cut
-    server.registerTool(name, { description, inputSchema: shape }, run);
-    registry.set(name, { description, shape, run }); // the same tools over REST: POST /api/tools/<name>
+    server.registerTool(name, { description, inputSchema: shape }, run); // callable by name always; what is LISTED is cut down below
+    registry.set(name, { description, shape, run }); // every tool: over REST (POST /api/tools/<name>) and via use_tool
   };
   const registry = new Map();
   server.hubTools = registry;
@@ -331,6 +357,8 @@ function buildServer(playbook = '', focus = '', { readOnly = false } = {}) {
     }
     const campaigns = await query(`SELECT DISTINCT role FROM lists WHERE role IS NOT NULL AND archived IS NULL ORDER BY role`);
     if (!a.campaign && campaigns.length > 1) out.push(`Campaigns running: ${campaigns.map((c) => c.role).join(', ')} — pass campaign=<role> to focus on one.`);
+    // the playbook is no longer part of the connection's instructions: say where the rules are, every time
+    out.push('RULES: get_playbook — the owner\'s rules; read them once per session before drafting or changing anything.');
     const dueNow = open.filter((t) => !t.due_at || new Date(t.due_at) <= new Date(now.getTime() + 3600e3));
     const later = open.filter((t) => t.due_at && new Date(t.due_at) > new Date(now.getTime() + 3600e3));
     const byKind = (rows, k) => rows.filter((t) => t.kind === k).length;
@@ -813,13 +841,23 @@ function buildServer(playbook = '', focus = '', { readOnly = false } = {}) {
     limit: z.number().int().min(1).max(200).optional(),
     include_unlisted: z.boolean().optional().describe('Default true: chats of people on no list are included (owner, 6 Nov: every recent chat gets sorted). false = campaign lists only'),
   }, async (a) => {
-    const since = a.since ? Math.floor(new Date(localTime(a.since)).getTime() / 1000) : Math.floor(Date.now() / 1000) - 86400;
+    // the same 3 days hub_overview counts (6 Nov: the overview said "102 waiting → inbox_summary", which then showed
+    // 24 hours and at most 60 chats without saying so)
+    const since = a.since ? Math.floor(new Date(localTime(a.since)).getTime() / 1000) : Math.floor(Date.now() / 1000) - 3 * 86400;
     if (!since) throw new Error('Could not read since');
-    const rows = await inboxRows({ since, account: a.account ? (await manager.resolve(a.account)).id : null, campaign: a._c, waitingOnly: a.waiting_only !== false, limit: a.limit || 60, unlisted: a.include_unlisted !== false });
-    if (!rows.length) return `Nothing ${a.waiting_only === false ? 'new' : 'waiting'} since ${d(new Date(since * 1000))}.`;
+    const all = await inboxRows({ since, account: a.account ? (await manager.resolve(a.account)).id : null, campaign: a._c, waitingOnly: a.waiting_only !== false, limit: 500, unlisted: a.include_unlisted !== false });
+    if (!all.length) return `Nothing ${a.waiting_only === false ? 'new' : 'waiting'} since ${d(new Date(since * 1000))}.`;
+    // people on campaign lists first (newest first), then people on no list; what does not fit is counted, never dropped silently
+    all.sort((x, y) => (x.list_name ? 0 : 1) - (y.list_name ? 0 : 1));
+    const rows = all.slice(0, a.limit || 60);
+    const rest = all.slice(rows.length);
     const byAcc = {};
     for (const r of rows) (byAcc[r.account_id] ||= []).push(r);
-    const out = [`INBOX since ${d(new Date(since * 1000))} — ${rows.length} chat(s)${a.waiting_only === false ? '' : ' waiting for us'}:`];
+    const out = [`INBOX since ${d(new Date(since * 1000))} — ${all.length} chat(s)${a.waiting_only === false ? '' : ' waiting for us'}${rest.length ? `, the first ${rows.length} shown (people on lists first)` : ''}:`];
+    if (rest.length) {
+      const per = Object.entries(rest.reduce((m, r) => ({ ...m, [r.account_id]: (m[r.account_id] || 0) + 1 }), {})).map(([k, n]) => `${k} ${n}`).join(', ');
+      out.push(`NOT SHOWN: ${rest.length} more chat(s) (${per}) — call again with account=<number> (one number at a time) or a later since.`);
+    }
     for (const [acc, list] of Object.entries(byAcc)) {
       out.push(`\n${acc} (${list.length}):`);
       for (const r of list) {
@@ -1326,6 +1364,7 @@ function buildServer(playbook = '', focus = '', { readOnly = false } = {}) {
 
   tool('get_playbook', "The owner's standing rules. Inside a campaign (the open one by default): the main playbook plus that campaign's, with the shared playbooks it follows — only the ones that apply. campaign=\"all\": the main playbook plus the names of the campaign playbooks. With campaign (e.g. \"Chef\", \"Corporate sales\", \"Win-back\"): that campaign's own rules — offer, wording, who to target. Read the campaign's before working on it; the main rules still apply.", {
     campaign: z.string().optional().describe('Campaign name; omit for the main playbook'),
+    campaign_only: z.boolean().optional().describe('true = only the rules of that campaign, when you already read the main playbook in this session (it is ~15 KB each time)'),
   }, async (a) => {
     const list = await listCampaignPlaybooks();
     const main = (await getPlaybook()).text;
@@ -1335,6 +1374,8 @@ function buildServer(playbook = '', focus = '', { readOnly = false } = {}) {
     if (camp) {
       // every campaign works under the main rules too; hiring campaigns include the shared hiring playbook (INCLUDE)
       const p = await getCampaignPlaybook(camp);
+      if (a.campaign_only) return p ? `=== CAMPAIGN PLAYBOOK — ${p.campaign} (the main playbook applies too) ===
+${p.text}` : `(No playbook for campaign "${camp}" — follow the main rules.)`;
       if (!p) return `MAIN PLAYBOOK:\n${main}\n\n(No playbook for campaign "${camp}" yet — follow the main rules; the owner can add one: save_playbook with campaign.)`;
       return `MAIN PLAYBOOK (applies to every campaign):\n${main}\n\n=== CAMPAIGN PLAYBOOK — ${p.campaign}${p.text.includes('--- included:') ? ' (with the playbooks it follows, included below)' : ''} ===\n${p.text}`;
     }
@@ -1849,6 +1890,62 @@ function buildServer(playbook = '', focus = '', { readOnly = false } = {}) {
     return `${r.status}${r.ok ? '' : ' ERROR'} ${method} /api${p}\n${out}`;
   });
 
+  const paramsOf = (t) => Object.entries(t.shape).filter(([k]) => k !== 'campaign' && k !== 'in_campaign')
+    .map(([k, v]) => `  ${k}${v.isOptional?.() ? '' : ' (required)'}: ${v.description || v.def?.type || v.type || ''}`);
+  const firstSentence = (d) => trim(String(d).split(/(?<=[.:!?])\s/)[0], 130);
+  tool('more_tools', 'The menu of the tools that are not in your list (chats & search, sending in bulk, follow-up and funnel set-up, templates & rules, campaigns & settings, files, checking & fixing). No arguments: every hidden tool in one line. name="<tool>": what it does and its parameters. search="words": the tools that match. Run one with use_tool.', {
+    name: z.string().optional().describe('One tool: full description and parameters'),
+    search: z.string().optional().describe('Words to look for in tool names and descriptions'),
+  }, async (a) => {
+    const hidden = [...registry].filter(([n]) => (allTools || !CORE_TOOLS.has(n)) && !MENU_TOOLS.has(n));
+    const full = ([n, t]) => `${n} — ${t.description}\nParameters (plus campaign = the filter):\n${paramsOf(t).join('\n') || '  (none)'}`;
+    if (a.name) {
+      const t = registry.get(a.name.trim());
+      if (!t) throw new Error(`No tool "${a.name}" — more_tools without arguments lists them`);
+      return full([a.name.trim(), t]);
+    }
+    if (a.search) {
+      const words = a.search.toLowerCase().split(/[\s,]+/).filter((w) => w.length > 1);
+      const hits = hidden.filter(([n, t]) => words.some((w) => n.includes(w) || t.description.toLowerCase().includes(w)));
+      if (!hits.length) return `No hidden tool matches "${a.search}". more_tools without arguments lists them all.`;
+      return hits.length <= 3 ? hits.map(full).join('\n\n') : hits.map(([n, t]) => `- ${n} — ${firstSentence(t.description)}`).join('\n') + '\nmore_tools(name=…) shows one in full.';
+    }
+    const by = new Map(hidden);
+    const out = ['MORE TOOLS — run with use_tool(name, args); more_tools(name=…) shows the parameters first:'];
+    for (const [group, names] of MENU_GROUPS) {
+      const have = names.filter((n) => by.has(n));
+      if (!have.length) continue;
+      out.push(`\n${group}:`);
+      for (const n of have) { out.push(`- ${n} — ${firstSentence(by.get(n).description)}`); by.delete(n); }
+    }
+    if (by.size) { out.push('\nOther:'); for (const [n, t] of by) out.push(`- ${n} — ${firstSentence(t.description)}`); }
+    return out.join('\n');
+  });
+  tool('use_tool', 'Run any hub tool by name — the ones in the more_tools menu (and the listed ones). Same rules, checks and answers as calling it directly. If the arguments are wrong the answer says which; more_tools(name=…) shows them.', {
+    name: z.string().describe('The tool, e.g. "set_followup", "bulk_send", "list_templates"'),
+    args: z.record(z.string(), z.any()).optional().describe('Its arguments as an object, e.g. {"list":"Chef – Batch 9","enabled":true}'),
+  }, async (a) => {
+    const name = String(a.name || '').trim();
+    const t = registry.get(name);
+    if (!t || MENU_TOOLS.has(name)) throw new Error(`No tool "${name}"${readOnly ? ' for a read-only key' : ''} — more_tools lists them`);
+    const args = { ...(a.args || {}) };
+    if (args.campaign === undefined && a.campaign !== undefined) args.campaign = a.campaign; // the filter may be given on either level
+    const parsed = z.object(t.shape).safeParse(args);
+    if (!parsed.success) throw new Error(`${name}: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'args'}: ${i.message}`).join('; ')}\n${paramsOf(t).join('\n')}`);
+    return t.run(parsed.data);
+  });
+
+  // The list the AI is shown: the core tools only. Every tool still answers when called by its name (older routine
+  // prompts, scripts), and through use_tool. If the SDK's handler table ever changes, the full list is shown as before.
+  const handlers = server.server?._requestHandlers;
+  const listAll = handlers?.get('tools/list');
+  if (!allTools && listAll) {
+    handlers.set('tools/list', async (req, extra) => {
+      const r = await listAll(req, extra);
+      return { ...r, tools: r.tools.filter((t) => CORE_TOOLS.has(t.name)) };
+    });
+  }
+
   return server;
 }
 
@@ -1898,18 +1995,17 @@ export function mountMcp(app) {
     // background routine that always works on Chef hiring. Otherwise the campaign chosen in the dashboard applies.
     const pinned = req.params.campaign ?? req.query.campaign;
     const focus = pinned !== undefined ? (/^all$/i.test(pinned) ? '' : String(pinned)) : await scope.getFocus().catch(() => '');
-    const main = (await getPlaybook().catch(() => ({ text: '' }))).text;
     let instructions;
     if (focus) {
       // inside a campaign: the main rules plus that campaign's own playbook, in full; other campaigns are not mentioned
       const cp = await getCampaignPlaybook(focus).catch(() => null);
-      instructions = `${main}\n\n${cp ? `CAMPAIGN PLAYBOOK — ${cp.campaign} (follow it together with the main rules):\n${cp.text}` : `(No playbook for ${scope.label(focus)} yet — follow the main rules.)`}`;
+      instructions = cp ? `PLAYBOOKS: get_playbook returns the main playbook plus the one of ${cp.campaign}.` : `PLAYBOOKS: get_playbook returns the main playbook (${scope.label(focus)} has none of its own yet).`;
     } else {
       const camps = await listCampaignPlaybooks().catch(() => []);
       // the main playbook in full; campaign playbooks by name only (the AI reads the one it works on)
-      instructions = camps.length ? `${main}\n\nCAMPAIGN PLAYBOOKS (own rules per campaign — read the one you work on with get_playbook(campaign=…) or hub_overview(campaign=…)): ${camps.map((c) => c.campaign).join(', ')}` : main;
+      instructions = camps.length ? `PLAYBOOKS: get_playbook returns the main playbook; each campaign has its own — read the one you work on with get_playbook(campaign=…): ${camps.map((c) => c.campaign).join(', ')}` : '';
     }
-    const server = buildServer(instructions, focus, { readOnly: role === 'read' });
+    const server = buildServer(instructions, focus, { readOnly: role === 'read', allTools: /^(all|full)$/i.test(String(req.query.tools || '')) });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => {
       transport.close();

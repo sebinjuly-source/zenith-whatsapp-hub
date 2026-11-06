@@ -697,6 +697,12 @@ const RESERVED = (acc, o, automated, cloud) => `(SELECT count(*) FROM outbox r W
   AND r.scheduled_at > now() AND r.scheduled_at <= now() + interval '24 hours'
   AND (${o}.expires_at IS NULL OR r.expires_at < ${o}.expires_at)
   AND NOT ${IS_REPLY(acc, 'r.to_jid')} AND (${cloud}::boolean OR NOT ${IS_WARM(acc, 'r.to_jid')}))`;
+/**
+ * Part of the hourly limit of a linked phone is kept for the messages that matter most: first messages to new people
+ * and nudges to non-repliers may use hourlyCap minus this (10 → 7), so a reply to someone who wrote before, a pipeline
+ * message or anything with a "send by" time never waits an hour behind a cold batch (6 Nov).
+ */
+export const hourlyReserve = (s) => Math.min(3, Math.floor((s?.hourlyCap || 0) * 0.3));
 const SEND_ORDER = (acc, o) => `${SEND_RANK(acc, o)}, ${o}.expires_at NULLS LAST, ${o}.scheduled_at, ${o}.id`;
 const fmtLocal = (t) => new Date(t).toLocaleString('en-IN', { timeZone: config.tz, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 
@@ -846,6 +852,7 @@ export async function queueStatus(accountId) {
   else if (session.status !== 'open') { state = 'held'; reason = `Number is not connected (${session.status}) — messages go out once it is`; }
   else if (q.queued_automated && !insideSendingWindow(s)) { state = 'held'; reason = `Outside sending hours (${s.sendStart}–${s.sendEnd})`; }
   else if (q.queued_cold && q.queued_cold === q.queued && a.n >= s.dailyCap) { state = 'held'; reason = `Daily limit for people who haven't written in ${WARM_DAYS} days reached: ${a.n} of ${s.dailyCap} in the last 24 hours`; until = capFreeAt; }
+  else if (!session.isCloud && q.queued_cold && q.queued_cold === q.queued && sent.last_hour >= s.hourlyCap - hourlyReserve(s) && sent.last_hour < s.hourlyCap) { state = 'held'; reason = `Hourly limit for first messages reached: ${sent.last_hour} of ${s.hourlyCap - hourlyReserve(s)} in the last hour (${hourlyReserve(s)} of the ${s.hourlyCap} an hour are kept for replies and messages with a "send by" time)`; until = new Date(Date.now() + 10 * 60e3); }
   else if (!session.isCloud && q.queued_automated && sent.last_hour >= s.hourlyCap) { state = 'held'; reason = `Hourly limit reached: ${sent.last_hour} of ${s.hourlyCap} in the last hour (spreads batches over the day)`; until = new Date(Date.now() + 10 * 60e3); }
   else if (q.queued_new && blocked) { state = 'held'; reason = 'WhatsApp blocks messages to new numbers for now'; until = session.reachout.timeEnforcementEnds ? new Date(session.reachout.timeEnforcementEnds) : null; }
   else if (q.queued_new && q.queued_new === q.queued && nc.count >= nc.limit) { state = 'held'; reason = `New-number limit reached: ${nc.count} of ${nc.limit} in the last 24 hours`; until = nc.nextFreeAt; }
@@ -994,6 +1001,38 @@ async function noteCapacity(accountId) {
   await noteOnce(accountId, `capacity:${f.atRisk.length}`, `Not enough sending capacity on "${f.label}": ${f.atRisk.length} message${f.atRisk.length > 1 ? 's' : ''} with a "send by" time would miss it (first by ${fmtLocal(first)}). Drafts & outbox: send them from another number, skip them, or raise the daily limit${f.raiseTo ? ` to ${f.raiseTo}` : ''}.`, 'warn');
 }
 
+/**
+ * A draft with a "send by" time that is due and still waits for approval is lost when the time passes (4–5 Nov: three
+ * interview reminders, drafted 3 h before the interview, expired unseen). Tell the owner on WhatsApp once per draft,
+ * DEADLINE_ALERT_HOURS before its time — from this number if it is a linked phone, else from another connected one.
+ */
+export const DEADLINE_ALERT_HOURS = 3;
+export async function alertWaitingDeadlines(accountId) {
+  const rows = await query(
+    `UPDATE outbox o SET deadline_alert_at = now() WHERE o.account_id = $1 AND o.status = 'draft' AND o.deadline_alert_at IS NULL
+       AND o.expires_at > now() AND o.expires_at <= now() + ($2 || ' hours')::interval AND o.scheduled_at <= now() + interval '15 minutes'
+     RETURNING o.id, o.to_jid, o.payload, o.expires_at,
+       (SELECT COALESCE(NULLIF(c.name, ''), NULLIF(c.notify, '')) FROM contacts c WHERE c.account_id = o.account_id AND c.jid = o.to_jid) AS name`,
+    [accountId, String(DEADLINE_ALERT_HOURS)],
+  );
+  if (!rows.length) return 0;
+  const { alertPhones } = await import('./notify.js');
+  const phones = await alertPhones().catch(() => []);
+  const label = manager.sessions.get(accountId)?.account?.label || accountId;
+  const lines = rows.sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at)).slice(0, 8).map((r) =>
+    `• ${r.name || '+' + r.to_jid.split('@')[0]} — "${String(r.payload?.text || r.payload?.attachment?.caption || r.payload?.waTemplate?.name || 'message').replace(/\s+/g, ' ').slice(0, 70)}" — send by ${fmtLocal(r.expires_at)}`);
+  const text = `⏳ WhatsApp Hub: ${rows.length} draft${rows.length > 1 ? 's' : ''} on "${label}" must go out soon and wait for your approval:\n${lines.join('\n')}${rows.length > 8 ? `\n… and ${rows.length - 8} more` : ''}\nApprove or reject: ${config.publicUrl || 'the dashboard'}${config.publicUrl ? '/#outbox' : ' → Drafts'}`;
+  await logEvent(accountId, 'warn', `${rows.length} draft${rows.length > 1 ? 's' : ''} with a "send by" time within ${DEADLINE_ALERT_HOURS} h wait for approval (#${rows.map((r) => r.id).join(', #')})${phones.length ? ' — owner alerted' : ' — no alert phone set'}`);
+  const usable = (x) => x && x.status === 'open' && !x.isCloud;
+  const from = usable(manager.sessions.get(accountId)) ? accountId : [...manager.sessions.values()].find(usable)?.id;
+  if (!from) return rows.length;
+  for (const p of phones) {
+    if (rows.every((r) => r.to_jid.split('@')[0] === p)) continue; // the draft is to the owner's own phone
+    await enqueue({ account: from, to: p, payload: { text }, source: 'api', note: 'deadline alert' }).catch(() => {});
+  }
+  return rows.length;
+}
+
 const holdNoted = new Map(); // accountId -> until (ms): log "limit reached" once per hold
 const notedOnce = new Map();
 /** Activity entry at most once an hour per key (e.g. "waiting for template approval"). */
@@ -1064,6 +1103,7 @@ function startWorker(accountId) {
     if (Date.now() - lastForecast > 600e3) {
       lastForecast = Date.now();
       await noteCapacity(accountId).catch(() => {});
+      await alertWaitingDeadlines(accountId).catch(() => {});
     }
     await runJobs(session);
     const s = session.settings;
@@ -1073,6 +1113,7 @@ function startWorker(accountId) {
     // cold = people who never wrote to this number (the daily cap); warm = they did (linked phones: warmDailyCap)
     // linked phones: never more than hourlyCap automated messages in any hour (a burst got a number logged out, 26 Oct)
     const hourOk = cloud || used.last_hour < s.hourlyCap;
+    const bulkHourOk = cloud || used.last_hour < s.hourlyCap - hourlyReserve(s); // cold first messages and nudges stop earlier
     const automatedAllowed = gapOver && hourOk && insideSendingWindow(s) && used.cold < s.dailyCap;
     const warmAllowed = cloud ? automatedAllowed : gapOver && hourOk && insideSendingWindow(s) && used.warm < s.warmDailyCap;
     // Follow-ups only go out on days with no new outreach (new candidates get the limited capacity first).
@@ -1093,10 +1134,12 @@ function startWorker(accountId) {
                 OR CASE WHEN NOT $6::boolean AND ${IS_WARM('$1', 'outbox.to_jid')} THEN $7::boolean
                         ELSE $2::boolean AND $8::int + ${RESERVED('$1', 'outbox', '$3', '$6')} < $9::int END)
            AND (note IS DISTINCT FROM 'follow-up' OR $4)
+           AND ($10::boolean OR source <> ALL($3) OR ${IS_REPLY('$1', 'outbox.to_jid')}
+                OR (note IS DISTINCT FROM 'follow-up' AND (expires_at IS NOT NULL OR priority > 0 OR ${IS_WARM('$1', 'outbox.to_jid')})))
            AND ($5 OR to_jid LIKE '%@g.us' OR NOT ${IS_NEW_CHAT('$1', 'outbox.to_jid')})
          ORDER BY ${SEND_ORDER('$1', 'outbox')} LIMIT 1 FOR UPDATE SKIP LOCKED)
        RETURNING *`,
-      [accountId, automatedAllowed, AUTOMATED, followupsAllowed, newChatsAllowed, cloud, warmAllowed, used.cold, s.dailyCap],
+      [accountId, automatedAllowed, AUTOMATED, followupsAllowed, newChatsAllowed, cloud, warmAllowed, used.cold, s.dailyCap, bulkHourOk],
     );
     if (!row) {
       // Wait for new work, or until the random gap ends, whichever is first.

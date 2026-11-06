@@ -546,6 +546,12 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
 | A draft on the phone is not pinned / the chat is not in the "Draft waiting" list | Activity warn "Drafts on the phone: could not …" (WhatsApp's own reason); `phone_drafts` pinned / pin_tries / labeled; try it by hand with `phone_action` on that number to see the error |
 | A draft never reached the phone | Is the number in config `phone_drafts`.accounts? Has the person ever written to that number (first messages to strangers stay in the hub)? Scheduled for later? Drafted by a bulk send (source ≠ mcp)? Older than 3 days? — `SELECT * FROM phone_drafts WHERE outbox_id = <id>` (no row = never offered) |
 | `phone_action` says "could not … myAppStateKey" (or similar) | the linked device has no app-state keys yet (pins, labels, unread, archive all need them): they arrive from the phone after it is online for a while; if it persists, re-link the number |
+| An interview reminder was "rejected — Expired" | it is a **draft** in approve mode with the interview time as "send by"; the same-day one is made 3 h before, so nobody approved it in time (4–5 Nov: 3 of 5 dropped). Not a capacity problem. Turn on "send without approval" for that list's pipeline (`set_pipeline autoSend`, owner decides) or approve reminders in the morning |
+| The AI seems not to know the owner's rules | the app cut the MCP instructions short (the desktop app keeps ~2,000 characters of 24,000). The first lines now tell it to call `get_playbook`; the text ends with "END OF HUB INSTRUCTIONS" — if the AI can't see that, it must read the playbook |
+| hub_overview says N chats wait but inbox_summary shows fewer | fixed 6 Nov: same 3 days as the overview, people on lists first, and a "NOT SHOWN: n more (per number)" line — call again with `account=` |
+| A chat shows as waiting with "[secretEncrypted]" | fixed 6 Nov: an encrypted edit/event update the linked device cannot read is no longer stored; old rows are ignored by the inbox |
+| Follow-ups to non-repliers never go on one number | by design they wait for a day with no first messages queued; with a big cold batch queued that is every day (guests: 10 waiting since 1 Nov behind 75 cold messages). Either finish/move the batch, or reject the stale follow-ups |
+| "📞 Missed voice call" although the owner spoke to them | not verified: a linked device may see only offer → terminate when the call is answered on the phone. Before changing the wording, log which statuses arrive (Render logs, "call event") for a call answered on the phone |
 | Something is slow / the database works hard | `inspect_data` on `pg_stat_statements` ordered by `total_exec_time` (see 10.12) |
 | Anything else | Render logs (pino JSON), then reproduce in a test: `npm test` runs the whole hub on PGlite with a fake WhatsApp and a fake Meta server |
 
@@ -615,3 +621,117 @@ Ideas taken from Perisclaw's dashboard (each conversation shown as a matter with
 - **Weekly review**: routine "Zenith hub – weekly review" (Sundays 18:00) — small read-only queries, one WhatsApp to the
   owner: what the AI did, guests won by source, hiring, coming due, carrying over.
 
+
+### 10.14 Debugging run, 6 Nov — evidence, what was fixed, what is open
+Method as in 10.11: live data first (read-only), then a size sweep of the AI tools, then the code, then a local browser
+pass on a throw-away database (phone and desktop widths).
+
+**Sending when the limits are not enough**
+- Evidence: the only messages lost in 10 days were 4 interview reminders "Expired" on the hiring number — all were
+  drafts nobody approved before the interview (see the recipe above). The number had spare capacity each time, so the
+  send order and the limits were not the cause. Open for the owner: auto-send reminders, or keep approving.
+- Checked and correct: send order (reply → yours → "send by" → warm → cold → nudges), slots reserved for cold "send by"
+  messages due within 24 h, the forecast ("NOT ENOUGH CAPACITY") — nothing at risk on any number on 6 Nov.
+- Known gaps, not changed (owner decisions, no loss seen yet): (1) the hourly limit (10) is shared, so a cold batch can
+  use the whole hour and a warm or "send by" message approved then waits up to an hour — only a deadline shorter than
+  that could be missed; (2) follow-ups starve while a cold batch is queued (recipe above); (3) the forecast does not
+  model the follow-up rules, so the "≈ when it goes" time of a follow-up is optimistic.
+- Fixed: closing a person now also cancels a waiting same-day reminder made for another list (`visit-reminder-today`
+  was missing from the cancel list in `lists.js`).
+
+**AI door: tokens and missed data** (measured with a size sweep on live data)
+- Server instructions: 24,613 characters (preamble 4.7 KB + main playbook + the open campaign's playbook). The desktop
+  app kept about the first 2,000 and cut the rest mid-sentence — the playbook never arrived. Fixed: the first lines
+  stand alone (overview → owner_feedback → get_playbook, drafts wait, incomplete answers) and the end is marked.
+- Tool list: 76 tools = 93.5 KB (≈ 23,000 tokens) loaded by every client that does not defer tools (claude.ai,
+  routines) — the biggest fixed cost of a session, far above any single answer. Fixed a first part: the campaign
+  filter's description, repeated on every tool, is one short line (93.5 → 86.9 KB). Still open: `send_message` alone is
+  5 KB; the long descriptions carry dated stories that belong in this manual (see "ideas").
+- `inbox_summary`: default window 24 h and 60 chats while the overview counted 3 days and 102 chats, with no word that
+  more existed. Fixed (3 days, lists first, "NOT SHOWN" line per number).
+- Phantom waiting chats: 56 `secretEncrypted` rows in 14 days stored as empty incoming messages. Fixed in `parse.js`
+  (skipped) and in the inbox query (old rows ignored).
+- Answers near the 16 KB budget: `list_tasks(campaign="all")` with no filter and `list_outbox(limit=300)` are cut (they
+  say so); `get_playbook` 15–20 KB. The routine calls (`list_tasks(for="ai", due_now=true)` 4 KB, `hub_overview`
+  5–9 KB, `owner_feedback` 6 KB) are fine.
+
+**UI** (local copy, 375 px and desktop): no script errors, no sideways scrolling on Board, Inbox, Drafts, Lists,
+Numbers. Fixed on Lists: the list name was squeezed into a narrow column beside the send button on a phone, and the two
+date boxes of a person (interview / follow-up) looked identical — each now carries its name.
+
+**Normal noise, not errors**: "Disconnected (428/503) — reconnecting in 2 s" about hourly per linked number (reconnects
+within seconds); Meta 131049 "held back to protect engagement" (retried after 25 h).
+
+
+### 10.15 Second pass, 6 Nov — the owner's decisions, and what was built
+The owner reviewed 10.14: drafts that are not sent are held back on purpose; some limits were chosen earlier to save AI
+tokens, but **a complete and accurate answer matters more than tokens**; non-repliers stay the lowest priority.
+
+**Checked against the build history first** (commit messages and earlier sessions — do this before calling a limit a bug)
+- The inbox tool's "lists only, 24 h, 60 chats" was deliberate (25 Oct: staff chats left alone, small answers). The owner
+  changed the scope on 6 Nov (every recent chat is sorted), so the fix in 10.14 stands: 3 days, lists first, and a
+  NOT SHOWN line instead of a silent cut.
+- The phantom "[secretEncrypted]" chats are NOT from the 2nd hiring number: 46 of 56 were on Dr Farooq's number, 9 on the
+  hotel number, 4 on Seema's. The 2nd hiring number is still in the hub (status stopped) with its 126 chats and 280
+  messages — nothing was lost.
+- Follow-ups to non-repliers: the rule "only on a day when no first messages use the limit" is what the owner wants.
+  Not changed. Consequence to manage in planning (now in the main playbook, rule 19): never queue more cold first
+  messages than a number sends in 2–3 days, or the follow-ups behind them never get a day.
+
+**Calls — what a linked device really knows** (Baileys 7.0.0-rc14 source: `Socket/messages-recv.js handleCall`,
+`Utils/generics.js getCallStatusFromNode`, `Utils/chat-utils.js processSyncAction`, `WAProto` `CallLogRecord`)
+- Live events are only signalling: offer → (accept | reject | timeout) → terminate. When the PHONE answers, this device
+  gets `accept` and its own leg ends within a second. The old code wrote "answered" only when accept→terminate was longer
+  than 0 s, so a call the owner took showed as "📞 Missed voice call" (or "answered, 0:01"): 38 "missed" and 4 "answered"
+  in two weeks. Now (`parse.js liveCallLine`): accepted = "📞 Voice call — answered on the phone" ("answered, m:ss" only
+  when this device saw the call end 5 s or more after the accept).
+- The real record is the phone's **call log**, which WhatsApp syncs to linked devices as an app-state action
+  (`callLogAction.callLogRecord`: result, duration, start time, incoming or not, the peer). Baileys decodes it and then
+  drops it with `logger.debug(…, 'unprocessable update')`. The hub listens on that logger call (`session.js`, the
+  `libLog.debug` hook → `onCallLog` → `parse.js callLogRow`): the line of the same call (`call-<id>`) is replaced by
+  the accurate one — "answered, 3:12" — and calls MADE from the phone appear for the first time ("📞 We called (voice) —
+  they answered, 1:15" / "— no answer"). Every record is logged at info level (`call log record`) with its raw values.
+- NOT VERIFIED LIVE: whether WhatsApp sends these records to this kind of linked device, and the unit of `duration`
+  (the code treats start time and duration as milliseconds when the start time is in milliseconds, else seconds). After
+  the first real call, read Render logs for "call log record" and correct `callLogRow` if a length looks 1000× off. If
+  no record ever arrives, the live line ("answered on the phone") is still right — only the length stays unknown.
+- What was SAID in a call is never available to the hub (calls are encrypted end to end and carry no transcript). See
+  the owner's notes on phone-side recording + local speech-to-text.
+
+**The tool menu** (`mcp.js CORE_TOOLS`, `MENU_GROUPS`, `more_tools`, `use_tool`)
+- The AI is shown 27 everyday tools (Board, inbox, drafts, lists, a person, files, data) instead of 76; the others are
+  one step away: `more_tools()` = the menu in groups, `more_tools(name=…)` = one tool in full with its parameters,
+  `use_tool(name, args)` runs it with the same checks. Like the dashboard: Board / Inbox / Drafts up front, the rest
+  behind ☰. Measured: tools/list 93.5 KB → about a third of that; instructions 24.6 KB → about 5 KB.
+- Every tool is still registered and answers when called by its name (old routine prompts, scripts, REST
+  `/api/tools/<name>`); only the LIST is cut (the `tools/list` handler is wrapped after registration — if the SDK's
+  private handler table changes, the full list is shown, and the "tool list" test fails to tell us).
+  `/mcp/<key>?tools=all` lists everything.
+- A read-only key gets the same menu limited to reading tools; `use_tool` cannot reach a writing tool (test).
+- New tool? Decide: everyday → add to `CORE_TOOLS`; otherwise add its name to a group in `MENU_GROUPS` (anything not in
+  a group shows under "Other").
+- The playbook is no longer part of the MCP instructions (it was sent there AND read again with `get_playbook`, and
+  some apps cut it off). The first lines of the instructions and the first line of `hub_overview` send the AI to
+  `get_playbook`. `get_playbook(campaign=…, campaign_only=true)` returns a campaign's rules without the 15 KB main
+  playbook.
+
+**Sending**
+- Hourly reserve (`outbox.js hourlyReserve`): 3 of the 10 an hour (30 %, at most 3) are kept for people who wrote before,
+  pipeline messages and anything with a "send by" time; cold first messages and nudges stop at 7. `queueStatus` says
+  "Hourly limit for first messages reached: n of 7 …". Replies inside 24 h never counted.
+- Deadline alert (`outbox.js alertWaitingDeadlines`, every 10 min with the capacity check): a DRAFT whose "send by"
+  time is within 3 hours and that is due gets one WhatsApp to the owner's alert phones ("⏳ … must go out soon and wait
+  for your approval", with a link to Drafts) and a warning in Activity; `outbox.deadline_alert_at` marks it told. This
+  is the answer to the lost interview reminders in 10.14 — they stay drafts (the owner's control) but no longer expire
+  unseen.
+- Found on the way: `notify.js trustedPhones` cleaned numbers with `/D/g` (a lost backslash — it removed the letter D,
+  not the non-digits). Fixed to `/\D/g`.
+
+**Recipes added by this pass**
+| Symptom | Look at |
+|---|---|
+| The AI says a tool does not exist | it is in the menu: `more_tools(search="…")`, then `use_tool`; or connect with `?tools=all` |
+| A call shows "answered on the phone" without a length | the phone's call log has not arrived (or never does on this device): Render logs "call log record" |
+| A call length looks 1000× too long or short | the unit guess in `callLogRow` — compare with the raw values in the "call log record" log line |
+| Cold messages wait although "last hour 7/10" | the hourly reserve: 3 are kept for warm and "send by" messages |
+| The owner got "⏳ … must go out soon" | a draft with a send-by time within 3 h is waiting for approval — approve or reject it in Drafts |

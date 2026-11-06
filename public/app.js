@@ -1666,8 +1666,8 @@
         h('div', { class: 'p-edit' },
           h('select', { 'aria-label': 'Stage', onchange: (e) => save(m, { stage: e.target.value }) },
             h('option', { value: '' }, 'Stage…'), Object.entries(STAGE_LABEL).map(([k, l]) => h('option', { value: k, selected: m.stage === k }, l))),
-          h('input', { type: 'datetime-local', 'aria-label': 'Interview date', title: 'Interview: when they will come', value: toLocalInput(m.visit_at), onchange: (e) => save(m, { visitAt: e.target.value ? new Date(e.target.value).toISOString() : '' }) }),
-          h('input', { type: 'datetime-local', 'aria-label': 'Follow up on', title: 'Follow up on (the AI messages them then; shows on the Board)', value: toLocalInput(m.followup_at), onchange: (e) => save(m, { followupAt: e.target.value ? new Date(e.target.value).toISOString() : '' }) }),
+          h('label', { class: 'p-date' }, 'Visit / interview on', h('input', { type: 'datetime-local', 'aria-label': 'Interview date', title: 'Interview: when they will come', value: toLocalInput(m.visit_at), onchange: (e) => save(m, { visitAt: e.target.value ? new Date(e.target.value).toISOString() : '' }) })),
+          h('label', { class: 'p-date' }, 'Follow up on', h('input', { type: 'datetime-local', 'aria-label': 'Follow up on', title: 'Follow up on (the AI messages them then; shows on the Board)', value: toLocalInput(m.followup_at), onchange: (e) => save(m, { followupAt: e.target.value ? new Date(e.target.value).toISOString() : '' }) })),
           h('input', { type: 'text', 'aria-label': 'Outcome', placeholder: 'Reason / outcome', value: m.outcome || '', onchange: (e) => save(m, { outcome: e.target.value }) })),
         m.followup_at ? h('div', { class: 'muted', style: 'font-size:12px' }, '🔁 Follow up ', fmtD(m.followup_at), m.followup_note ? ` — ${m.followup_note}` : '') : null,
         m.notes ? h('div', { class: 'muted', style: 'font-size:12px' }, m.notes) : null);
@@ -1700,7 +1700,7 @@
       h('p', { class: 'sub' }, 'Status comes from the real WhatsApp messages of the list\'s number. Stage and visit date are the funnel — set them here or ask the AI.'),
       rolePick,
       picker,
-      h('div', { class: 'row' }, h('h2', { class: 'grow', style: 'margin:0' }, sel.name), sendBtn,
+      h('div', { class: 'row' }, h('h2', { style: 'margin:0;flex:1 1 220px' }, sel.name), sendBtn, // on a phone the button drops below the name instead of squeezing it
         h('button', { class: 'btn small', title: 'Archive: this list never sends again and is hidden (e.g. imported only to check duplicates)', onclick: guard(async () => {
           const reason = prompt(`Archive ${sel.name}? It will never send again and its unsent messages are cancelled. Reason (optional):`, '');
           if (reason === null) return;

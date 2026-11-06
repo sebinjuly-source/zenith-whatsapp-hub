@@ -435,7 +435,7 @@ export async function updateMember(listId, phoneOrJid, { outcome, notes, stage, 
     // reminder) to them. A reply the AI drafted by hand stays, for the owner to decide.
     const dropped = await query(
       `UPDATE outbox SET status = 'rejected', error = $3 WHERE to_jid = $1 AND status IN ('draft','queued')
-         AND (list_id = $2 OR note IN ('follow-up','ask-date','visit-reminder')) RETURNING task_id, list_id`,
+         AND (list_id = $2 OR note IN ('follow-up','ask-date','visit-reminder','visit-reminder-today')) RETURNING task_id, list_id`,
       [jid, listId, `Not sent: candidate closed (${m.stage || m.outcome})`],
     );
     if (dropped.length) {

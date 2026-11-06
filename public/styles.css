@@ -200,7 +200,10 @@ table.list th { color: var(--ink-3); font-weight: 550; background: var(--panel-2
 .p-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .p-meta { font-size: 12px; }
 .p-reply { font-size: 13px; background: var(--panel-2); border-radius: 8px; padding: 6px 8px; }
-.p-edit { display: grid; grid-template-columns: 150px 210px 1fr; gap: 6px; }
+.p-edit { display: grid; grid-template-columns: 150px 210px 1fr; gap: 6px; align-items: end; }
+/* the two date boxes look the same (a phone shows no tooltip): each carries its name */
+.p-date { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--ink-3); min-width: 0; }
+.p-date input { width: 100%; }
 .p-edit select, .p-edit input { padding: 5px 8px; font-size: 13px; }
 .funnel { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
 .funnel .tag { cursor: pointer; font-size: 12.5px; padding: 3px 9px; }

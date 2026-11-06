@@ -97,6 +97,43 @@ test('edits, deletes and reactions update the original message', async () => {
   assert.equal((await query(`SELECT count(*)::int n FROM messages WHERE id IN ('E1','R1','X1')`))[0].n, 0);
 });
 
+test('an encrypted edit / event update the hub cannot read is not stored as a message', async () => {
+  // 6 Nov: 56 of these in two weeks were stored as empty incoming messages, so chats showed as "waiting" with "[secretEncrypted]"
+  await s.ingest([
+    { key: { remoteJid: PN, id: 'SE1', fromMe: false }, messageTimestamp: ts + 120, message: { secretEncryptedMessage: { targetMessageKey: { id: 'L2' }, encPayload: Buffer.from('x'), encIv: Buffer.from('y'), secretEncType: 2 } } },
+  ]);
+  assert.equal((await query(`SELECT count(*)::int n FROM messages WHERE id = 'SE1'`))[0].n, 0);
+});
+
+test('calls: answered on the phone is never "missed"; the phone\'s call log gives the real length and the calls we made', async () => {
+  const { liveCallLine, callLogRow } = await import('../src/wa/parse.js');
+  assert.equal(liveCallLine({ accepted: true, secs: 0, status: 'terminate' }), '📞 Voice call — answered on the phone');
+  assert.equal(liveCallLine({ accepted: true, secs: 1, status: 'terminate' }), '📞 Voice call — answered on the phone');
+  assert.equal(liveCallLine({ accepted: false, status: 'timeout' }), '📞 Missed voice call');
+  assert.equal(liveCallLine({ accepted: false, status: 'reject', video: true }), '📞 Declined video call');
+  // live events as a linked device gets them when the phone answers: offer → accept → terminate within a second
+  const t0 = new Date((ts + 200) * 1000);
+  await s.onCalls([{ id: 'C1', status: 'offer', from: PN, chatId: PN, date: t0 }]);
+  await s.onCalls([{ id: 'C1', status: 'accept', from: PN, chatId: PN, date: t0 }]);
+  await s.onCalls([{ id: 'C1', status: 'terminate', from: PN, chatId: PN, date: t0 }]);
+  assert.equal((await query(`SELECT body FROM messages WHERE id = 'call-C1'`))[0].body, '📞 Voice call — answered on the phone');
+  // …then the phone's call log arrives: same call, real length (start and length in milliseconds)
+  await s.onCallLog({ callId: 'C1', callResult: 0, isIncoming: true, callCreatorJid: PN, startTime: (ts + 200) * 1000, duration: 192000 });
+  const [c1] = await query(`SELECT body, from_me FROM messages WHERE id = 'call-C1'`);
+  assert.equal(c1.body, '📞 Voice call — answered, 3:12');
+  assert.equal((await query(`SELECT count(*)::int n FROM messages WHERE id = 'call-C1'`))[0].n, 1, 'one line per call');
+  // a call we made from the phone is only in the call log (seconds this time; result as a name)
+  await s.onCallLog({ callId: 'C2', callResult: 'CONNECTED', isIncoming: false, callCreatorJid: 'me@s.whatsapp.net', participants: [{ userJid: PN }], startTime: ts + 400, duration: 75 });
+  const [c2] = await query(`SELECT body, from_me, ts FROM messages WHERE id = 'call-C2'`);
+  assert.equal(c2.body, '📞 We called (voice) — they answered, 1:15');
+  assert.equal(c2.from_me, true);
+  assert.equal(Number(c2.ts), ts + 400);
+  assert.equal(callLogRow({ callId: 'C3', callResult: 2, isIncoming: false, participants: [{ userJid: PN }], startTime: ts }, null).body, '📞 We called (voice) — no answer');
+  assert.equal(callLogRow({ callId: 'C4', callResult: 4, isIncoming: true, callCreatorJid: PN, startTime: ts }, null).body, '📞 Missed voice call');
+  assert.equal(callLogRow({ callId: 'C5', callResult: 3, isIncoming: true, callCreatorJid: PN, startTime: ts }, null).body, '📞 Voice call — answered on the phone');
+  assert.equal(callLogRow({ callId: 'C6', groupJid: GROUP, isIncoming: true, callCreatorJid: PN }, null), null);
+});
+
 test('reads: chat list, search, contact tagging', async () => {
   const chats = await store.listChats('t', {});
   assert.equal(chats[0].jid, PN); // most recent first

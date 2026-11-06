@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS tasks_board ON tasks (account_id, status);
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS task_id BIGINT;
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS deadline_alert_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS outbox_task ON outbox (task_id);
 -- Same key = same request: a retried API call never sends twice.
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS idem_key TEXT;

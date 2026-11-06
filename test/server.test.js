@@ -79,7 +79,8 @@ before(async () => {
   await manager.create({ id: 'hotel', label: 'Hotel', purpose: 'guests' });
   await manager.create({ id: 'hiring', label: 'Hiring', purpose: 'candidates' });
   // Always inside the sending window for these tests.
-  const allDay = { sendStart: '00:00', sendEnd: '23:59', sendDays: [0, 1, 2, 3, 4, 5, 6] };
+  // …and a roomy hourly limit: these two numbers are shared by many tests (the hourly limit has its own tests and numbers)
+  const allDay = { sendStart: '00:00', sendEnd: '23:59', sendDays: [0, 1, 2, 3, 4, 5, 6], hourlyCap: 60 };
   await manager.update('hotel', { settings: allDay });
   await manager.update('hiring', { settings: { ...allDay, aiMode: 'approve' } });
   fake('hotel');
@@ -290,10 +291,28 @@ test('MCP: tool list and reading tools respond compactly', async () => {
     headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
   });
-  const names = (await res.json()).result.tools.map((t) => t.name);
-  for (const n of ['list_accounts', 'list_chats', 'get_messages', 'search_messages', 'bulk_send', 'list_tasks', 'create_task', 'approve_task', 'find_followups']) {
+  const listed = (await res.json()).result.tools;
+  const names = listed.map((t) => t.name);
+  // the AI is shown the everyday tools only (6 Nov: 76 tools were 93 KB ≈ 23,000 tokens in every session)
+  for (const n of ['hub_overview', 'get_playbook', 'inbox_summary', 'get_messages', 'send_message', 'list_tasks', 'create_task', 'update_list_member', 'more_tools', 'use_tool']) {
     assert.ok(names.includes(n), `missing tool ${n}`);
   }
+  assert.ok(names.length <= 30 && !names.includes('bulk_send') && !names.includes('set_followup'), names.join(','));
+  assert.ok(JSON.stringify(listed).length < 45000, `the listed tools are ${JSON.stringify(listed).length} characters`);
+  // …the rest is one step away: the menu names every hidden tool, shows one in full, and use_tool runs it
+  const menu = await mcp('more_tools');
+  for (const n of ['list_accounts', 'list_chats', 'search_messages', 'bulk_send', 'approve_task', 'find_followups', 'set_followup', 'hub_api']) assert.match(menu, new RegExp(`- ${n} — `), `menu lacks ${n}`);
+  assert.doesNotMatch(menu, /- send_message — /);
+  assert.match(await mcp('more_tools', { name: 'set_followup' }), /set_followup — [\s\S]*Parameters[\s\S]*list \(required\)/);
+  assert.match(await mcp('more_tools', { search: 'unsend' }), /unsend_message/);
+  assert.match(await mcp('use_tool', { name: 'list_accounts' }), /hotel \(default\)/);
+  assert.match(await mcp('use_tool', { name: 'get_messages', args: { account: 'hotel', chat: 'nobody here' } }), /Error: No chat matches/);
+  assert.match(await mcp('use_tool', { name: 'set_followup', args: {} }), /Error: set_followup: list: [\s\S]*list \(required\)/);
+  assert.match(await mcp('use_tool', { name: 'no_such_tool' }), /Error: No tool "no_such_tool"/);
+  // a hidden tool still answers when called by its name (older routine prompts), and ?tools=all lists everything
+  const all = await fetch(`${base}/mcp/k?tools=all`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) }).then((r) => r.json());
+  assert.ok(all.result.tools.length > 60 && all.result.tools.some((t) => t.name === 'bulk_send'));
   assert.match(await mcp('list_accounts'), /hotel \(default\)/);
   assert.match(await mcp('get_messages', { account: 'hotel', chat: 'nobody here' }), /Error: No chat matches/);
 });
@@ -842,7 +861,13 @@ test('playbook: stored in the hub, editable, and given to every AI client', asyn
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) });
   const init = await r.json();
   const { DEFAULT_PLAYBOOK } = await import('../src/playbook.js');
-  assert.ok(init.result.instructions.includes(DEFAULT_PLAYBOOK.split('\n')[0]), 'the playbook is in the MCP instructions');
+  // The playbook is NOT in the MCP instructions any more (6 Nov): some apps cut them after ~2,000 characters, and the
+  // text was paid for twice (here and via get_playbook). The first lines send the AI to get_playbook and the tool menu;
+  // hub_overview repeats where the rules are.
+  assert.ok(!init.result.instructions.includes(DEFAULT_PLAYBOOK.split('\n')[0]));
+  assert.match(init.result.instructions.slice(0, 900), /hub_overview.*owner_feedback.*get_playbook.*NOT in these instructions.*more_tools.*use_tool/s);
+  assert.ok(init.result.instructions.length < 8000, `instructions are ${init.result.instructions.length} characters`);
+  assert.match(await mcp('hub_overview', { campaign: 'all' }), /RULES: get_playbook/);
   assert.equal(await mcp('get_playbook'), DEFAULT_PLAYBOOK);
   await call('PUT', '/api/playbook', { text: 'RULE: always be polite.' });
   assert.equal(await mcp('get_playbook'), 'RULE: always be polite.');
@@ -1863,6 +1888,18 @@ test('funnel stages per campaign (hiring, sales, win-back, own); closed custom s
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300077@s.whatsapp.net','IN3',false,$1,'text','They are constantly calling me')`, [now - 200]);
   assert.doesNotMatch(await mcp('inbox_summary', { campaign: 'all', include_unlisted: true }), /constantly calling/);
   await call('PUT', '/api/alerts', { phones: '' });
+  // an unreadable edit / event update ("secretEncrypted", no text) after our answer is not "they are waiting" (6 Nov)
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300055@s.whatsapp.net','O55',true,$1,'text','Yes, a room is free'),
+    ('stg','919833300055@s.whatsapp.net','S55',false,$2,'secretEncrypted',NULL)`, [now - 500, now - 400]);
+  assert.doesNotMatch(await mcp('inbox_summary', { campaign: 'all' }), /919833300055/);
+  // the default looks back 3 days like hub_overview (was 24 h), and what does not fit is counted — never dropped silently
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300066@s.whatsapp.net','IN66',false,$1,'text','Two days old question')`, [now - 2 * 86400]);
+  assert.match(await mcp('inbox_summary', { campaign: 'all', account: 'stg' }), /Two days old question/);
+  const capped = await mcp('inbox_summary', { campaign: 'all', account: 'stg', limit: 1 });
+  assert.match(capped, /the first 1 shown \(people on lists first\)/);
+  assert.match(capped, /NOT SHOWN: \d+ more chat\(s\) \(stg \d+\)/);
+  assert.match(capped, /Asha/, 'the person on a list comes before people on no list');
+  assert.doesNotMatch(capped, /room for 2 nights/);
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'stg' AND status IN ('draft','queued')`);
   await manager.remove('stg');
 });
@@ -1874,7 +1911,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
     const text = j.result?.content?.[0]?.text ?? JSON.stringify(j.error);
     return { text, bad: !!j.error || !!j.result?.isError || /^Error:/.test(text) };
   };
-  const list = await (await post({ jsonrpc: '2.0', id: ++mcpId, method: 'tools/list', params: {} })).json();
+  const list = await (await fetch(`${base}/mcp/k?tools=all`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++mcpId, method: 'tools/list', params: {} }) })).json();
   const names = list.result.tools.map((t) => t.name);
   await manager.create({ id: 'mcpall', label: 'McpAll' });
   fake('mcpall');
@@ -1980,6 +2017,8 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('message_timeline', { account: 'mcpall', q: P });
   await run('create_meta_template', { account: 'mcpall', name: 'x_test', body: 'Hi {{1}} there', examples: ['A'] });
   await run('delete_meta_template', { account: 'mcpall', name: 'x_test' });
+  await run('more_tools', {});
+  await run('use_tool', { name: 'list_accounts' });
   assert.deepEqual(names.filter((n) => !done[n]), [], 'every MCP tool is exercised here');
 });
 
@@ -2202,6 +2241,13 @@ test('interview reminders: the evening before and 3 h before on the day; none ri
   // the interview card says both reminders, and logs the one sent
   const [card] = await query(`SELECT id, details FROM tasks WHERE ref = $1 AND status NOT IN ('done','cancelled')`, [`visit:${l.id}:${J(1)}`]);
   assert.ok((await (await import('../src/tasks.js')).taskLog(card.id)).some((x) => /Reminder \(3 h before\) sent/.test(x.text)));
+  // closing a person cancels a waiting same-day reminder too, also one made for another list (6 Nov: only the
+  // evening-before note was in the cancel list)
+  await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, priority, note) VALUES ('rem1', $1, '{"text":"See you at 3"}', 'campaign', 'draft', 5, 'visit-reminder-today')`, [J(4)]);
+  await listsMod.updateMember(l.id, J(4), { stage: 'not_interested' });
+  const [gone] = await query(`SELECT status, error FROM outbox WHERE to_jid = $1 AND note = 'visit-reminder-today'`, [J(4)]);
+  assert.equal(gone.status, 'rejected');
+  assert.match(gone.error, /candidate closed/);
 });
 
 test('person_context and cards show the chat as it is now; settings: allowed ones change, owner-only ones are refused', async () => {
@@ -2256,13 +2302,17 @@ test('campaign playbooks: main + one per campaign; the AI sees the names, reads 
   // one campaign's rules, case-insensitive; a missing one says so
   assert.match(await mcp('get_playbook', { campaign: 'corporate SALES' }), /CAMPAIGN PLAYBOOK — Corporate sales[\s\S]*never mention prices/);
   assert.match(await mcp('get_playbook', { campaign: 'Guests' }), /No playbook for campaign "Guests" yet/);
+  // campaign_only: just that campaign's rules (the main playbook was read once already — it is not repeated)
+  const only = await mcp('get_playbook', { campaign: 'Corporate sales', campaign_only: true });
+  assert.match(only, /^=== CAMPAIGN PLAYBOOK — Corporate sales[\s\S]*never mention prices/);
+  assert.ok(!only.includes(main.split('\n')[0]), 'the main playbook is not repeated');
   // focusing on a campaign brings its playbook in
   assert.match(await mcp('hub_overview', { campaign: 'Corporate sales' }), /CAMPAIGN PLAYBOOK — Corporate sales[\s\S]*ask for a meeting/);
   // the MCP instructions name the campaign playbooks (not their full text)
   const r = await fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) });
   const ins = (await r.json()).result.instructions;
-  assert.match(ins, /CAMPAIGN PLAYBOOKS \(own rules per campaign.*\): .*Corporate sales, .*Win-back/m);
+  assert.match(ins, /PLAYBOOKS: get_playbook returns the main playbook; each campaign has its own.*: .*Corporate sales, .*Win-back/m);
   assert.doesNotMatch(ins, /never mention prices/);
   await call('DELETE', '/api/playbooks/Win-back');
   await call('DELETE', '/api/playbooks/Corporate%20sales');
@@ -3053,6 +3103,13 @@ test('read-only key: reads (REST GET, reading tools, MCP) work; sending or chang
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) }).then((r) => r.json());
   const names = list.result.tools.map((x) => x.name);
   assert.ok(names.includes('list_tasks') && !names.includes('send_message') && !names.includes('update_task'), names.join(','));
+  // the menu of a read-only key holds reading tools only, and use_tool cannot reach a tool that changes anything
+  const roCall = async (name, args) => (await fetch(`${base}/mcp/${ro}`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: args } }) }).then((r) => r.json())).result.content[0].text;
+  assert.match(await roCall('use_tool', { name: 'list_accounts' }), /hotel/);
+  assert.match(await roCall('use_tool', { name: 'bulk_send', args: {} }), /No tool "bulk_send" for a read-only key/);
+  assert.doesNotMatch(await roCall('more_tools', {}), /bulk_send|save_playbook|update_settings/);
+  assert.equal((await call('POST', '/api/tools/use_tool', { name: 'send_message', args: { account: 'hotel', to: '9733300001', text: 'x' } }, { key: ro })).status, 403);
   // the login page does not accept it (the dashboard needs the main key)
   assert.equal((await call('POST', '/login', { key: ro }, { key: null })).status, 401);
   await call('DELETE', '/api/keys/readonly');
@@ -3106,4 +3163,52 @@ test('no double pitch: one waiting AI message per person, and a queued one is he
   // approved again after reading their reply: it goes out
   assert.equal((await call('POST', `/api/outbox/${held.id}/approve`, {})).status, 200);
   await until(() => sent.slice(before).some((x) => x.content.text === 'Old pitch'), 20000);
+});
+
+test('hourly limit: 3 of 10 an hour are kept for people who wrote before and "send by" messages; cold first messages stop at 7', async () => {
+  await manager.create({ id: 'hr1', label: 'Hr1' });
+  fake('hr1');
+  await manager.update('hr1', { settings: { aiMode: 'auto', sendStart: '00:00', sendEnd: '23:59', sendDays: [0, 1, 2, 3, 4, 5, 6], hourlyCap: 10, dailyCap: 35 } });
+  const J = (n) => `91975500000${n}@s.whatsapp.net`;
+  // 7 automated first messages went out in the last hour
+  for (let i = 0; i < 7; i++) {
+    await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, sent_at, is_reply, is_warm) VALUES ('hr1', $1, '{"text":"hi"}', 'mcp', 'sent', now() - interval '10 minutes', false, false)`, [`91975511110${i}@s.whatsapp.net`]);
+  }
+  // one person who wrote two days ago (warm, not a 24 h reply), one stranger, one stranger with a "send by" time
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('hr1', $1, 'W1', false, $2, 'text', 'Please share details')`, [J(1), Math.floor(Date.now() / 1000) - 2 * 86400]);
+  const before = sent.length;
+  await mcp('send_message', { account: 'hr1', to: '9755000002', text: 'Cold hello', campaign: 'all' });
+  await mcp('send_message', { account: 'hr1', to: '9755000001', text: 'Here are the details', campaign: 'all' });
+  await mcp('send_message', { account: 'hr1', to: '9755000003', text: 'Happy Deepavali', expires_at: new Date(Date.now() + 6 * 3600e3).toISOString(), campaign: 'all' });
+  await until(() => sent.slice(before).filter((m) => m.account === 'hr1').length >= 2, 8000);
+  await sleep(300);
+  const went = sent.slice(before).filter((m) => m.account === 'hr1').map((m) => m.jid);
+  assert.deepEqual(went.sort(), [J(1), J(3)].sort(), 'the warm reply and the wish went; the cold first message waits');
+  assert.equal((await query(`SELECT status FROM outbox WHERE account_id = 'hr1' AND to_jid = $1`, [J(2)]))[0].status, 'queued');
+  assert.match((await outbox.queueStatus('hr1')).reason, /Hourly limit for first messages reached: 9 of 7 .*3 of the 10 an hour are kept/);
+  // once the hour has room again, the cold one goes
+  await query(`UPDATE outbox SET sent_at = now() - interval '2 hours' WHERE account_id = 'hr1' AND status = 'sent'`);
+  await until(async () => (await query(`SELECT status FROM outbox WHERE account_id = 'hr1' AND to_jid = $1`, [J(2)]))[0].status === 'sent', 20000);
+  await manager.remove('hr1');
+});
+
+test('a draft with a "send by" time that still waits for approval: the owner is told on WhatsApp once, 3 h before', async () => {
+  await manager.create({ id: 'dl1', label: 'Dl1' });
+  fake('dl1');
+  await manager.update('dl1', { settings: { aiMode: 'approve', sendStart: '00:00', sendEnd: '23:59', sendDays: [0, 1, 2, 3, 4, 5, 6] } });
+  await call('PUT', '/api/alerts', { phones: '9733399999' });
+  const soon = await mcp('send_message', { account: 'dl1', to: '9766000001', text: 'Reminder: your interview is at 3 pm today', expires_at: new Date(Date.now() + 2 * 3600e3).toISOString(), campaign: 'all' });
+  await mcp('send_message', { account: 'dl1', to: '9766000002', text: 'Happy New Year', expires_at: new Date(Date.now() + 30 * 3600e3).toISOString(), also_send: true, campaign: 'all' });
+  await mcp('send_message', { account: 'dl1', to: '9766000003', text: 'No deadline here', campaign: 'all' });
+  const before = sent.length;
+  assert.equal(await outbox.alertWaitingDeadlines('dl1'), 1, 'only the draft due within 3 h');
+  const alert = await until(() => sent.slice(before).find((m) => m.jid === '919733399999@s.whatsapp.net'));
+  assert.match(alert.content.text, /1 draft on "Dl1" must go out soon and wait for your approval/);
+  assert.match(alert.content.text, /9766000001 — "Reminder: your interview is at 3 pm today" — send by /);
+  assert.equal(await outbox.alertWaitingDeadlines('dl1'), 0, 'told once per draft');
+  assert.match((await call('GET', '/api/events?problems=1&limit=20')).data.map((e) => e.text).join('\n'), /1 draft with a "send by" time within 3 h wait for approval \(#\d+\) — owner alerted/);
+  assert.match(soon, /#\d+/);
+  await call('PUT', '/api/alerts', { phones: '' });
+  await query(`UPDATE outbox SET status = 'rejected' WHERE account_id = 'dl1' AND status IN ('draft','queued')`);
+  await manager.remove('dl1');
 });

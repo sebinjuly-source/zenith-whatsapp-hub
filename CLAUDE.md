@@ -27,6 +27,9 @@ Node ≥ 20 ESM · Express 5 · Baileys 7 · Postgres (Supabase) / PGlite locall
 - Every schema change is idempotent SQL in `src/db.js` (`CREATE … IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`).
 - Every MCP tool: zod input, the campaign filter (`campaign=`, "all" = every campaign), answers short (`budget()`,
   16 KB) with the most important lines first. New tool → add it to the "every tool answers" toolbox test.
+- The AI is shown only `CORE_TOOLS` (src/mcp.js); every other tool sits in the menu (`more_tools` / `use_tool`). A new tool goes
+  into `CORE_TOOLS` only if every session needs it; otherwise add its name to a group in `MENU_GROUPS`. Keep descriptions
+  short — the tool list is paid for in every session (6 Nov: 76 tools were 93 KB).
 - `campaign=` on every tool is only a FILTER (routines pass "all" everywhere). Never give a tool a parameter named
   `campaign` that changes data (1 Nov: `update_task` used it to move cards and re-tagged 23 cards to "all").
 - Files people send must never render as a page on the hub's address: serve them through `sendStoredFile()`.

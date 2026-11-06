@@ -35,7 +35,7 @@ export async function setAlertPhones(phones) {
 export async function trustedPhones() {
   const [r] = await query(`SELECT value FROM config WHERE key = 'trusted_recipients'`).catch(() => []);
   const list = r ? r.value?.phones || [] : await alertPhones();
-  return [...new Set(list.map((p) => String(p).replace(/D/g, '')).filter((p) => p.length >= 8).map((p) => toJid(p).split('@')[0]))];
+  return [...new Set(list.map((p) => String(p).replace(/\D/g, '')).filter((p) => p.length >= 8).map((p) => toJid(p).split('@')[0]))];
 }
 
 export async function setTrustedPhones(phones) {

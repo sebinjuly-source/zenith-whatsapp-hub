@@ -94,6 +94,9 @@ export function parseMessage(msg) {
       'encReactionMessage',
       'pinInChatMessage',
       'botInvokeMessage',
+      // an encrypted edit / event update the linked device can't read: not something the person "said" (6 Nov: 56 in
+      // two weeks were stored as empty incoming messages — chats showed as waiting with "[secretEncrypted]")
+      'secretEncryptedMessage',
     ].includes(type)
   ) {
     return { kind: 'skip' };
@@ -196,4 +199,51 @@ export function mediaMessageFromRow(row) {
       },
     },
   };
+}
+
+const mmss = (secs) => `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+const cap = (s) => s[0].toUpperCase() + s.slice(1);
+
+/**
+ * The chat line for a call as a linked device sees it live (the 'call' events). A linked device is told that a call
+ * was accepted but not how long it lasted: when the phone answers, this device's own leg ends within a second. So an
+ * accepted call is "answered on the phone" — never "missed" (6 Nov: a call the owner took showed as "Missed voice
+ * call", or as "answered, 0:01"). The real length comes later from the phone's call log (callLogRow).
+ */
+export function liveCallLine({ accepted, secs = 0, status, video = false }) {
+  const kind = video ? 'video' : 'voice';
+  // a real length only when this device saw the call end some time after it was accepted
+  if (accepted) return secs >= 5 ? `📞 ${cap(kind)} call — answered, ${mmss(secs)}` : `📞 ${cap(kind)} call — answered on the phone`;
+  return `📞 ${status === 'reject' ? 'Declined' : 'Missed'} ${kind} call`;
+}
+
+const CALL_RESULT = ['CONNECTED', 'REJECTED', 'CANCELLED', 'ACCEPTEDELSEWHERE', 'MISSED', 'INVALID', 'UNAVAILABLE', 'UPCOMING', 'FAILED', 'ABANDONED', 'ONGOING'];
+/**
+ * A record of the phone's own call log (WhatsApp syncs it to linked devices; Baileys decodes it and drops it) → the
+ * row for the chat: who, when, incoming or outgoing, the outcome and the real length. Calls the owner MADE from the
+ * phone only ever show up here. Returns null for group calls, call links and records without a person.
+ * Units: WhatsApp stores start time and length in the same unit — milliseconds when the start time is in
+ * milliseconds, else seconds.
+ */
+export function callLogRow(rec, myJid) {
+  if (!rec?.callId || rec.groupJid || rec.isCallLink) return null;
+  const mine = (j) => !!j && !!myJid && String(j).split('@')[0].split(':')[0] === String(myJid).split('@')[0].split(':')[0];
+  const incoming = !!rec.isIncoming;
+  const peer = incoming ? rec.callCreatorJid : (rec.participants || []).map((p) => p.userJid).find((j) => j && !mine(j));
+  if (!peer || mine(peer)) return null;
+  const startRaw = rec.startTime ? toNumber(rec.startTime) : 0;
+  const ms = startRaw > 1e11;
+  const ts = startRaw ? Math.floor(ms ? startRaw / 1000 : startRaw) : Math.floor(Date.now() / 1000);
+  const secs = Math.round((rec.duration ? toNumber(rec.duration) : 0) / (ms ? 1000 : 1));
+  const result = typeof rec.callResult === 'number' ? CALL_RESULT[rec.callResult] : String(rec.callResult || '').toUpperCase();
+  const kind = rec.isVideo ? 'video' : 'voice';
+  const spoke = result === 'CONNECTED' || result === 'ACCEPTEDELSEWHERE' || (secs > 0 && !['MISSED', 'REJECTED', 'CANCELLED'].includes(result));
+  let body;
+  if (incoming) {
+    body = spoke ? `📞 ${cap(kind)} call — answered${secs ? `, ${mmss(secs)}` : ' on the phone'}`
+      : `📞 ${result === 'REJECTED' ? 'Declined' : 'Missed'} ${kind} call`;
+  } else {
+    body = spoke ? `📞 We called (${kind}) — they answered${secs ? `, ${mmss(secs)}` : ''}` : `📞 We called (${kind}) — no answer`;
+  }
+  return { id: `call-${rec.callId}`, peer, fromMe: !incoming, ts, body, spoke, secs };
 }
