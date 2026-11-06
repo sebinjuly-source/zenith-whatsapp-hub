@@ -110,7 +110,15 @@ and the open tabs are remembered on that device after a refresh. Less-used parts
 
 - **Templates:** `chef_hiring_v3` (image poster + text incl. free stay & food + buttons; `{{1}}` first name,
   `{{2}}` salary range), `job_followup`, `visit_date_request`, `visit_reminder`, `chef_job_invite`. Submit new ones
-  from Templates → "Submit a new template", or ask the AI (`create_meta_template`).
+  from Templates → "Submit a new template" (write it like a normal message: `{name}`, `{role}` become `{{1}}`,
+  `{{2}}` with example values; the name is made from the text if left empty), or ask the AI (`create_meta_template`
+  — it also creates a missing template by itself when a send you asked for needs one; `delete_meta_template`).
+- **After the 24 h window (6 Nov):** free text — your own "?", an approved draft, drafts moved here from a linked
+  number — goes inside the approved `continue_chat` template ("Namaste {{1}} 🙏 Zenith Suites se message: {{2}} …",
+  marketing ≈ ₹0.86): first name + the text on one line (Meta refuses new lines). Files can't ride in it. Change the
+  template per number with the account setting `continueTemplate`. Code: `outbox.continueInTemplate`.
+- **Tap-to-choose lists:** `send_message(choices=[…up to 10])` → a "Choose" list on Meta (e.g. slots); linked
+  numbers get a numbered list to reply to. 2–3 answers → `buttons`.
 - **Poster:** `https://zenith-whatsapp-hub.onrender.com/hiring/chef-hiring-stay-food.jpg` (uploaded to Meta once,
   reused).
 - **Health check** (card button / `meta_health_check`): token, registration, can-send status and why (e.g.
@@ -344,8 +352,9 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
 1. Everything is a row in `outbox`. `enqueue` (one message) / `bulkSend` / `lists.sendToList` insert rows.
    `source`: dashboard/api = yours (sent at once, priority 10); mcp/campaign = AI and bulk (drafts in approve
    mode); rule = auto-replies (pre-approved). Each row stores its campaign in `outbox.role`.
-2. Drafts wait for **approve** (`approve`, `approveAll`, `approveTask`). Approving a free-text draft on a Meta
-   number after the 24 h window closed is refused with the reason.
+2. Drafts wait for **approve** (`approve`, `approveAll`, `approveTask`). A free-text draft on a Meta number
+   approved after the 24 h window closed is wrapped in the `continue_chat` template; without an approved one it is
+   refused with the reason.
 3. The sender loop (`startWorker → tick`) claims ONE row atomically (`FOR UPDATE SKIP LOCKED`) in `SEND_ORDER`:
    rank (`SEND_RANK`: 1 reply in 24 h · 2 yours (priority ≥ 10) · 3 has `expires_at` · 4 warm (`IS_WARM`: they
    have ever written to this number) or pipeline (priority 5) · 5 cold · 6 `note = 'follow-up'` nudge), then
@@ -424,10 +433,19 @@ runs follow-ups and pipeline steps for that number (`session.status === 'open'`)
 · `templates`, `rules`, `directory` (Contacts book) · `campaigns` · `config` (playbook, playbook:<campaign>, focus, defaults, alerts, prices, digest) · `events`
 (activity log, pruned after 30/365 days) · `meta_events` (Meta webhooks, 14 days) · `wa_templates` · `jobs`.
 
-### 10.9b Morning summary, call results, data growth
+### 10.9b Morning and evening briefings, call results, data growth
 - `src/digest.js`: every minute the server holding the sending number checks the time; once after `time` (within 6 h)
-  it claims today in `config.digest.lastDate` (atomic — never twice) and sends the summary to the alert phone(s).
-  Settings → ☀️ Morning summary (time, number, "Send a test now").
+  it claims today in `config.digest.lastDate` (atomic — never twice) and sends the morning briefing to the alert
+  phone(s); after `eveningTime` (default 20:00, "" = off) the evening one (`lastEvening`). Written the way Perisclaw
+  briefs (6 Nov): "Morning, Sir." + one line, numbered items "Name (+number) → next step"; *Done today* / *Tomorrow*
+  in the evening. Settings → ☀️ Morning summary (time, number, "Send a test now").
+- **Stale items sink (6 Nov):** a card untouched 3+ days after it was due goes last — Board (folded "🕰️ left for a
+  while"), `listTasks` order (so hub_overview / the AI) and the briefing's short "Left for a while" line.
+  `upsertRefTask` writes only when something changed, so `updated_at` really means "last touched".
+- **Referral call cards** put the referred person's number first (title + details): the 📞 button calls the first
+  number on a card, which used to ring the referrer.
+- **Every recent chat is sorted (6 Nov):** `inbox_summary` includes people on no list by default, and hub_overview
+  shows "INBOX (not on a list)"; the main playbook (rule 20) says what to do with each.
 - `src/calls.js`: `recordCallResult(card, result)` — the person comes from the card ref or a phone number in it.
 - Every MCP answer is capped (~16,000 characters, cut at a line, says what was left out). Growth plan:
   `docs/DATA-GROWTH.md`.

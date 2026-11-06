@@ -87,6 +87,14 @@ export async function createTemplate(wabaId, { name, language = 'en', category =
   return { name, language, ...r };
 }
 
+/** Delete a template at Meta (all its languages) and from the local copy. Messages already sent are not affected. */
+export async function deleteTemplate(wabaId, name) {
+  if (!/^[a-z0-9_]+$/.test(String(name || ''))) throw new Error('Give the template name (lowercase_with_underscores)');
+  await graph(`${wabaId}/message_templates`, { method: 'DELETE', params: { name } });
+  await query('DELETE FROM wa_templates WHERE waba_id = $1 AND name = $2', [wabaId, name]);
+  return { name, deleted: true };
+}
+
 export async function listWaTemplates(wabaId, { approvedOnly = false } = {}) {
   const rows = await query(
     `SELECT name, language, status, category, components, updated_at FROM wa_templates WHERE waba_id = $1

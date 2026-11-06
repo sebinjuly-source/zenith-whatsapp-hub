@@ -354,7 +354,13 @@ export class CloudSession extends Session {
         const body = String(content.text || '');
         if (!body.trim()) throw new Error('Empty message');
         const buttons = (content.buttons || []).map((b) => String(b).trim()).filter(Boolean).slice(0, 3);
-        if (buttons.length) {
+        const choices = (content.choices || []).map((b) => String(b).trim()).filter(Boolean).slice(0, 10);
+        if (choices.length) {
+          // A tap-to-choose list (up to 10 rows, 24 characters each, e.g. appointment slots) behind one button (6 Nov)
+          Object.assign(msg, { type: 'interactive', interactive: { type: 'list', body: { text: body.slice(0, 1024) },
+            action: { button: String(content.choicesButton || 'Choose').slice(0, 20), sections: [{ title: 'Options', rows: choices.map((t, i) => ({ id: `c${i + 1}`, title: t.slice(0, 24) })) }] } } });
+          row = { type: 'text', body: `${body}\n[${choices.join(' | ')}]` };
+        } else if (buttons.length) {
           // Tap-to-reply buttons (max 3, 20 characters each) — the tap comes back as their reply.
           Object.assign(msg, { type: 'interactive', interactive: { type: 'button', body: { text: body.slice(0, 1024) },
             action: { buttons: buttons.map((t, i) => ({ type: 'reply', reply: { id: `b${i + 1}`, title: t.slice(0, 20) } })) } } });

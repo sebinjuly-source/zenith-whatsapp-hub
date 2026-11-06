@@ -41,11 +41,14 @@ async function main() {
   setTimeout(tick, 60 * 1000).unref();
   // WhatsApp alerts to ALERT_PHONE when a number is logged out / disconnected for 15+ min
   startAlerts(manager, (from, to, text) => enqueueAlert({ account: from, to, payload: { text }, source: 'api', note: 'connection alert' }));
-  // Morning summary to the owner (once a day, after the set time, from the server holding the sending number)
+  // Morning and evening briefings to the owner (once a day each, after the set time, from the server holding the sending number)
   const { runDigest } = await import('./digest.js');
   setInterval(() => {
-    runDigest(manager, (from, to, text) => enqueueAlert({ account: from, to, payload: { text }, source: 'api', note: 'morning summary' }))
-      .catch((err) => logger.warn({ err: err.message }, 'morning summary failed'));
+    for (const evening of [false, true]) {
+      const note = evening ? 'evening briefing' : 'morning summary';
+      runDigest(manager, (from, to, text) => enqueueAlert({ account: from, to, payload: { text }, source: 'api', note }), { evening })
+        .catch((err) => logger.warn({ err: err.message }, `${note} failed`));
+    }
   }, 60 * 1000).unref();
 
   // Keep copies of the last 2 weeks' files people sent, before WhatsApp's links expire (once, a few minutes after start)

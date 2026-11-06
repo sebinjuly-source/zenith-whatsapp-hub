@@ -485,6 +485,13 @@ test('tap-to-reply buttons inside the window; WEBP image goes as a document; lin
   await hook({ messages: [{ from: '919876500001', id: 'wamid.TAP', timestamp: String(now()), type: 'interactive', interactive: { type: 'button_reply', button_reply: { id: 'b1', title: 'Haan, aaunga' } } }] });
   const [tap] = await query(`SELECT body FROM messages WHERE account_id = 'api' AND id = 'wamid.TAP'`);
   assert.equal(tap.body, 'Haan, aaunga');
+  // more than 3 answers: a tap-to-choose list (e.g. appointment slots), the choice comes back as their reply
+  r = await call('POST', '/api/send', { account: 'api', to: '9876500001', text: 'Kab aa sakte hain?', choices: ['Sat 11 am', 'Sat 6 pm', 'Mon 11 am', 'Mon 6 pm'], choicesButton: 'Pick a time' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  m = sentMessages().at(-1).body;
+  assert.deepEqual([m.interactive.type, m.interactive.action.button, m.interactive.action.sections[0].rows.map((x) => x.title).join(',')], ['list', 'Pick a time', 'Sat 11 am,Sat 6 pm,Mon 11 am,Mon 6 pm']);
+  await hook({ messages: [{ from: '919876500001', id: 'wamid.PICK', timestamp: String(now()), type: 'interactive', interactive: { type: 'list_reply', list_reply: { id: 'c2', title: 'Sat 6 pm' } } }] });
+  assert.equal((await query(`SELECT body FROM messages WHERE account_id = 'api' AND id = 'wamid.PICK'`))[0].body, 'Sat 6 pm');
   r = await call('POST', '/api/send', { account: 'api', to: '9876500001', attachment: { base64: Buffer.from('RIFFxxxxWEBP').toString('base64'), fileName: 'dish.webp', mimetype: 'image/webp', as: 'image' } });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   m = sentMessages().at(-1).body;
@@ -557,4 +564,38 @@ test('a template still in Meta review can be scheduled: it waits (not failed) an
   outbox.wakeAccount('api');
   await until(async () => (await query(`SELECT count(*)::int n FROM outbox WHERE task_id = $1 AND status = 'sent'`, [b.data.task.id]))[0].n === 3, 10000);
   assert.ok(Date.now() - t0 < 5000, 'three template messages in under 5 s');
+});
+
+test('window closed: free text goes inside the approved "continue_chat" template — own sends, approved drafts and drafts moved to the Meta number', async () => {
+  // without the template: refused with the reason (as before)
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('api', '919876500501@s.whatsapp.net', 'wamid.C1', false, $1, 'text', 'Haan interested')`, [now() - 30 * 3600]);
+  let r = await call('POST', '/api/send', { account: 'api', to: '9876500501', text: '?' });
+  assert.match(r.data.error, /24-hour reply window .* closed/);
+  templates.push({ id: 't10', name: 'continue_chat', language: 'en', status: 'APPROVED', category: 'MARKETING',
+    components: [{ type: 'BODY', text: 'Namaste {{1}} 🙏 Zenith Suites se message: {{2}} Reply here to continue. – Zenith Suites' }] });
+  await call('GET', '/api/accounts/api/wa-templates?sync=1');
+  await query(`INSERT INTO contacts (account_id, jid, phone, name) VALUES ('api', '919876500501@s.whatsapp.net', '919876500501', 'Ramesh Kumar') ON CONFLICT (account_id, jid) DO UPDATE SET name = EXCLUDED.name`);
+  // 1. the owner's own "?" from the inbox
+  r = await call('POST', '/api/send', { account: 'api', to: '9876500501', text: 'Kab aa sakte ho?\nLocation bhej raha hoon' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  await until(async () => sentMessages().some((m) => m.body.template?.name === 'continue_chat'));
+  const sent = sentMessages().filter((m) => m.body.template?.name === 'continue_chat').at(-1).body.template.components[0].parameters.map((p) => p.text);
+  assert.deepEqual(sent, ['Ramesh', 'Kab aa sakte ho? · Location bhej raha hoon'], 'first name + the text on one line (Meta refuses new lines)');
+  // 2. an AI draft approved after the window closed
+  const [d] = await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status) VALUES ('api', '919876500501@s.whatsapp.net', '{"text":"Interview kal 11 baje?"}', 'mcp', 'draft') RETURNING id`);
+  r = await call('POST', `/api/outbox/${d.id}/approve`, {});
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const [row] = await query(`SELECT payload FROM outbox WHERE id = $1`, [d.id]);
+  assert.equal(row.payload.waTemplate.name, 'continue_chat');
+  assert.match(row.payload.text, /^Namaste Ramesh 🙏 Zenith Suites se message: Interview kal 11 baje\?/, 'the draft shows what they will read');
+  // 3. a draft moved from a linked number to the Meta number (outside the window) now moves, wrapped
+  const [m] = await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status) VALUES ('phone', '919876500077@s.whatsapp.net', '{"text":"hi again"}', 'mcp', 'draft') RETURNING id`);
+  r = await call('POST', '/api/outbox/move', { ids: [m.id], account: 'api' });
+  assert.equal(r.data.moved, 1, JSON.stringify(r.data));
+  const [mv] = await query(`SELECT account_id, payload FROM outbox WHERE id = $1`, [m.id]);
+  assert.deepEqual([mv.account_id, mv.payload.waTemplate.name, mv.payload.waTemplate.params[0]], ['api', 'continue_chat', 'Sir/Madam']);
+  // a file can't ride in it: still refused, with the reason
+  const [f] = await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status) VALUES ('api', '919876500501@s.whatsapp.net', '{"text":"menu","attachment":{"url":"https://x/y.pdf","fileName":"y.pdf"}}', 'mcp', 'draft') RETURNING id`);
+  assert.match((await call('POST', `/api/outbox/${f.id}/approve`, {})).data.error, /carries text only/);
+  await call('POST', '/api/outbox/reject-selected', { ids: [f.id, m.id] });
 });

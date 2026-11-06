@@ -1516,13 +1516,20 @@
     }
     // replies come in bulk: one fold so they never bury the must-dos
     const nowReplies = now.filter((t) => t.kind === 'reply' && !t.priority);
-    const nowMain = now.filter((t) => !nowReplies.includes(t));
+    // left alone 3+ days after it was due (e.g. "order tea"): still there, but at the bottom so live items lead (6 Nov)
+    const STALE_MS = 3 * 86400e3;
+    const isStale = (t) => !!due(t) && Date.now() - new Date(due(t)) > STALE_MS
+      && Date.now() - new Date(t.updated_at || t.created_at) > STALE_MS;
+    const nowStale = now.filter((t) => !nowReplies.includes(t) && isStale(t));
+    const nowMain = now.filter((t) => !nowReplies.includes(t) && !nowStale.includes(t));
     shell([
       h('div', { class: 'row board-root', style: 'margin-bottom:8px' }, h('h1', { class: 'grow', style: 'margin:0' }, 'Board'), filters),
       section('🔥', 'Do now', now.length, h('div', {},
-        nowMain.length ? h('div', { class: 'cardlist' }, nowMain.map(card)) : !nowReplies.length ? h('p', { class: 'muted' }, 'All clear — nothing due now.') : null,
+        nowMain.length ? h('div', { class: 'cardlist' }, nowMain.map(card)) : !nowReplies.length && !nowStale.length ? h('p', { class: 'muted' }, 'All clear — nothing due now.') : null,
         nowReplies.length ? h('details', { class: 'day', 'data-key': 'replies', open: nowReplies.length <= 3 }, h('summary', {}, h('b', {}, `💬 ${nowReplies.length} candidate${nowReplies.length > 1 ? 's' : ''} waiting for a reply`), h('span', { class: 'muted' }, ' — the AI drafts these; open to see them')),
-          h('div', { class: 'cardlist' }, nowReplies.map(card))) : null),
+          h('div', { class: 'cardlist' }, nowReplies.map(card))) : null,
+        nowStale.length ? h('details', { class: 'day', 'data-key': 'stale' }, h('summary', {}, h('b', {}, `🕰️ ${nowStale.length} left for a while`), h('span', { class: 'muted' }, ' — untouched 3+ days after they were due')),
+          h('div', { class: 'cardlist' }, nowStale.map(card))) : null),
         { hint: selecting ? 'tap cards to select' : priorityNow ? `${priorityNow} must-do` : '', cards: now }),
       section('📅', 'Future', future.length, h('div', {}, futureEl), { hint: 'by day' }),
       running.length ? section('⏳', 'Sending now', running.length, h('div', { class: 'cardlist' }, running.map(card)), { open: false }) : null,
@@ -1761,21 +1768,29 @@
           h('form', { onsubmit: guard(async (e) => {
             e.preventDefault();
             const f = e.target;
+            // write it like a normal message (6 Nov): {name} / {role} … become Meta's {{1}}, {{2}} with example
+            // values, and an empty name is made from the first words — no Meta syntax to learn
+            const fields = [];
+            const body = f.tbody.value.replace(/\{(\w+)\}(?!\})/g, (m, k) => `{{${(fields.includes(k) ? fields : fields.push(k) && fields).indexOf(k) + 1}}}`);
+            const sample = { name: 'Ravi', first_name: 'Ravi', role: 'Chef', date: '10 Nov', time: '11 am' };
+            const typed = f.examples.value.split('|').map((x) => x.trim()).filter(Boolean);
+            const examples = typed.length ? typed : fields.map((k) => sample[k] || k.replace(/_/g, ' '));
+            const name = f.tname.value.trim() || body.toLowerCase().replace(/\{\{\d+\}\}/g, '').replace(/[^a-z ]/g, ' ').trim().split(/\s+/).slice(0, 3).join('_') + '_' + new Date().toISOString().slice(5, 10).replace('-', '');
             const r = await api(`/api/accounts/${a.id}/wa-templates`, { body: {
-              name: f.tname.value, category: f.category.value, language: f.lang.value || 'en', body: f.tbody.value,
-              examples: f.examples.value.split('|').map((x) => x.trim()).filter(Boolean), footer: f.footer.value || undefined,
+              name, category: f.category.value, language: f.lang.value || 'en', body,
+              examples, footer: f.footer.value || undefined,
               buttons: f.buttons.value.split('|').map((x) => x.trim()).filter(Boolean),
             } });
             toast(`Submitted "${r.name}" — ${String(r.status || 'pending').toLowerCase()}`);
             await load(true);
           }) },
-            h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'tname', required: true, placeholder: 'chef_job_invite', pattern: '[a-z0-9_]+' })),
+            h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'tname', placeholder: 'optional — made from the text if empty', pattern: '[a-z0-9_]+' })),
             h('div', { class: 'row' },
               h('label', { class: 'field grow' }, h('span', {}, 'Category'), h('select', { name: 'category' }, h('option', { value: 'UTILITY' }, 'Utility (about something they asked for / applied to)'), h('option', { value: 'MARKETING' }, 'Marketing (promotional)'))),
               h('label', { class: 'field' }, h('span', {}, 'Language'), h('input', { name: 'lang', value: 'en', style: 'width:80px' }))),
             h('label', { class: 'field' }, h('span', {}, 'Text'), h('textarea', { name: 'tbody', rows: 4, required: true, placeholder: 'Namaste {{1}} ji, Zenith Suites ko {{2}} chahiye. Interested hain to reply karein. – Zenith Suites HR' }),
-              h('em', {}, '{{1}}, {{2}} … are filled per person. Not at the very start or end.')),
-            h('label', { class: 'field' }, h('span', {}, 'Example values, separated by |'), h('input', { name: 'examples', placeholder: 'Ravi | Chef' })),
+              h('em', {}, 'Write it like a normal message: {name} where their name goes, {role}, {date} … for other fill-ins (Meta\'s {{1}} also works). Not at the very start or end.')),
+            h('label', { class: 'field' }, h('span', {}, 'Example values, separated by | (optional)'), h('input', { name: 'examples', placeholder: 'filled in for you: Ravi | Chef' })),
             h('label', { class: 'field' }, h('span', {}, 'Footer (optional)'), h('input', { name: 'footer', placeholder: 'Zenith Suites, Bengaluru' })),
             h('label', { class: 'field' }, h('span', {}, 'Quick-reply buttons (optional, |-separated, max 3)'), h('input', { name: 'buttons', placeholder: 'Haan, interested | Nahi' })),
             h('button', { class: 'btn primary', type: 'submit' }, 'Submit for review'))));

@@ -148,10 +148,14 @@ export async function upsertRefTask(ref, { account, title, details, kind = 'todo
     if (was !== now) await logTask(open.id, `Due ${now ? new Date(now).toLocaleString('en-IN', { timeZone: config.tz, dateStyle: 'medium', timeStyle: 'short' }) : 'cleared'}`);
     const [row] = await query(
       `UPDATE tasks SET title = $2, details = $3, due_at = $4, account_id = $5, role = COALESCE($6, role), assignee = $7, priority = priority OR $8, updated_at = now() -- a priority the owner set stays
-       WHERE id = $1 RETURNING *`,
+       WHERE id = $1 AND (title, details, due_at, account_id, assignee) IS DISTINCT FROM ($2, $3, $4::timestamptz, $5, $7)
+         OR id = $1 AND ($6::text IS NOT NULL AND role IS DISTINCT FROM $6 OR $8 AND NOT priority)
+       RETURNING *`,
       [open.id, title, details || null, dueAt, account, role, assignee, !!priority],
     );
-    return row;
+    // unchanged (the 10-minute re-check): no write, so updated_at keeps meaning "last touched" — the Board sinks
+    // cards nobody touched for days (6 Nov)
+    return row || (await query('SELECT * FROM tasks WHERE id = $1', [open.id]))[0];
   }
   const [row] = await query(
     `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, role, ref, assignee, priority)
@@ -269,6 +273,9 @@ export async function listTasks({ account, past = false, limit = 200, role, assi
        FROM outbox x WHERE x.task_id = t.id) o ON TRUE
      WHERE ${where.join(' AND ')}
      ORDER BY CASE WHEN t.status IN ('done','cancelled') THEN t.completed_at END DESC NULLS LAST,
+              -- left untouched 3+ days after it was due: last, so live items lead (owner, 6 Nov: "like ordering tea")
+              (t.status NOT IN ('done','cancelled','review') AND t.due_at < now() - interval '3 days'
+                AND t.updated_at < now() - interval '3 days'),
               t.due_at NULLS LAST, t.id DESC
      LIMIT $${p.length}`,
     p,

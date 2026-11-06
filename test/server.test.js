@@ -1461,7 +1461,10 @@ test('contact book: people filed by group and found when the need comes up; a sh
   const referred = await mcp('find_contacts', { query: 'jay' });
   assert.match(referred, /Jay Raam \| \+919508289325 \| Chef hiring – Referred \| Referred by Roshan/);
   assert.match(await mcp('find_contacts', { group: 'Chef hiring – Referrers' }), /Roshan \| \+919739452867 \| Chef hiring – Referrers \| Referred Jay Raam/);
-  assert.ok((await call('GET', '/api/tasks?account=dir1')).data.find((t) => /^Call Jay Raam – referred by Roshan/.test(t.title) && t.priority));
+  assert.ok((await call('GET', '/api/tasks?account=dir1')).data.find((t) => /^Call Jay Raam \+\d{10,13} – referred by Roshan/.test(t.title) && t.priority));
+  // the card's 📞 button calls the first number on it: that must be the referred person, not the referrer (6 Nov)
+  const refCard = (await call('GET', '/api/tasks?account=dir1')).data.find((t) => /^Call Jay Raam/.test(t.title));
+  assert.equal(`${refCard.title} ${refCard.details}`.match(/\+(\d{10,13})/)[1], '919508289325');
   // the dashboard search works the same way
   assert.equal((await call('GET', '/api/directory?q=referred%20roshan')).data.length >= 1, true);
 });
@@ -1846,9 +1849,10 @@ test('funnel stages per campaign (hiring, sales, win-back, own); closed custom s
   // the inbox: someone on no list wrote — no Board card, but the AI sees them
   const now = Math.floor(Date.now() / 1000);
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300099@s.whatsapp.net','IN1',false,$1,'text','Do you have a room for 2 nights from Friday?')`, [now - 600]);
-  // people on no list are staff's everyday chats: left out unless asked
-  assert.doesNotMatch(await mcp('inbox_summary', { campaign: 'all' }), /919833300099/);
-  assert.match(await mcp('inbox_summary', { campaign: 'all', include_unlisted: true }), /919833300099.*not on a list.*1 unanswered.*room for 2 nights.*NO CARD/);
+  // every recent chat is the AI's to sort (owner, 6 Nov): people on no list are shown by default, marked as such
+  assert.match(await mcp('inbox_summary', { campaign: 'all' }), /919833300099.*not on a list.*1 unanswered.*room for 2 nights.*NO CARD/);
+  assert.doesNotMatch(await mcp('inbox_summary', { campaign: 'all', include_unlisted: false }), /919833300099/);
+  assert.match(await mcp('hub_overview', { campaign: 'all' }), /INBOX \(not on a list\): \d+ chat\(s\) waiting \([^)]*stg \d+/);
   // a person on a list whose card was closed, then wrote again: shown (NO CARD)
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300001@s.whatsapp.net','IN2',false,$1,'text','Sample received, thanks')`, [now - 300]);
   await query(`UPDATE tasks SET status = 'done' WHERE ref = 'reply:stg:919833300001@s.whatsapp.net'`);
@@ -1975,6 +1979,7 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('meta_health_check', { account: 'mcpall' });
   await run('message_timeline', { account: 'mcpall', q: P });
   await run('create_meta_template', { account: 'mcpall', name: 'x_test', body: 'Hi {{1}} there', examples: ['A'] });
+  await run('delete_meta_template', { account: 'mcpall', name: 'x_test' });
   assert.deepEqual(names.filter((n) => !done[n]), [], 'every MCP tool is exercised here');
 });
 
@@ -2045,14 +2050,29 @@ test('morning summary: right content, once a day, only from the number that is c
     ('dig1','Interview: Morning Test — Sat', 'visit', 'upcoming', now() + interval '1 minute', 'you', true, 'visit:999:919733500001@s.whatsapp.net'),
     ('dig1','Call Digest Person 9733500002', 'todo', 'upcoming', now() - interval '1 hour', 'you', true, NULL)`);
   const { text } = await digest.buildDigest(today);
-  assert.match(text, /Good morning/);
-  assert.match(text, /Interviews today \(\d+\)/);
-  assert.match(text, /Morning Test/);
-  assert.match(text, /⭐ Call Digest Person/);
+  // written the way Perisclaw briefs (6 Nov): "Morning, Sir." + the day in one line, numbered items with the number
+  assert.match(text, /^Morning, Sir\. .*interview/);
+  assert.match(text, /\*Interviews today\*\n1\. .*Morning Test.* \(\+919733500001\)/);
+  assert.match(text, /\d\. ⭐ Call Digest Person 9733500002/);
+  // an item left alone 3+ days after it was due comes last, in the short "left for a while" line — not as item 1
+  await query(`INSERT INTO tasks (account_id, title, kind, status, due_at, assignee, priority, updated_at) VALUES
+    ('dig1','Order tea sachets', 'todo', 'upcoming', now() - interval '6 days', 'you', true, now() - interval '6 days')`);
+  const withOld = (await digest.buildDigest(today)).text;
+  assert.doesNotMatch(withOld.split('*Left for a while*')[0], /Order tea/);
+  assert.match(withOld, /\*Left for a while\* \(untouched 3\+ days\): .*Order tea sachets/);
+  assert.equal((await call('GET', '/api/tasks?account=dig1')).data.at(-1).title, 'Order tea sachets', 'the Board API lists it last too');
+  // evening: done today, then tomorrow
+  await query(`INSERT INTO tasks (account_id, title, kind, status, due_at, assignee, completed_at) VALUES
+    ('dig1','Sent the bill to Ravi', 'todo', 'done', now() - interval '2 hours', 'you', now()),
+    ('dig1','Meet Kumar about the event 9733500003', 'todo', 'upcoming', (date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') + interval '1 day 11 hours') AT TIME ZONE 'Asia/Kolkata', 'you', NULL)`);
+  const eve = (await digest.buildEvening(today)).text;
+  assert.match(eve, /^Evening, Sir\./);
+  assert.match(eve, /\*Done today\*\n1\. Sent the bill to Ravi/, 'the latest done comes first');
+  assert.match(eve, /\*Tomorrow\*\n\d\. 11:00 am — Meet Kumar about the event 9733500003/);
   // an interview card written by hand ("Interview: …", kind todo) is an interview, not a to-do
   await query(`INSERT INTO tasks (account_id, title, kind, status, due_at, assignee, priority) VALUES ('dig1','Interview: Hand Made Cook — 11:00', 'todo', 'upcoming', now() + interval '2 minutes', 'you', true)`);
   const t2 = (await digest.buildDigest(today)).text;
-  const [interviews, rest] = t2.split('✅');
+  const [interviews, rest] = t2.split('*For you*');
   assert.match(interviews, /Hand Made Cook/);
   assert.doesNotMatch(rest || '', /Hand Made Cook/);
   const sentTo = [];

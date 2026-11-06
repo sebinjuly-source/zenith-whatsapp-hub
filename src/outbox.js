@@ -55,6 +55,33 @@ async function assertCloudWindow(session, jid, payload) {
   }
 }
 
+/** The Meta template that carries free text past the 24 h window: "Namaste {{1}} … {{2}} … reply here" (6 Nov). */
+export const CONTINUE_TEMPLATE = 'continue_chat';
+
+/**
+ * Free text to someone whose 24 h window has closed, on a Meta number: send it inside the number's "continue"
+ * template ({{1}} their first name, {{2}} the text) instead of refusing — so the owner's "?" to a chef, or drafts
+ * moved over from a linked number, still go (owner, 6 Nov: "make replying on the Meta number user friendly").
+ * Returns the new payload, or null when not needed or not possible (window open, an attachment, no approved template).
+ */
+export async function continueInTemplate(session, jid, payload) {
+  if (!session?.isCloud || payload.waTemplate || payload.attachment || !String(payload.text || '').trim()) return null;
+  const w = await session.windowFor(jid).catch(() => ({ open: true }));
+  if (w.open) return null;
+  const { findTemplate } = await import('./wa/cloud-templates.js');
+  const name = session.settings?.continueTemplate || CONTINUE_TEMPLATE;
+  const t = await findTemplate(session.wabaId, name).catch(() => null);
+  if (!t || t.status !== 'APPROVED') return null;
+  const [c] = await query(
+    `SELECT COALESCE((SELECT NULLIF(m.name, '') FROM list_members m WHERE m.jid = $2 AND COALESCE(m.name, '') <> '' LIMIT 1),
+       NULLIF(ct.name, ''), ct.notify) AS name
+     FROM (SELECT 1) x LEFT JOIN contacts ct ON ct.account_id = $1 AND ct.jid = $2`, [session.id, jid]);
+  const first = String(c?.name || '').trim().split(/\s+/)[0].replace(/[^\p{L}.'-]/gu, '') || 'Sir/Madam';
+  // Meta refuses new lines, tabs and 4+ spaces inside a fill-in
+  const body = String(payload.text).replace(/\s*\n+\s*/g, ' · ').replace(/\s{2,}/g, ' ').trim().slice(0, 900);
+  return withTemplatePreview(session, { ...payload, waTemplate: { name, params: [first, body] } }, { allowPending: false });
+}
+
 /** Check a "send by" time: readable, in the future and after the send time. Returns an ISO string or null. */
 function deadline(expiresAt, scheduledAt) {
   if (expiresAt == null || expiresAt === '') return null;
@@ -80,6 +107,7 @@ export async function enqueue({ account, to, payload, source, note, scheduledAt,
   const automated = AUTOMATED.includes(source);
   // Your own sends go out right away, so check the new-number limit now (automated ones simply wait in the queue).
   if (!NEEDS_APPROVAL.includes(source) && !automated) {
+    payload = (await continueInTemplate(session, jid, payload)) || payload;
     await assertCloudWindow(session, jid, payload);
     await assertNewChatAllowed(session, jid);
   }
@@ -203,12 +231,14 @@ export async function approve(id, { text } = {}) {
     if (payload.attachment && !payload.text) payload.attachment = { ...payload.attachment, caption: text };
     else payload.text = text;
   }
-  // Meta number, free text: say now if the 24 h window has closed, instead of a "failed" card later
+  // Meta number, free text, 24 h window closed: it goes inside the "continue" template; without one, say so now
+  // instead of a "failed" card later
   const session = manager.sessions.get(row.account_id);
   if (session?.isCloud && !payload.waTemplate) {
-    const w = await session.windowFor(row.to_jid).catch(() => ({ open: true }));
-    if (!w.open) {
-      throw new Error(`Can't send: the 24-hour reply window with ${row.to_jid.split('@')[0]} has closed, so Meta only allows an approved template now. Reject this draft and send a template, or move it to a linked number.`);
+    const wrapped = await continueInTemplate(session, row.to_jid, payload);
+    if (wrapped) Object.assign(payload, wrapped);
+    else if (!(await session.windowFor(row.to_jid).catch(() => ({ open: true }))).open) {
+      throw new Error(`Can't send: the 24-hour reply window with ${row.to_jid.split('@')[0]} has closed, so Meta only allows an approved template now — and the "${session.settings?.continueTemplate || CONTINUE_TEMPLATE}" template that carries your text is not approved yet${payload.attachment ? ' (and it carries text only, not files)' : ''}. Send a template, or move it to a linked number.`);
     }
   }
   const [updated] = await query(
@@ -371,11 +401,17 @@ export async function moveToAccount(ids, account) {
     const rows = await query(`SELECT id, to_jid, payload FROM outbox WHERE id = ANY($1::bigint[]) AND status IN ('draft','queued')`, [ids.map(Number)]);
     const ok = [];
     for (const r of rows) {
-      if (r.payload?.waTemplate || (await target.windowFor(r.to_jid)).open) ok.push(r.id);
-      else kept++;
+      if (r.payload?.waTemplate || (await target.windowFor(r.to_jid)).open) { ok.push(r.id); continue; }
+      // outside the window: the text travels inside the number's "continue" template (6 Nov: the owner moved drafts
+      // to the Meta number to approve them, forgetting the template rule)
+      const wrapped = await continueInTemplate(target, r.to_jid, r.payload).catch(() => null);
+      if (wrapped) {
+        await query(`UPDATE outbox SET payload = $2 WHERE id = $1`, [r.id, JSON.stringify(wrapped)]);
+        ok.push(r.id);
+      } else kept++;
     }
     if (!ok.length && kept) {
-      throw new Error(`None moved: "${target.account.label}" is a Meta API number and these people haven't written to it in the last 24 hours — it can only send them an approved Meta template`);
+      throw new Error(`None moved: "${target.account.label}" is a Meta API number and these people haven't written to it in the last 24 hours — it can only send them an approved Meta template, and its "${target.settings?.continueTemplate || CONTINUE_TEMPLATE}" template (which carries free text) is not approved yet`);
     }
     ids = ok;
   }
@@ -747,9 +783,12 @@ export async function withTemplatePreview(session, payload, { allowPending = tru
 async function buildContent(payload, session) {
   if (payload.waTemplate && session?.isCloud) return { waTemplate: payload.waTemplate };
   const buttons = (payload.buttons || []).filter(Boolean);
+  const choices = (payload.choices || []).filter(Boolean);
   if (!payload.attachment) {
+    if (choices.length && session?.isCloud) return { text: payload.text, choices, choicesButton: payload.choicesButton };
     if (buttons.length && session?.isCloud) return { text: payload.text, buttons };
     // Linked numbers: WhatsApp doesn't show buttons from unofficial clients reliably → list the answers instead.
+    if (choices.length) return { text: `${payload.text}\n\n${choices.map((c, i) => `${i + 1}. ${c}`).join('\n')}\nReply with the number.` };
     return { text: buttons.length ? `${payload.text}\n\nReply: ${buttons.join(' / ')}` : payload.text };
   }
   const a = payload.attachment;

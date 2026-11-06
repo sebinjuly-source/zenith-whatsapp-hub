@@ -762,7 +762,8 @@ export function buildApp() {
       attachment = attachment || r.payload.attachment;
     }
     const buttons = Array.isArray(req.body?.buttons) ? req.body.buttons.filter(Boolean).slice(0, 3) : undefined;
-    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}), ...(buttons?.length ? { buttons } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt, role: sendRole, expiresAt: req.body?.expiresAt || null });
+    const choices = Array.isArray(req.body?.choices) ? req.body.choices.filter(Boolean).slice(0, 10) : undefined;
+    const row = await outbox.enqueue({ account, to, payload: { text, attachment, ...(replyTo ? { replyTo } : {}), ...(buttons?.length ? { buttons } : {}), ...(choices?.length ? { choices, ...(req.body.choicesButton ? { choicesButton: String(req.body.choicesButton) } : {}) } : {}) }, source: req.body?.source === 'dashboard' ? 'dashboard' : 'api', idemKey: req.body?.idempotencyKey || req.get('idempotency-key'), scheduledAt, role: sendRole, expiresAt: req.body?.expiresAt || null });
     if (row.duplicate && ['sent', 'failed', 'rejected'].includes(row.status)) return res.status(row.status === 'sent' ? 200 : 502).json(row);
     if (req.body?.source === 'dashboard' && actorOf(req) === 'you') await act(req, row.account_id, `Sent a message from the dashboard to ${row.to_jid.split('@')[0]}`);
     if (!wait) return res.json(row);

@@ -319,7 +319,9 @@ details.section > :last-child { margin-bottom: 12px; }
 .tc-actions { margin-top: 8px; gap: 6px; align-items: flex-start; }
 /* closed: a small pill next to ✓ Done (one row per card); open: the full width below */
 details.more { flex: 0 0 auto; }
-details.more[open] { flex-basis: 100%; }
+/* open: never wider than the card — a long link, number or note used to push it (and the card) off a phone screen (6 Nov) */
+details.more[open] { flex-basis: 100%; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+details.more[open] select, details.more[open] textarea, details.more[open] input { max-width: 100%; }
 details.more > summary { cursor: pointer; color: var(--ink-3); font-size: 12.5px; }
 details.more[open] { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
 details.day { border-top: 1px solid var(--line); padding: 6px 0; }

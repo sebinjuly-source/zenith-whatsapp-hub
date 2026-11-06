@@ -124,8 +124,9 @@ export async function noteSharedContacts(accountId, r) {
     await saveEntry({ phone: r.chatJid, name: senderName, category: `${prefix} – Referrers`, reason: `Referred ${name} (+${phone}) on ${day}`, account: accountId, createdBy: 'hub', role });
     await createTask({
       account: accountId, assignee: 'you', priority: true, createdBy: 'rule', role,
-      title: `Call ${name} – referred by ${senderName}`,
-      details: `${senderName} (+${r.chatJid.split('@')[0]}) shared this contact on ${day}: ${name} +${phone}. Saved in Contacts → "${prefix} – Referred". Call them, or tell the AI to message them from the Meta number.`,
+      // the referred number first: the card's 📞 button calls the first number it finds (6 Nov: it rang the referrer)
+      title: `Call ${name} +${phone} – referred by ${senderName}`,
+      details: `Call +${phone} (${name}). Referred by ${senderName} (+${r.chatJid.split('@')[0]}), who shared the contact on ${day}. Saved in Contacts → "${prefix} – Referred". Call them, or tell the AI to message them from the Meta number.`,
     });
     saved++;
   }
