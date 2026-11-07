@@ -13,11 +13,14 @@ import { manager } from './wa/manager.js';
 import { logMetaEvent } from './wa/cloud.js';
 
 function signatureOk(req) {
-  const secret = process.env.META_APP_SECRET;
-  if (!secret) return true;
+  // Signed by our own app (META_APP_SECRET) or by the Tech Provider app whose numbers joined via the sign-up pop-up
+  const secrets = [process.env.META_APP_SECRET, process.env.META_ES_APP_SECRET].filter(Boolean);
+  if (!secrets.length) return true;
   const got = req.get('x-hub-signature-256') || '';
-  const want = 'sha256=' + crypto.createHmac('sha256', secret).update(req.rawBody || '').digest('hex');
-  return got.length === want.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want));
+  return secrets.some((secret) => {
+    const want = 'sha256=' + crypto.createHmac('sha256', secret).update(req.rawBody || '').digest('hex');
+    return got.length === want.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want));
+  });
 }
 
 /** Short summary of a webhook body: how many messages and statuses, for which phone number id. */

@@ -3,10 +3,25 @@
  * Env: META_TOKEN (system-user token), META_GRAPH_VERSION (default v24.0), META_GRAPH_URL (tests point it at a fake).
  * Retries only what is safe: reads, and sends Meta refused for rate reasons (those were never sent).
  */
+import { AsyncLocalStorage } from 'async_hooks';
 import logger from '../logger.js';
 
 export const graphBase = () => `${(process.env.META_GRAPH_URL || 'https://graph.facebook.com').replace(/\/+$/, '')}/${process.env.META_GRAPH_VERSION || 'v24.0'}`;
 export const metaToken = () => process.env.META_TOKEN || '';
+
+// Numbers connected through Meta's sign-up pop-up (Tech Provider / Embedded Signup) each carry their own business
+// token. Calls whose path starts with that number's phone-number id or WhatsApp-account id use it automatically;
+// withMetaToken() covers calls without such a path (file downloads). Everything else uses META_TOKEN.
+const scoped = new AsyncLocalStorage();
+const tokenById = new Map();
+export function registerMetaToken(ids, token) {
+  for (const id of ids) if (id) token ? tokenById.set(String(id), token) : tokenById.delete(String(id));
+}
+export const withMetaToken = (token, fn) => (token ? scoped.run({ token }, fn) : fn());
+export function tokenFor(path = '') {
+  const first = String(path).replace(/^https?:\/\/[^/]+\/(v[\d.]+\/)?/, '').replace(/^\/+/, '').split(/[/?]/)[0];
+  return scoped.getStore()?.token || tokenById.get(first) || metaToken();
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Meta error codes → what it means for you (https://developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes)
@@ -152,7 +167,7 @@ const RATE_CODES = new Set([4, 80007, 130429, 409]);
 export async function graph(path, { method = 'GET', json, form, token, params, idempotent = method === 'GET', timeoutMs = 60000 } = {}) {
   const url = new URL(path.startsWith('http') ? path : `${graphBase()}/${path.replace(/^\/+/, '')}`);
   for (const [k, v] of Object.entries(params || {})) if (v != null) url.searchParams.set(k, String(v));
-  const auth = token ?? metaToken();
+  const auth = token ?? tokenFor(path);
   if (!auth) throw new Error('META_TOKEN is not set in Render — the Cloud API number can\'t work without it');
   for (let attempt = 0; ; attempt++) {
     let res;
@@ -194,7 +209,7 @@ export async function graph(path, { method = 'GET', json, form, token, params, i
 export async function downloadCloudMedia(mediaId) {
   const info = await graph(mediaId);
   if (!info.url) throw new Error('Meta gave no download link for this file (older than 30 days?)');
-  const res = await fetch(info.url, { headers: { Authorization: `Bearer ${metaToken()}` }, signal: AbortSignal.timeout(60000) });
+  const res = await fetch(info.url, { headers: { Authorization: `Bearer ${tokenFor(mediaId)}` }, signal: AbortSignal.timeout(60000) });
   if (!res.ok) throw new Error(`Downloading the file from Meta failed (${res.status})`);
   return { buffer: Buffer.from(await res.arrayBuffer()), mimetype: info.mime_type || res.headers.get('content-type') };
 }

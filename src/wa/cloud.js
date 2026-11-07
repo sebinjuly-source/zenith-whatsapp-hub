@@ -11,7 +11,8 @@ import { Session } from './session.js';
 import { query, logEvent } from '../db.js';
 import config from '../config.js';
 import * as store from '../store.js';
-import { META_HELP, graph, uploadCloudMedia, downloadCloudMedia, explainMetaError, metaToken } from './graph.js';
+import { META_HELP, graph, uploadCloudMedia, downloadCloudMedia, explainMetaError, metaToken, registerMetaToken, withMetaToken } from './graph.js';
+import { unseal } from '../secretbox.js';
 import { buildTemplateMessage, syncTemplates } from './cloud-templates.js';
 import { refreshTask } from '../tasks.js';
 import { postWebhook } from '../notify.js';
@@ -74,6 +75,15 @@ export class CloudSession extends Session {
     return this.account.cloud?.wabaId || process.env.META_WABA_ID || null;
   }
 
+  /** A number connected through Meta's sign-up pop-up has its own business token (sealed); others use META_TOKEN. */
+  get ownToken() {
+    return unseal(this.account.cloud?.token) || null;
+  }
+
+  get token() {
+    return this.ownToken || metaToken();
+  }
+
   info() {
     return { ...super.info(), provider: 'cloud', cloud: this.health || this.account.cloud?.health || null, error: this.status === 'open' ? null : this.lastError || null };
   }
@@ -93,8 +103,13 @@ export class CloudSession extends Session {
   async doStart() {
     this.stopping = false;
     clearTimeout(this.retryTimer);
-    if (!metaToken() || !this.phoneNumberId) {
-      this.lastError = !metaToken() ? 'META_TOKEN is not set in Render' : 'No phone number ID (META_PHONE_NUMBER_ID)';
+    if (this.account.cloud?.token) registerMetaToken([this.phoneNumberId, this.wabaId], this.ownToken);
+    if (this.account.cloud?.token && !this.ownToken) {
+      this.lastError = 'The stored Meta token can no longer be read (SECRET_KEY / API_KEY changed?) — connect the number again';
+      return this.setStatus('not_configured');
+    }
+    if (!this.token || !this.phoneNumberId) {
+      this.lastError = !this.token ? 'META_TOKEN is not set in Render' : 'No phone number ID (META_PHONE_NUMBER_ID)';
       return this.setStatus('not_configured');
     }
     this.setStatus('connecting');
@@ -119,7 +134,7 @@ export class CloudSession extends Session {
   async setup() {
     let h = await this.refreshHealth();
     if (h.platform_type !== 'CLOUD_API' || h.status === 'PENDING' || h.status === 'DISCONNECTED') {
-      const pin = process.env.META_PIN;
+      const pin = unseal(this.account.cloud?.pin) || process.env.META_PIN;
       if (!pin) throw new Error('The number is not registered yet and META_PIN (6-digit two-step PIN) is not set in Render');
       await graph(`${this.phoneNumberId}/register`, { method: 'POST', json: { messaging_product: 'whatsapp', pin: String(pin) }, idempotent: true });
       await logEvent(this.id, 'info', `Registered +${(h.display_phone_number || '').replace(/\D/g, '')} on the Meta Cloud API`);
@@ -241,10 +256,12 @@ export class CloudSession extends Session {
 
   /** Point the app's WhatsApp webhook at this hub (needs META_APP_SECRET; done once, then only checked). */
   async ensureAppWebhook() {
-    const secret = process.env.META_APP_SECRET;
+    // A number connected through the sign-up pop-up belongs to the Tech Provider app (META_ES_APP_ID), not META_APP_ID.
+    const viaSignup = !!this.account.cloud?.appId;
+    const secret = viaSignup ? process.env.META_ES_APP_SECRET : process.env.META_APP_SECRET;
     const verify = process.env.META_VERIFY_TOKEN;
     if (!secret || !verify || !config.publicUrl) return;
-    const appId = process.env.META_APP_ID || (await graph('app', { params: { fields: 'id' } })).id;
+    const appId = viaSignup ? this.account.cloud.appId : process.env.META_APP_ID || (await graph('app', { params: { fields: 'id' } })).id;
     const appToken = `${appId}|${secret}`;
     const callback = `${config.publicUrl}/meta/webhook`;
     const subs = await graph(`${appId}/subscriptions`, { token: appToken });
@@ -434,7 +451,7 @@ export class CloudSession extends Session {
   async downloadMedia(row) {
     const id = row.media?.cloudId;
     if (!id) throw new Error('No Meta file id on this message');
-    return (await downloadCloudMedia(id)).buffer;
+    return (await withMetaToken(this.ownToken, () => downloadCloudMedia(id))).buffer;
   }
 
   // ---------------------------------------------------------------------------

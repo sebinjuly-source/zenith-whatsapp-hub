@@ -83,13 +83,16 @@ class Manager extends EventEmitter {
 
   /**
    * provider 'cloud' = a Meta Cloud API number (cloud: { phoneNumberId, wabaId }; defaults from META_PHONE_NUMBER_ID /
-   * META_WABA_ID). It starts by itself — nothing to scan.
+   * META_WABA_ID). It starts by itself — nothing to scan. A number from Meta's sign-up pop-up also stores its own
+   * sealed business token, PIN and the Tech Provider app id (src/embedded-signup.js).
    */
-  async create({ id, label, purpose = '', settings = {}, provider = 'baileys', cloud }) {
+  async create({ id, label, purpose = '', settings = {}, provider = 'baileys', cloud }, { cloudSecrets } = {}) {
     if (!['baileys', 'cloud'].includes(provider)) throw new Error('provider must be "baileys" (linked phone) or "cloud" (Meta Cloud API)');
     const cloudCfg = provider === 'cloud'
       ? { phoneNumberId: String(cloud?.phoneNumberId || process.env.META_PHONE_NUMBER_ID || '').replace(/\D/g, ''), wabaId: String(cloud?.wabaId || process.env.META_WABA_ID || '').replace(/\D/g, '') }
       : {};
+    // Only internal callers (Meta sign-up pop-up) pass cloudSecrets: { token, pin } already sealed, plus the app id.
+    if (provider === 'cloud' && cloudSecrets) Object.assign(cloudCfg, cloudSecrets);
     if (provider === 'cloud') {
       if (!cloudCfg.phoneNumberId) throw new Error('Give the Meta phone number ID (or set META_PHONE_NUMBER_ID in Render)');
       const [dup] = await query(`SELECT id FROM accounts WHERE provider = 'cloud' AND cloud->>'phoneNumberId' = $1`, [cloudCfg.phoneNumberId]);

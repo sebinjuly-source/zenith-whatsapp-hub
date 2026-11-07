@@ -127,6 +127,20 @@ and the open tabs are remembered on that device after a refresh. Less-used parts
 - **Costs:** price per draft, total before approving, Settings → Meta message prices.
 - **Secrets** live only in Render (names in Notion → Secrets): META_TOKEN, META_APP_SECRET, META_VERIFY_TOKEN,
   META_PIN, META_PHONE_NUMBER_ID, META_WABA_ID.
+- **Connect with Facebook (Tech Provider, 7 Nov 2026).** Numbers page → "Connect a number with Meta" opens Meta's
+  Embedded Signup window; a business logs in, picks/creates its WhatsApp account and number, verifies it by SMS, and
+  it joins as a Meta Cloud API number that pays Meta itself. Code: `src/embedded-signup.js` (code → business token,
+  subscribe the WhatsApp account, add the account with a random PIN), `src/wa/graph.js` `tokenFor()` (calls for that
+  number's phone-number id / WhatsApp-account id use its own token; `withMetaToken()` for file downloads),
+  `src/secretbox.js` (token + PIN sealed with SECRET_KEY, else API_KEY — changing it means reconnecting those numbers),
+  `src/meta.js` (webhooks signed by either app). The button shows only when Render has META_ES_APP_ID,
+  META_ES_CONFIG_ID and META_ES_APP_SECRET from the separate Tech Provider app "Zenith Hub Connect" (the live number's
+  app ZenithWAHub is untouched). One-time Meta set-up: app → WhatsApp use case; Facebook Login for Business →
+  Configurations → new config "WhatsApp Embedded Signup" (copy its ID); App settings → Basic → app domain + privacy
+  URL; Allowed domains for the JS SDK = the hub's address; Webhooks → WhatsApp Business Account → callback
+  `<hub>/meta/webhook`, verify token = META_VERIFY_TOKEN, fields messages; "Become a Tech Provider"; App Review for
+  whatsapp_business_management + whatsapp_business_messaging (screen videos: sign-up, then sending a message).
+  Test: `test/embedded-signup.test.js`.
 
 ---
 

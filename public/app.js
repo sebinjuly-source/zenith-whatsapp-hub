@@ -528,11 +528,65 @@
       h('label', { class: 'field' }, h('span', {}, 'Purpose'), h('input', { type: 'text', name: 'purpose', placeholder: 'Contacting job candidates' })),
       h('button', { class: 'btn primary', type: 'submit' }, 'Add number'),
     );
+    // Meta's sign-up pop-up (Tech Provider app): a business connects its own number; shown once Render has the keys
+    const signup = h('div', { class: 'card', hidden: true },
+      h('h2', {}, 'Connect a number with Meta'),
+      h('p', { class: 'muted', style: 'margin:0 0 8px' }, 'Opens Meta\'s own window: log in with Facebook, choose or create the WhatsApp Business account and number, confirm it with the SMS code. The number joins the hub as a Meta Cloud API number; its business pays Meta directly (payment method in WhatsApp Manager).'),
+      h('label', { class: 'field' }, h('span', {}, 'Short id (optional)'), h('input', { type: 'text', name: 'esid', placeholder: 'Empty = the business name', pattern: '[A-Za-z0-9 _-]{2,32}' })),
+      h('button', { class: 'btn primary', type: 'button', onclick: guard(async (e) => metaSignup(e.target, e.target.closest('.card').querySelector('[name=esid]').value.trim())) }, 'Connect with Facebook'));
+    api('/api/meta/signup-config').then((c) => { signup.hidden = !c.ready; }).catch(() => {});
     shell([
       h('h1', {}, 'Numbers'),
       h('p', { class: 'sub' }, 'Every WhatsApp number linked to the hub, its connection, and how much chat history has been pulled in.'),
-      h('div', { class: 'cards' }, state.accounts.map(accountCard), form),
+      h('div', { class: 'cards' }, state.accounts.map(accountCard), form, signup),
     ]);
+  }
+
+  /** Facebook's JS SDK, loaded only when someone presses "Connect with Facebook". */
+  function loadFacebookSdk(cfg) {
+    if (window.FB) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      window.fbAsyncInit = () => { window.FB.init({ appId: cfg.appId, autoLogAppEvents: true, xfbml: false, version: cfg.graphVersion }); resolve(); };
+      const s = document.createElement('script');
+      s.src = 'https://connect.facebook.net/en_US/sdk.js';
+      s.async = true;
+      s.crossOrigin = 'anonymous';
+      s.onerror = () => reject(new Error('Could not load Facebook\'s sign-up window (blocked by the browser or offline?)'));
+      document.head.append(s);
+    });
+  }
+
+  /** Meta Embedded Signup: the pop-up returns a code (FB.login) and the chosen number + account (postMessage). */
+  async function metaSignup(btn, id) {
+    const cfg = await api('/api/meta/signup-config');
+    if (!cfg.ready) throw new Error(`Meta sign-up is not set up yet: add ${cfg.missing.join(', ')} in Render`);
+    await loadFacebookSdk(cfg);
+    let chosen = null;
+    const onMessage = (e) => {
+      let host = '';
+      try { host = new URL(e.origin).hostname; } catch { return; }
+      if (!/(^|\.)facebook\.com$/.test(host)) return;
+      try {
+        const d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+        if (d?.type !== 'WA_EMBEDDED_SIGNUP') return;
+        chosen = d.event === 'CANCEL' ? { cancelled: d.data?.current_step || 'cancelled' } : d.data || {};
+      } catch { /* other Facebook messages */ }
+    };
+    window.addEventListener('message', onMessage);
+    btn.disabled = true;
+    const code = await new Promise((resolve) => window.FB.login((r) => resolve(r?.authResponse?.code || null), {
+      config_id: cfg.configId, response_type: 'code', override_default_response_type: true,
+      extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
+    })).finally(() => { btn.disabled = false; });
+    for (let i = 0; i < 30 && !chosen; i++) await new Promise((r) => setTimeout(r, 100)); // the message can trail the login callback
+    window.removeEventListener('message', onMessage);
+    if (chosen?.cancelled) return toast(`Meta sign-up stopped at "${chosen.cancelled}" — nothing was connected`);
+    if (!code) return toast('Meta sign-up was closed before the end — nothing was connected');
+    toast('Connecting the number with Meta…');
+    const acc = await api('/api/meta/signup', { body: { code, phoneNumberId: chosen?.phone_number_id, wabaId: chosen?.waba_id, id: id || undefined } });
+    toast(`Connected "${acc.label}" — checking it with Meta…`);
+    await route();
+    setTimeout(route, 4000);
   }
 
   function openLink(a) {

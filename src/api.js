@@ -18,6 +18,7 @@ import * as outbox from './outbox.js';
 import { getMedia } from './media.js';
 import { mountMcp, toolCatalog, runTool } from './mcp.js';
 import { mountMetaWebhook } from './meta.js';
+import { mountEmbeddedSignup } from './embedded-signup.js';
 import { toTs } from './util.js';
 import * as tasks from './tasks.js';
 import * as templates from './templates.js';
@@ -315,6 +316,7 @@ export function buildApp() {
     await act(req, acc.id, `Added number "${acc.label}"${acc.purpose ? ` (purpose: ${acc.purpose})` : ''}`);
     res.json(acc);
   }));
+  mountEmbeddedSignup(api, { wrap, act }); // Meta sign-up pop-up (Tech Provider): GET /meta/signup-config, POST /meta/signup
   api.patch('/accounts/:id', wrap(async (req, res) => {
     const before = normalizeSettings(manager.get(req.params.id).account.settings);
     const prev = { ...manager.get(req.params.id).account };
