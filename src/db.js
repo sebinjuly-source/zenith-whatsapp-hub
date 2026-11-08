@@ -424,6 +424,31 @@ CREATE TABLE IF NOT EXISTS wa_labels (
   PRIMARY KEY (account_id, label_id)
 );
 
+-- The AI's work queue (8 Nov 2026): one small job per person per event; see src/workqueue.js
+CREATE TABLE IF NOT EXISTS ai_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  chat_jid TEXT,
+  kind TEXT NOT NULL,
+  task_id BIGINT,
+  reason TEXT,
+  priority INTEGER NOT NULL DEFAULT 0,
+  due_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  claimed_at TIMESTAMPTZ,
+  done_at TIMESTAMPTZ,
+  result TEXT
+);
+CREATE INDEX IF NOT EXISTS ai_jobs_open ON ai_jobs (due_at) WHERE done_at IS NULL;
+-- Phone lists the hub keeps on linked numbers ("Waiting", "Needs you"): what it added, so it removes only its own
+CREATE TABLE IF NOT EXISTS phone_list_state (
+  account_id TEXT NOT NULL,
+  jid TEXT NOT NULL,
+  label TEXT NOT NULL,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, jid, label)
+);
+
 CREATE TABLE IF NOT EXISTS playbook_versions (
   id BIGSERIAL PRIMARY KEY,
   key TEXT NOT NULL,

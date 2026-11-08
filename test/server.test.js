@@ -2030,6 +2030,14 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('unsend_message', { account: 'mcpall', chat: P, message_id: 'M1', reason: 'toolbox' });
   await run('phone_action', { account: 'mcpall', chat: P, action: 'pin_message', message_id: 'M1', reason: 'toolbox' });
   await run('check_numbers', { account: 'mcpall', phones: [P] });
+  // the AI work queue (8 Nov 2026): a job for the toolbox person, taken and closed
+  const { enqueueJob } = await import('../src/workqueue.js');
+  await enqueueJob({ account: 'mcpall', jid: J, kind: 'message', reason: 'toolbox test', delayMinutes: 0 });
+  await query(`UPDATE ai_jobs SET due_at = now() - interval '1 minute' WHERE account_id = 'mcpall'`); // earlier messages queued it with a settling delay
+  const pk = await run('next_job', {});
+  assert.match(pk, /^JOB #\d+ — [^\n]*number mcpall · Toolbox Ravi \(\+919733300001\)[\s\S]*toolbox test[\s\S]*CHAT on mcpall/);
+  await run('finish_job', { id: idOf(pk), summary: 'toolbox: nothing to do' });
+  assert.match(await run('next_job', {}), /No job waiting/);
   // profile pictures (8 Nov 2026): the fake number has no socket, so there is none — a plain answer, never an error
   assert.match(await run('see_person', { person: P }), /No profile picture for \+919733300001 \(Toolbox Ravi\)/);
   assert.equal((await fetch(`${base}/api/avatar/mcpall/${J}`, { headers: { 'x-api-key': 'k' } })).status, 204, 'the dashboard image request gets 204 when there is no picture');
@@ -3346,4 +3354,88 @@ test('desk: a home-screen page for one number — its key opens only that number
   await query(`UPDATE outbox SET status = 'rejected' WHERE account_id IN ('dk1','dk2') AND status IN ('draft','queued')`);
   await manager.remove('dk1');
   await manager.remove('dk2');
+});
+
+test('AI jobs and phone lists (8 Nov 2026): every event becomes one small job; the hub keeps "Waiting" / "Needs you" on the phone itself', async () => {
+  await manager.create({ id: 'wq', label: 'Queue' });
+  const s = fake('wq');
+  await manager.update('wq', { settings: { aiMode: 'approve' } });
+  const wq = await import('../src/workqueue.js');
+  const pl = await import('../src/phonelists.js');
+  const P = '919744400001';
+  const J = `${P}@s.whatsapp.net`;
+  const now = Math.floor(Date.now() / 1000);
+  await (await import('../src/store.js')).upsertChats('wq', [{ jid: J, name: 'Queue Asha' }]);
+  // 1. they write → one job, a few minutes later, refreshed (not doubled) by a second message
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('wq',$1,'Q1',false,$2,'text','Room available this weekend?')`, [J, now - 1800]);
+  await s.afterIncoming({ chatJid: J, id: 'Q1', body: 'Room available this weekend?', type: 'text', ts: now - 1800 });
+  await s.afterIncoming({ chatJid: J, id: 'Q2', body: 'for 2 people', type: 'text', ts: now - 1790 });
+  let jobs = await query(`SELECT * FROM ai_jobs WHERE account_id = 'wq' AND done_at IS NULL`);
+  assert.equal(jobs.length, 1, 'one open job per person');
+  assert.equal(jobs[0].kind, 'message');
+  assert.match(jobs[0].reason, /Room available.*\| they wrote: "for 2 people"/);
+  assert.ok(new Date(jobs[0].due_at) > new Date(), 'it waits for the conversation to settle');
+  assert.match(await mcp('next_job', {}), /No job waiting/, 'not due yet');
+  // 2. the phone list "Waiting": they spoke last 30 min ago, nothing drafted → the hub adds the chat; our reply takes it out
+  const labels = [];
+  s.phoneAction = async (action, o) => { labels.push([action, o.jid, o.label]); return 'ok'; };
+  const cfg = await pl.getPhoneLists();
+  assert.equal(cfg.enabled, true);
+  let r = await pl.syncPhoneListsFor(s, manager, cfg);
+  assert.deepEqual(labels, [['label_chat', J, 'Waiting']]);
+  assert.equal(r.added, 1);
+  r = await pl.syncPhoneListsFor(s, manager, cfg);
+  assert.equal(labels.length, 1, 'nothing repeated when nothing changed');
+  // the owner's card about this person → "Needs you"
+  const card = (await call('POST', '/api/tasks', { account: 'wq', title: `Call now: Queue Asha (+${P}) – asked for a call`, priority: true })).data;
+  r = await pl.syncPhoneListsFor(s, manager, cfg);
+  assert.deepEqual(labels[1], ['label_chat', J, 'Needs you']);
+  // 3. the owner answers from the phone: the "Waiting" label goes, and a job asks the AI to record what was agreed
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('wq',$1,'OWN1',true,$2,'text','Yes madam, Saturday to Monday is fine, 2500 a night')`, [J, now - 60]);
+  await s.afterOwnMessage({ chatJid: J, id: 'OWN1', body: 'Yes madam, Saturday to Monday is fine, 2500 a night', type: 'text', ts: now - 60 });
+  jobs = await query(`SELECT * FROM ai_jobs WHERE account_id = 'wq' AND done_at IS NULL ORDER BY id`);
+  assert.equal(jobs.length, 1, 'still one open job for her');
+  assert.equal(jobs[0].kind, 'owner_replied', 'the owner reply upgrades the job');
+  assert.match(jobs[0].reason, /the owner wrote from the phone: "Yes madam/);
+  r = await pl.syncPhoneListsFor(s, manager, cfg);
+  assert.deepEqual(labels[2], ['unlabel_chat', J, 'Waiting'], 'we answered → out of Waiting; the owner card keeps "Needs you"');
+  // a message the HUB sent is not an owner reply
+  await query(`INSERT INTO outbox (account_id, to_jid, payload, source, status, message_id) VALUES ('wq',$1,'{"text":"hub"}','mcp','sent','HUB1')`, [J]);
+  await s.afterOwnMessage({ chatJid: J, id: 'HUB1', body: 'hub', type: 'text', ts: now - 30 });
+  assert.equal((await query(`SELECT count(*)::int n FROM ai_jobs WHERE account_id = 'wq' AND done_at IS NULL`))[0].n, 1);
+  // 4. the AI takes the job: the packet carries why, the open card, the chat (both sides) and what to do
+  await query(`UPDATE ai_jobs SET due_at = now() - interval '1 minute' WHERE account_id = 'wq'`);
+  assert.match(await mcp('hub_overview', { campaign: 'all' }), /WORK NOW: \d+ item\(s\) for the AI — 1 job\(s\) ready/, 'a due job is work, even when no chat is waiting');
+  const packet = await mcp('next_job', {});
+  assert.match(packet, /^JOB #\d+ — the owner answered from the phone[^\n]*number wq · Queue Asha \(\+919744400001\)/);
+  assert.match(packet, /WHY: they wrote: "Room available[\s\S]*the owner wrote from the phone/);
+  assert.match(packet, new RegExp(`CARD #${card.id} upcoming PRIORITY for owner \\| Call now: Queue Asha`));
+  assert.match(packet, /CHAT on wq \(last \d+\):[\s\S]*them: Room available[\s\S]*me: Yes madam, Saturday to Monday/);
+  assert.match(packet, /DO, then finish_job/);
+  const id = Number(packet.match(/^JOB #(\d+)/)[1]);
+  assert.match(await mcp('next_job', {}), /No job waiting/, 'a claimed job is not handed out twice');
+  assert.match(await mcp('finish_job', { id, summary: 'Recorded Sat–Mon at 2,500; card noted' }), /closed/);
+  assert.match(await mcp('finish_job', { id, summary: 'again' }), /not open/);
+  // 5. the owner's note on a card and Done-for-review each queue a job; a rejection with a reason too
+  await call('POST', `/api/tasks/${card.id}/notes`, { text: 'Spoke to her — coming Saturday 2 pm, record it' });
+  jobs = await query(`SELECT * FROM ai_jobs WHERE account_id = 'wq' AND done_at IS NULL`);
+  assert.equal(jobs.length, 1); assert.equal(jobs[0].kind, 'card'); assert.equal(Number(jobs[0].task_id), card.id);
+  assert.match(jobs[0].reason, /the owner wrote on card #\d+: "Spoke to her/);
+  await query(`UPDATE ai_jobs SET done_at = now() WHERE account_id = 'wq'`);
+  await call('PATCH', `/api/tasks/${card.id}`, { status: 'review' });
+  jobs = await query(`SELECT * FROM ai_jobs WHERE account_id = 'wq' AND done_at IS NULL`);
+  assert.equal(jobs.length, 1); assert.match(jobs[0].reason, /marked card #\d+ Done — review it/);
+  await query(`UPDATE ai_jobs SET done_at = now() WHERE account_id = 'wq'`);
+  const dr = await mcp('send_message', { account: 'wq', to: P, text: 'Dear Sir / Madam, …', campaign: 'all' });
+  await call('POST', `/api/outbox/${Number(dr.match(/#(\d+)/)[1])}/reject`, { reason: 'she is a lady, write Dear Ms Asha' }); // the OWNER rejects (an AI rejection queues nothing)
+  jobs = await query(`SELECT * FROM ai_jobs WHERE account_id = 'wq' AND done_at IS NULL`);
+  assert.equal(jobs.length, 1); assert.match(jobs[0].reason, /rejected draft #\d+ with the reason: "she is a lady/);
+  // 6. the setting: off → no list changes; the queue is visible over REST
+  const put = await call('PUT', '/api/phone-lists', { enabled: false });
+  assert.equal(put.data.enabled, false);
+  assert.deepEqual(await pl.syncPhoneLists(manager), { added: 0, removed: 0, failed: 0 });
+  await call('PUT', '/api/phone-lists', { enabled: true });
+  assert.equal((await call('GET', '/api/ai-jobs')).data.open.length >= 1, true);
+  await query(`UPDATE ai_jobs SET done_at = now() WHERE account_id = 'wq'`);
+  await manager.remove('wq');
 });

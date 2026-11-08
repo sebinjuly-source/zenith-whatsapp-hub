@@ -45,6 +45,9 @@ Node ≥ 20 ESM · Express 5 · Baileys 7 · Postgres (Supabase) / PGlite locall
   way the owner hands work to the AI: AI cards due (reply cards, undated to-dos, status `review` whatever the date),
   chats waiting on lists and on none, people who wrote again after our draft, owner notes on cards, rejections with a
   reason; a focused overview never claims nothing hub-wide (8 Nov 2026).
+- Bookkeeping is code, judgement is AI (8 Nov 2026): phone lists (`src/phonelists.js`), cards, follow-up dates and the
+  job queue (`src/workqueue.js`) are kept by the hub; the AI gets one small job per person (`next_job` / `finish_job`).
+  Never move a "must happen every time" step into a routine prompt — a sweep stops when the model feels done.
 - AI cost = context × turns. Bundle what the AI always reads per person (`packFor()`: `list_tasks pack`,
   `inbox_summary with_messages`) rather than trimming coverage. The cloud routines run on Sonnet by the owner's choice;
   read them with the `schedule` skill (RemoteTrigger) before describing or changing them — never from the manual alone.

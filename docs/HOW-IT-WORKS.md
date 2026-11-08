@@ -175,6 +175,28 @@ list_templates, save_template, list_meta_templates, create_meta_template, meta_h
 hub_overview, owner_feedback, describe_data, inspect_data, edit_messages, find_contacts, save_contact, archive_list, remove_list_member, list_rules, save_rule, set_chat_state, get_playbook, save_playbook, recent_activity, save_media,
 fetch_older_messages, backfill_history, list_shared_contacts, find_followups`.
 
+**Phone lists kept by the hub (8 Nov 2026).** On every linked number the hub itself keeps two WhatsApp lists current,
+every 10 minutes, the way Perisclaw does — no AI involved: **Waiting** = the person spoke last, 20+ minutes ago, within
+3 days, and nothing of ours is drafted or queued for them (out the moment we answer; a chat with a draft is in "Draft
+waiting" instead); **Needs you** = an owner card is open about them (a call, a decision, call notes, a visit in the next
+2 days; out when the card closes). The hub remembers what it added (`phone_list_state`) and removes only that, never a
+list made by hand; at most 40 changes per number per run. Setting: `GET/PUT /api/phone-lists` `{enabled, accounts,
+waitingAfterMin, waiting, needsYou}` (on by default for every linked number). Code: `src/phonelists.js`, run from the
+10-minute tick. Why: the owner asked for this repeatedly; it had been left to the AI routine's last step, which never ran.
+
+**The AI's work queue (8 Nov 2026).** Every event that may need the AI becomes ONE small job for ONE person
+(`ai_jobs`, `src/workqueue.js`): they wrote (3 minutes after the last message, so a burst is one job); **the owner
+answered from the phone** while the person is on a list or has an open card (10 minutes later — so what was agreed by
+hand gets recorded: "come on the 10th" typed by hand on 27 Oct left no date anywhere); the owner wrote a note on a card,
+marked a card Done (review), or rejected a draft with a reason (1 minute). One open job per person per number; a new
+event refreshes it. The AI calls `next_job` — it claims the most important due job and returns the packet: why, the
+person's open cards (the owner's too, with the latest note), list row, waiting messages, the last 12 messages, and the
+list of outcomes (draft / record / owner card / import / nothing) — acts, then `finish_job(id, summary)`. A claimed job
+not finished in 30 minutes is handed out again; a job untaken for 3 days expires with a warning in Activity. The hourly
+routine "Zenith hub – inbox jobs" loops `next_job` (at most 20 per run); the 4-hourly routine still works the Board.
+`hub_overview`'s verdict counts ready jobs; `GET /api/ai-jobs` shows the queue. Why: one long sweep stops when it feels
+done (8 Nov: two runs quit at ~40 turns with 100+ chats waiting); small jobs are never lost and cost one chat's context.
+
 **Profile pictures (8 Nov 2026).** The person's WhatsApp picture shows in the Inbox list and chat header, on every
 Drafts card and on the desks, so whoever approves sees who they are writing to. The AI sees it too: `see_person(phone
 or name)` returns the picture itself (menu: Chats & people), and the rules say to look when a name or gender is unclear
@@ -790,6 +812,8 @@ tokens, but **a complete and accurate answer matters more than tokens**; non-rep
 | The owner got "⏳ … must go out soon" | a draft with a send-by time within 3 h is waiting for approval — approve or reject it in Drafts |
 | A routine run ended "Nothing due" while something waited | `hub_overview(campaign="all")` first line: which count was 0? Review cards (`status='review'`), owner notes (`list_tasks(owner_notes=true)`), rejections (`owner_feedback`), chats incl. `include_unlisted`, people who wrote after a draft (`waiting_at` in `inboxRows`). The verdict counts all of them; if a new hand-off path exists, add it to the verdict (mcp.js, "one-line verdict") |
 | The routine fetched person_context for every card anyway | the prompt should say `pack=true` / `with_messages=true`; read the live routine with the `schedule` skill (RemoteTrigger get) — the manual may be stale |
+| A chat is not in "Waiting" / "Needs you" on the phone | `phone_list_state` for that jid; Activity "Phone lists: could not …" (WhatsApp's reason, once per 6 h); the chat must be 1:1, they spoke last 20+ min ago, no draft/queued for them (Waiting) or an open OWNER card with their chat ref / phone in the title (Needs you); setting `GET /api/phone-lists` |
+| A message / owner reply / card note never reached the AI | `GET /api/ai-jobs` (open jobs with due_at); Activity "AI job #n done"; `ai_jobs.result = 'expired…'` means no session took it for 3 days — check the hourly routine's runs |
 | No profile picture shows for someone | normal when they hide it or have none; also when no linked number is connected (Meta-only); the hub remembers "none" for 2 h — `forgetAvatar` / a restart clears it |
 | The manual and the live routine disagree (model, times, steps) | the routine is the truth: RemoteTrigger `get`, then fix the manual (8 Nov: "Haiku" in the manual, Sonnet live) |
 

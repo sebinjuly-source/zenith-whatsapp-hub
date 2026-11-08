@@ -592,12 +592,30 @@ export class Session extends EventEmitter {
     if (history && rows.length) this.emit('history-rows', new Set(rows.map((r) => r.chatJid)));
     if (live) {
       for (const r of rows) {
-        if (r.fromMe) continue;
+        if (r.fromMe) {
+          this.afterOwnMessage(r).catch((err) => this.log.warn({ err: err.message }, 'own-message step failed'));
+          continue;
+        }
         this.emit('incoming', r);
         this.afterIncoming(r).catch((err) => this.log.warn({ err: err.message }, 'post-incoming step failed'));
       }
     }
     return rows.length;
+  }
+
+  /**
+   * A message of ours typed on the PHONE (not sent by the hub): when the person is on a list or has an open card, the
+   * owner has just answered by hand — the AI gets a small job to record what was agreed and keep the cards true
+   * (8 Nov 2026; 27 Oct: "come on the 10th" typed by hand left no date anywhere).
+   */
+  async afterOwnMessage(r) {
+    if (!r?.chatJid || isJidGroup(r.chatJid) || !/@s\.whatsapp\.net$/.test(r.chatJid)) return;
+    const [hub] = await query('SELECT 1 FROM outbox WHERE message_id = $1 LIMIT 1', [r.id]);
+    if (hub) return; // the hub sent it (or its echo)
+    const wq = await import('../workqueue.js');
+    if (!(await wq.isTracked(this.id, r.chatJid))) return;
+    await wq.enqueueJob({ account: this.id, jid: r.chatJid, kind: 'owner_replied', priority: 1, delayMinutes: 10,
+      reason: `the owner wrote from the phone: "${String(r.body || `[${r.type}]`).replace(/\s+/g, ' ').slice(0, 100)}"` });
   }
 
   async afterIncoming(r) {
@@ -609,6 +627,11 @@ export class Session extends EventEmitter {
     }
     // A message from them brings a snoozed / done chat back to the open list.
     await store.reopenOnIncoming(this.id, r.chatJid);
+    // …and is one small job for the AI (a few minutes later, so a burst of messages becomes one job) — see workqueue.js
+    if (!isJidGroup(r.chatJid)) {
+      await import('../workqueue.js').then((wq) => wq.enqueueJob({ account: this.id, jid: r.chatJid, kind: 'message',
+        reason: `they wrote: "${String(r.body || `[${r.type}]`).replace(/\s+/g, ' ').slice(0, 100)}"` })).catch((err) => this.log.warn({ err: err.message }, 'AI job not queued'));
+    }
     // A candidate on a list wrote: "Reply to …" on the board until someone answers (so no reply goes unseen).
     const board = await import('../board.js');
     await board.noteIncoming(this.id, r).catch((err) => this.log.warn({ err: err.message }, 'board card failed'));

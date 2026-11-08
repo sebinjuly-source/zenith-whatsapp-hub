@@ -547,6 +547,11 @@ export async function reject(id, { reason = '', actor = 'you' } = {}) {
   if (!row) throw new Error('Nothing to reject (already sent?)');
   const uncarded = await noteRejection([row], { reason, actor });
   if (actor !== 'ai') await reasonCard(uncarded, reason).catch(() => {});
+  // a reason is an instruction for the AI: one small job for that person within the hour (8 Nov 2026)
+  if (actor !== 'ai' && String(reason || '').trim()) {
+    await import('./workqueue.js').then((wq) => wq.enqueueJob({ account: row.account_id, jid: row.to_jid, kind: 'card', priority: 2, delayMinutes: 1,
+      reason: `the owner rejected draft #${row.id} with the reason: "${String(reason).replace(/\s+/g, ' ').slice(0, 140)}"` })).catch(() => {});
+  }
   await afterBatchChange([row]); // its task and list show the change at once
   return row;
 }

@@ -33,7 +33,26 @@ export async function addNote(taskId, text, actor = 'you') {
     if (dup) return { ...t, duplicate: true };
     await q('INSERT INTO task_log (task_id, actor, kind, text) VALUES ($1,$2,$3,$4)', [t.id, actor, 'note', note.slice(0, 2000)]);
     return t;
+  }).then(async (t) => {
+    // an owner's note is an instruction: a small job for the AI within the hour (8 Nov 2026)
+    if (actor === 'you' && !t.duplicate) await cardJob(t.id, `the owner wrote on card #${t.id}: "${note.slice(0, 120)}"`).catch(() => {});
+    return t;
   });
+}
+
+/** Queue an AI job for a card the owner touched (note, Done for review): by the person's chat when the card has one. */
+async function cardJob(taskId, reason) {
+  const [t] = await query('SELECT id, account_id, ref, title FROM tasks WHERE id = $1', [taskId]);
+  if (!t) return;
+  const parts = String(t.ref || '').split(':');
+  let jid = parts[2] && parts[2].includes('@') ? parts[2] : null;
+  let account = ['reply', 'remind'].includes(parts[0]) ? parts[1] : t.account_id;
+  if (!jid) {
+    const m = String(t.title || '').match(PHONE_RE);
+    if (m) jid = (await import('./store.js')).toJid(m[0]);
+  }
+  const wq = await import('./workqueue.js');
+  await wq.enqueueJob({ account, jid: jid && /@s\.whatsapp\.net$/.test(jid) ? jid : null, kind: 'card', taskId: t.id, reason, priority: 2, delayMinutes: 1 });
 }
 
 /** One note on several cards; optionally a card for the AI (due now) that lists them, and close the originals. */
@@ -215,6 +234,8 @@ export async function updateTask(id, { title, details, status, dueAt, assignee, 
     details && 'Details edited',
   ].filter(Boolean);
   if (changes.length) await logTask(row.id, changes.join(' · '), { actor });
+  // the owner's Done is a hand-over: the AI reads the card and its notes, acts, then closes it — as a job within the hour
+  if (row.status === 'review' && before?.status !== 'review' && actor !== 'ai') await cardJob(row.id, `the owner marked card #${row.id} Done — review it: "${String(row.title).slice(0, 100)}"`).catch(() => {});
   return row;
 }
 

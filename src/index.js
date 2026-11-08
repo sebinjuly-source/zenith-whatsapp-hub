@@ -36,6 +36,9 @@ async function main() {
       Object.assign(lastSync, { at: new Date().toISOString(), ok: false, error: err.message });
       logger.error({ err: err.message }, 'board sync failed');
     });
+    // The phone's own lists ("Waiting", "Needs you") kept in step by the hub, not by the AI (8 Nov 2026)
+    await import('./phonelists.js').then((p) => p.syncPhoneLists(manager)).then((r) => (r.added || r.removed) && logger.info(r, 'phone lists'))
+      .catch((err) => logger.warn({ err: err.message }, 'phone lists failed'));
   };
   setInterval(tick, 10 * 60 * 1000).unref();
   setTimeout(tick, 60 * 1000).unref();

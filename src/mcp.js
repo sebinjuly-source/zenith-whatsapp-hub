@@ -283,7 +283,7 @@ export async function enforceScope(focus, name, a) {
 export const CORE_TOOLS = new Set(['hub_overview', 'owner_feedback', 'get_playbook', 'inbox_summary', 'list_tasks', 'create_task', 'update_task',
   'add_task_note', 'task_history', 'get_messages', 'person_context', 'find_person', 'send_message', 'list_outbox', 'edit_messages', 'reject_draft',
   'reschedule_messages', 'list_lists', 'list_members', 'import_list', 'update_list_member', 'list_campaigns', 'open_file', 'inspect_data',
-  'describe_data', 'more_tools', 'use_tool']);
+  'describe_data', 'more_tools', 'use_tool', 'next_job', 'finish_job']);
 const MENU_TOOLS = new Set(['more_tools', 'use_tool']);
 const MENU_GROUPS = [
   ['Chats & people', ['see_person', 'list_chats', 'search_messages', 'find_people', 'find_followups', 'get_contact', 'update_contact', 'set_chat_state', 'fetch_older_messages', 'list_shared_contacts', 'save_contact', 'check_numbers', 'find_contacts', 'log_call_result']],
@@ -329,20 +329,8 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
    * the chat (oldest→newest, NEW when after `sinceTs`). Used by list_tasks(pack) and inbox_summary(with_messages) so a
    * person costs 2–3 turns instead of 5–7: every turn re-reads the whole conversation, so turns are what cost.
    */
-  async function packFor(accountId, jid, { messages = 8, sinceTs = null, indent = '    ' } = {}) {
-    const out = [];
-    const mem = await query(
-      `SELECT l.name AS list, l.role, m.stage, m.visit_at, m.followup_at, m.followup_note, m.outcome, m.notes
-       FROM list_members m JOIN lists l ON l.id = m.list_id WHERE m.jid = $1 AND l.archived IS NULL ORDER BY (l.account_id = $2) DESC, l.id DESC LIMIT 2`, [jid, accountId]);
-    for (const m of mem) out.push(`${indent}LIST ${m.list}${m.role ? ` (${m.role})` : ''}: ${m.stage || 'no stage'}${m.visit_at ? ` · visit ${d(m.visit_at)}` : ''}${m.followup_at ? ` · follow-up ${d(m.followup_at)}` : ''}${m.followup_note ? ` · "${trim(m.followup_note, 80)}"` : ''}${m.outcome ? ` · outcome: ${trim(m.outcome, 60)}` : ''}${m.notes ? ` · notes: ${trim(m.notes, 120)}` : ''}`);
-    const waiting = await query(`SELECT id, account_id, status, scheduled_at, left(COALESCE(payload->>'text', payload->'waTemplate'->>'name', '[file]'), 140) AS text FROM outbox
-      WHERE to_jid = $1 AND status IN ('draft','queued','sending') ORDER BY id DESC LIMIT 3`, [jid]);
-    for (const o of waiting) out.push(`${indent}WAITING #${o.id} ${o.status} on ${o.account_id}${o.scheduled_at && new Date(o.scheduled_at) > new Date() ? ` for ${d(o.scheduled_at)}` : ''}: "${trim(o.text, 140)}" — change it with edit_messages, never a second draft`);
-    const rows = await store.getMessages(accountId, jid, { limit: messages });
-    if (!rows.length) out.push(`${indent}CHAT on ${accountId}: no messages yet`);
-    else out.push(`${indent}CHAT on ${accountId} (last ${rows.length}):`, ...rows.map((m) => `${indent}  ${sinceTs && !m.from_me && Number(m.ts) > sinceTs ? 'NEW ' : ''}${msgLine(m, 220)}`));
-    return out;
-  }
+  async function packFor(accountId, jid, opts = {}) { return (await import('./packet.js')).personPacket(accountId, jid, opts); }
+
 
   tool('list_accounts', 'List the WhatsApp numbers in the hub: id, purpose, phone, connection status, AI mode (approve/auto), and how much history is stored. Start here.', {}, async () => {
     const lines = [];
@@ -428,10 +416,11 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
     // rejections with a reason. A focused overview never claims it for the whole hub.
     const aiDue = dueNow.filter((t) => (t.assignee || 'you') === 'ai' || t.kind === 'reply' || t.status === 'review').length;
     const wroteAgain = waiting.filter((w) => w.waiting_msg && w.waiting_at && Number(w.ts) > Number(w.waiting_at)).length + wroteAgainOff;
-    const work = aiDue + unanswered.length + offCount + wroteAgain + pendingNotes.length + fb.n;
+    const jobsReady = await import('./workqueue.js').then((wq) => wq.readyCount()).catch(() => 0);
+    const work = aiDue + unanswered.length + offCount + wroteAgain + pendingNotes.length + fb.n + jobsReady;
     const where = cpShown || (a.campaign && !/^(none|all)$/i.test(a.campaign)) ? ` in campaign "${a.campaign}"` : '';
     out.splice(verdictAt, 0, work
-      ? `WORK NOW${where}: ${work} item(s) for the AI — ${aiDue} card(s) due, ${unanswered.length + offCount} chat(s) waiting${wroteAgain ? `, ${wroteAgain} wrote again after our draft (re-read before it goes)` : ''}, ${pendingNotes.length} owner note(s), ${fb.n} rejection(s) with a reason. Details below; list_tasks(for="ai", due_now=true, pack=true) gives every due card with its chat.`
+      ? `WORK NOW${where}: ${work} item(s) for the AI — ${jobsReady} job(s) ready (next_job, one person each — start there), ${aiDue} card(s) due, ${unanswered.length + offCount} chat(s) waiting${wroteAgain ? `, ${wroteAgain} wrote again after our draft (re-read before it goes)` : ''}, ${pendingNotes.length} owner note(s), ${fb.n} rejection(s) with a reason. Details below; list_tasks(for="ai", due_now=true, pack=true) gives every due card with its chat.`
       : `NOTHING DUE for the AI right now${where}: no card due or marked Done for review, no chat waiting, no owner note, no rejection to act on.${where ? ' Other campaigns were not checked — hub_overview(campaign="all") covers everything.' : ' A routine run can end here.'}`);
     const upcomingVisits = later.filter((t) => t.kind === 'visit').slice(0, 5);
     out.push(`2. COMING UP: ${later.length} dated cards${upcomingVisits.length ? '; interviews: ' + upcomingVisits.map((t) => trim(t.title.replace(/^Interview: /, ''), 50)).join('; ') : ''}`);
@@ -1191,6 +1180,19 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
       for (const m of rows) out.push(`  ${cardTs && !m.from_me && Number(m.ts) > cardTs ? 'NEW ' : ''}${msgLine(m, 300)}`);
     }
     return out.join('\n');
+  });
+
+  tool('next_job', 'Take the next piece of work the hub has queued for the AI — one person, one packet: why (they wrote / the owner answered from the phone / the owner left a note, marked a card Done or rejected a draft with a reason), their open cards, list row, waiting messages and the last 12 messages, and what a finished job looks like. Work it, then finish_job. Call again until it says no job is waiting.', {}, async () => {
+    const wq = await import('./workqueue.js');
+    const j = await wq.nextJob();
+    return j ? j.text : 'No job waiting for the AI right now. (Jobs appear a few minutes after someone writes, after the owner answers from the phone, or after a card note / Done / rejection reason.)';
+  });
+  tool('finish_job', 'Close a job from next_job with one line on what you did (draft and card numbers). A job left open comes back to the next session after 30 minutes.', {
+    id: z.number().int(), summary: z.string().describe('What you did, one line'),
+  }, async (a) => {
+    const wq = await import('./workqueue.js');
+    const r = await wq.finishJob(a.id, a.summary);
+    return `Job #${r.id} closed.`;
   });
 
   tool('see_person', 'Show a person\'s WhatsApp profile picture — a face, a couple, a family, a shop or company logo — so you address them properly and warmly ("Dear Mrs Savitha", a business by its name) instead of "Sir / Madam". Use it whenever the name or the gender is unclear before drafting. Fetched through a linked number (Meta API numbers have none); hidden by their privacy settings = no picture. Never describe their looks to them.', {

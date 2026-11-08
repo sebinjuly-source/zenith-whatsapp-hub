@@ -667,6 +667,18 @@ export function buildApp() {
     res.json(f);
   }));
   // Drafts on the phone: { enabled, accounts: [ids], campaigns: [names] (empty = all) }
+  // Phone lists kept by the hub ("Waiting" / "Needs you" on each linked number): read / change the setting; AI job queue stats
+  api.get('/phone-lists', wrap(async (req, res) => res.json(await (await import('./phonelists.js')).getPhoneLists())));
+  api.put('/phone-lists', wrap(async (req, res) => {
+    const p = await import('./phonelists.js');
+    const next = await p.setPhoneLists(req.body || {});
+    await logEvent(null, 'info', `Phone lists setting: ${next.enabled ? 'on' : 'off'}, after ${next.waitingAfterMin} min, lists "${next.waiting}" / "${next.needsYou}"${next.accounts.length ? `, numbers ${next.accounts.join(', ')}` : ''}`, 'you');
+    res.json(next);
+  }));
+  api.get('/ai-jobs', wrap(async (req, res) => {
+    const wq = await import('./workqueue.js');
+    res.json({ ...(await wq.queueStats()), open: await query(`SELECT id, account_id, chat_jid, kind, task_id, reason, priority, due_at, claimed_at FROM ai_jobs WHERE done_at IS NULL ORDER BY priority DESC, due_at LIMIT 100`) });
+  }));
   api.get('/phone-drafts', wrap(async (req, res) => res.json(await (await import('./phonedrafts.js')).getPhoneDrafts())));
   api.put('/phone-drafts', wrap(async (req, res) => {
     const r = await (await import('./phonedrafts.js')).setPhoneDrafts(req.body || {});
