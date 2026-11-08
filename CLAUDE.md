@@ -41,6 +41,13 @@ Node ≥ 20 ESM · Express 5 · Baileys 7 · Postgres (Supabase) / PGlite locall
   escapes (newline, \s, carriage return) get mangled otherwise (2 Nov: four broken edits). Run `node --check` after
   every scripted edit.
 - After a fix to the hub, sync the skill template and update `docs/HOW-IT-WORKS.md` (§10.10 recipes, §10.11 method).
+- `hub_overview`'s first line is the verdict a routine may stop on. Any change to "NOTHING DUE" must keep counting EVERY
+  way the owner hands work to the AI: AI cards due (reply cards, undated to-dos, status `review` whatever the date),
+  chats waiting on lists and on none, people who wrote again after our draft, owner notes on cards, rejections with a
+  reason; a focused overview never claims nothing hub-wide (8 Nov 2026).
+- AI cost = context × turns. Bundle what the AI always reads per person (`packFor()`: `list_tasks pack`,
+  `inbox_summary with_messages`) rather than trimming coverage. The cloud routines run on Sonnet by the owner's choice;
+  read them with the `schedule` skill (RemoteTrigger) before describing or changing them — never from the manual alone.
 
 ## Where to read more (don't copy it here)
 `docs/HOW-IT-WORKS.md` is the full manual — for the owner and for debugging: §10 follows a message end to end through

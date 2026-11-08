@@ -779,6 +779,9 @@ tokens, but **a complete and accurate answer matters more than tokens**; non-rep
 | A call length looks 1000× too long or short | the unit guess in `callLogRow` — compare with the raw values in the "call log record" log line |
 | Cold messages wait although "last hour 7/10" | the hourly reserve: 3 are kept for warm and "send by" messages |
 | The owner got "⏳ … must go out soon" | a draft with a send-by time within 3 h is waiting for approval — approve or reject it in Drafts |
+| A routine run ended "Nothing due" while something waited | `hub_overview(campaign="all")` first line: which count was 0? Review cards (`status='review'`), owner notes (`list_tasks(owner_notes=true)`), rejections (`owner_feedback`), chats incl. `include_unlisted`, people who wrote after a draft (`waiting_at` in `inboxRows`). The verdict counts all of them; if a new hand-off path exists, add it to the verdict (mcp.js, "one-line verdict") |
+| The routine fetched person_context for every card anyway | the prompt should say `pack=true` / `with_messages=true`; read the live routine with the `schedule` skill (RemoteTrigger get) — the manual may be stale |
+| The manual and the live routine disagree (model, times, steps) | the routine is the truth: RemoteTrigger `get`, then fix the manual (8 Nov: "Haiku" in the manual, Sonnet live) |
 
 
 ### 10.16 Desks — a home-screen page for whoever holds one number (6 Nov)
