@@ -350,15 +350,20 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
     const out = [];
     const now = new Date();
     const open = await tasks.listTasks({ limit: 500, role: a.campaign });
+    let cpShown = false;
     if (a.campaign) {
       out.push(`FOCUS: campaign "${a.campaign}" only — other campaigns are left out of this overview. Every tool filters to ${focus ? `the campaign open in the dashboard (${scope.label(focus)})` : "all campaigns"} unless you pass campaign="<name>" or "all".`);
       const cp = await getCampaignPlaybook(a.campaign);
       out.push(cp ? `CAMPAIGN PLAYBOOK — ${cp.campaign} (follow it together with the main playbook):\n${cp.text}\n---` : `(No campaign playbook for "${a.campaign}" — follow the main playbook.)`);
+      cpShown = !!cp;
     }
     const campaigns = await query(`SELECT DISTINCT role FROM lists WHERE role IS NOT NULL AND archived IS NULL ORDER BY role`);
     if (!a.campaign && campaigns.length > 1) out.push(`Campaigns running: ${campaigns.map((c) => c.role).join(', ')} — pass campaign=<role> to focus on one.`);
     // the playbook is no longer part of the connection's instructions: say where the rules are, every time
-    out.push('RULES: get_playbook — the owner\'s rules; read them once per session before drafting or changing anything.');
+    // the playbook is paid for once: a campaign's rules are already above when the overview is focused (8 Nov 2026)
+    out.push(cpShown ? 'RULES: this campaign\'s playbook is above — do not fetch it again; the main playbook once per session: get_playbook(campaign="all").' : 'RULES: get_playbook — the owner\'s rules; read them once per session before drafting or changing anything.');
+    const verdictAt = out.length;
+    let offCount = 0;
     const dueNow = open.filter((t) => !t.due_at || new Date(t.due_at) <= new Date(now.getTime() + 3600e3));
     const later = open.filter((t) => t.due_at && new Date(t.due_at) > new Date(now.getTime() + 3600e3));
     const byKind = (rows, k) => rows.filter((t) => t.kind === k).length;
@@ -381,6 +386,7 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
       const listed = new Set(waiting.map((w) => `${w.account_id}:${w.chat_jid}`));
       const off = (await inboxRows({ since: Math.floor(Date.now() / 1000) - 3 * 86400, limit: 200, unlisted: true }).catch(() => []))
         .filter((w) => !listed.has(`${w.account_id}:${w.chat_jid}`) && !w.waiting_msg);
+      offCount = off.length;
       if (off.length) {
         const per = Object.entries(off.reduce((m, w) => ({ ...m, [w.account_id]: (m[w.account_id] || 0) + 1 }), {})).map(([k, n]) => `${k} ${n}`).join(', ');
         out.push(`   INBOX (not on a list): ${off.length} chat(s) waiting (${per}) — guests, patients, leads, staff. Sort each: reply → draft; owner must act → create_task for="you"; follow-up → import_list + follow_up_at; staff needing nothing → leave → inbox_summary`);
@@ -388,6 +394,12 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
     }
     const [fb] = await query(`SELECT count(*)::int n FROM outbox WHERE status = 'rejected' AND error LIKE 'Rejected:%' AND created_at > now() - interval '3 days'`);
     if (fb.n) out.push(`   OWNER FEEDBACK: ${fb.n} draft(s) rejected with a reason in the last 3 days → owner_feedback (some reasons are instructions, e.g. "wish him on festivals")`);
+    // one-line verdict at the top, so a quiet run (nothing for the AI) ends after this single call (8 Nov 2026)
+    const aiDue = dueNow.filter((t) => (t.assignee || 'you') === 'ai' || t.kind === 'reply').length;
+    const work = aiDue + unanswered.length + offCount + pendingNotes.length + fb.n;
+    out.splice(verdictAt, 0, work
+      ? `WORK NOW: ${work} item(s) for the AI — ${aiDue} card(s) due, ${unanswered.length + offCount} chat(s) waiting, ${pendingNotes.length} owner note(s), ${fb.n} rejection(s) with a reason. Details below.`
+      : 'NOTHING DUE for the AI right now: no card due, no chat waiting, no owner note, no rejection to act on. A routine run can end here.');
     const upcomingVisits = later.filter((t) => t.kind === 'visit').slice(0, 5);
     out.push(`2. COMING UP: ${later.length} dated cards${upcomingVisits.length ? '; interviews: ' + upcomingVisits.map((t) => trim(t.title.replace(/^Interview: /, ''), 50)).join('; ') : ''}`);
     const [dr] = a.campaign
@@ -632,13 +644,13 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
 
   tool(
     'send_message',
-    'Send a WhatsApp message (optionally with a file from a URL: PDF, image, voucher). Respects the account\'s AI mode: in "approve" mode it becomes a draft the owner approves in the dashboard; in "auto" mode it is queued with the account\'s random delay, daily cap and sending hours. Messages to the owner\'s trusted recipients (Settings → Send without approval to; by default the alert phones) go out without approval in either mode: use this to send the owner a report or alert. Tell the user which happened.',
+    'Send a WhatsApp message, optionally with a file. In "approve" mode it becomes a draft for the owner; in "auto" mode it is queued within the number\'s limits and hours. Messages to the owner\'s trusted recipients (the alert phones) go out at once in either mode — use this for reports and alerts. Say which happened.',
     {
       account: accountArg,
       to: chatArg,
       text: z.string().optional(),
       attachment_url: z.string().optional().describe('Public URL, Google Drive link, or a hub file link from upload_file'),
-      attachment_base64: z.string().optional().describe('OR the file itself: its content as base64 (a PDF, image … from your computer or one you made) — no link or Drive needed; give file_name with the extension, e.g. "Certificate.pdf"'),
+      attachment_base64: z.string().optional().describe('OR the file itself as base64 (PDF, image …); give file_name with the extension'),
       mimetype: z.string().optional().describe('With attachment_base64, e.g. application/pdf (guessed from file_name)'),
       file_name: z.string().optional(),
       send_as: z.enum(['document', 'image', 'video', 'audio']).optional(),
@@ -649,13 +661,13 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
       reply_to_message_id: z.string().optional().describe('Quote this message (id from get_messages) in the reply'),
       idempotency_key: z.string().optional().describe('Optional unique key; retrying with the same key never sends twice'),
       wa_template: waTemplateArg.describe('Meta Cloud API numbers only: send this approved Meta template (required when the person has not written in the last 24 h)'),
-      buttons: z.array(z.string()).max(3).optional().describe('Up to 3 tap-to-reply answers, e.g. ["Haan, aaunga","Nahi"] (≤20 chars). Meta numbers show buttons; linked numbers list them as "Reply: …"'),
-      choices: z.array(z.string()).max(10).optional().describe('Up to 10 options to tap from a list (≤24 chars each), e.g. appointment or interview slots ["Sat 11 am","Sat 6 pm","Mon 11 am"]. Meta numbers show a "Choose" list; linked numbers get a numbered list to reply to. Use buttons for 2–3 answers, choices for more'),
+      buttons: z.array(z.string()).max(3).optional().describe('Up to 3 tap-to-reply answers (≤20 chars), e.g. ["Haan, aaunga","Nahi"]; linked numbers list them as "Reply: …"'),
+      choices: z.array(z.string()).max(10).optional().describe('Up to 10 options to tap (≤24 chars each), e.g. slots ["Sat 11 am","Sat 6 pm"]; linked numbers get a numbered list. Buttons for 2–3 answers, choices for more'),
       choices_button: z.string().optional().describe('Label of the list button (≤20 chars), default "Choose"'),
-      schedule_at: z.string().optional().describe('Send later: "YYYY-MM-DD HH:MM" (India time) or ISO. It shows on the Board as "Scheduled: …" until it goes out. In approve mode the owner still approves it first.'),
+      schedule_at: z.string().optional().describe('Send later: "YYYY-MM-DD HH:MM" India time (shows on the Board as "Scheduled: …"; approve mode still approves it first)'),
       other_number_ok: z.boolean().optional().describe('Only if the owner asked: start a chat on this number although the person already chats with another number'),
-      expires_at: z.string().optional().describe('"Send by": if it has not gone out by this time ("YYYY-MM-DD HH:MM" owner time or ISO) it is dropped — set it for anything tied to a day (festival / birthday wishes, offers ending, reminders before an interview). Such messages go out before other outreach; the hub warns the owner if the number\'s daily limit can\'t fit them in time.'),
-      also_send: z.boolean().optional().describe('Only when BOTH messages should reach them: draft this although another AI message to the same person is still waiting (normally you change that one with edit_messages instead)'),
+      expires_at: z.string().optional().describe('"Send by" ("YYYY-MM-DD HH:MM" India time): dropped if not out by then — set it for anything tied to a day (wishes, offers ending, reminders). These go before other outreach'),
+      also_send: z.boolean().optional().describe('Draft this although another AI message to them is waiting (normally edit_messages changes that one)'),
     },
     async (a) => {
       const s = await manager.resolve(a.account);
@@ -1848,7 +1860,7 @@ ${p.text}` : `(No playbook for campaign "${camp}" — follow the main rules.)`;
       skip_if_contacted_days: z.number().int().min(0).optional().describe('Default 30; 0 = do not skip'),
       idempotency_key: z.string().optional().describe('Optional unique key, e.g. sheet name + date; repeating it never creates a second bulk send'),
       wa_template: waTemplateArg.describe('Required on Meta Cloud API numbers: the approved Meta template (params may use {name} etc.)'),
-      expires_at: z.string().optional().describe('"Send by": if it has not gone out by this time ("YYYY-MM-DD HH:MM" owner time or ISO) it is dropped — set it for anything tied to a day (festival / birthday wishes, offers ending, reminders before an interview). Such messages go out before other outreach; the hub warns the owner if the number\'s daily limit can\'t fit them in time.'),
+      expires_at: z.string().optional().describe('"Send by" ("YYYY-MM-DD HH:MM" India time): dropped if not out by then — set it for anything tied to a day (wishes, offers ending, reminders). These go before other outreach'),
     },
     async (a) => {
       const r = await outbox.bulkSend({ expiresAt: localTime(a.expires_at) || null,

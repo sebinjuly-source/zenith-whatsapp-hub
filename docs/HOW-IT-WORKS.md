@@ -668,6 +668,18 @@ pass on a throw-away database (phone and desktop widths).
 - Answers near the 16 KB budget: `list_tasks(campaign="all")` with no filter and `list_outbox(limit=300)` are cut (they
   say so); `get_playbook` 15–20 KB. The routine calls (`list_tasks(for="ai", due_now=true)` 4 KB, `hub_overview`
   5–9 KB, `owner_feedback` 6 KB) are fine.
+- **8 Nov 2026, what a routine run costs.** A run is one model (Haiku) making 20–40 tool calls; every call re-reads
+  the whole conversation, so the cost is *context size × number of turns*, not the sum of the answers. Measured on the
+  code: the listed tools are 27 = 31 KB (≈ 7,900 tokens; was 93 KB before the menu), server instructions ≈ 5 KB, the
+  start-up calls (`hub_overview` 5–13 KB, `get_playbook` 15–20 KB, `owner_feedback`, `inbox_summary` × 3 numbers)
+  ≈ 10–12k tokens, then 1.5–3k per person handled. The exact figures per run are on the routine's Runs page at
+  claude.ai/code/routines. Changes made: (1) a focused `hub_overview` already carries the campaign playbook, so its RULES
+  line now says not to fetch it again (`get_playbook(campaign="all")` for the main one, once); (2) `send_message`'s
+  parameter stories moved here (5.0 → 4.3 KB) — the tool list is already lean, further trimming buys little; (3)
+  `hub_overview` starts with a one-line verdict — `WORK NOW: n item(s) for the AI …` or `NOTHING DUE for the AI right
+  now … A routine run can end here` — so a quiet run costs one call. The lever left is the number of turns per
+  person (overview → list_tasks → person_context → get_messages → draft → note → update): a bundled "work packet"
+  answer per due card would cut 5–7 turns to 2–3. Not built yet; decide after reading the Runs page figures.
 
 **UI** (local copy, 375 px and desktop): no script errors, no sideways scrolling on Board, Inbox, Drafts, Lists,
 Numbers. Fixed on Lists: the list name was squeezed into a narrow column beside the send button on a phone, and the two

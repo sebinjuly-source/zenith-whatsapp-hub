@@ -868,6 +868,7 @@ test('playbook: stored in the hub, editable, and given to every AI client', asyn
   assert.match(init.result.instructions.slice(0, 900), /hub_overview.*owner_feedback.*get_playbook.*NOT in these instructions.*more_tools.*use_tool/s);
   assert.ok(init.result.instructions.length < 8000, `instructions are ${init.result.instructions.length} characters`);
   assert.match(await mcp('hub_overview', { campaign: 'all' }), /RULES: get_playbook/);
+  assert.match(await mcp('hub_overview', { campaign: 'all' }), /^(WORK NOW: \d+ item\(s\) for the AI|NOTHING DUE for the AI)/m, 'one-line verdict at the top (8 Nov 2026)');
   assert.equal(await mcp('get_playbook'), DEFAULT_PLAYBOOK);
   await call('PUT', '/api/playbook', { text: 'RULE: always be polite.' });
   assert.equal(await mcp('get_playbook'), 'RULE: always be polite.');
@@ -2309,6 +2310,8 @@ test('campaign playbooks: main + one per campaign; the AI sees the names, reads 
   assert.ok(!only.includes(main.split('\n')[0]), 'the main playbook is not repeated');
   // focusing on a campaign brings its playbook in
   assert.match(await mcp('hub_overview', { campaign: 'Corporate sales' }), /CAMPAIGN PLAYBOOK — Corporate sales[\s\S]*ask for a meeting/);
+  // the campaign's rules are sent once: the focused overview carries them and says not to fetch them again (8 Nov 2026)
+  assert.match(await mcp('hub_overview', { campaign: 'Corporate sales' }), /RULES: this campaign's playbook is above — do not fetch it again/);
   // the MCP instructions name the campaign playbooks (not their full text)
   const r = await fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) });
