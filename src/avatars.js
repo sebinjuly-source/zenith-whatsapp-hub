@@ -34,6 +34,7 @@ export async function getAvatar(accountId, jid) {
     out = { buffer, mimetype, at: Date.now() };
     break;
   }
+  if (!out && !sessions.length) return null; // nobody to ask (numbers reconnecting after a deploy): don't remember "none"
   if (cache.size >= MAX) cache.delete(cache.keys().next().value);
   cache.set(key, out || { none: true, at: Date.now() });
   return out;
