@@ -2030,6 +2030,21 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('unsend_message', { account: 'mcpall', chat: P, message_id: 'M1', reason: 'toolbox' });
   await run('phone_action', { account: 'mcpall', chat: P, action: 'pin_message', message_id: 'M1', reason: 'toolbox' });
   await run('check_numbers', { account: 'mcpall', phones: [P] });
+  // profile pictures (8 Nov 2026): the fake number has no socket, so there is none — a plain answer, never an error
+  assert.match(await run('see_person', { person: P }), /No profile picture for \+919733300001 \(Toolbox Ravi\)/);
+  assert.equal((await fetch(`${base}/api/avatar/mcpall/${J}`, { headers: { 'x-api-key': 'k' } })).status, 204, 'the dashboard image request gets 204 when there is no picture');
+  // with a picture: the session answers a URL, the bytes come from it, and both the API and the tool return the image
+  const srvAv = (await import('http')).createServer((rq, rs) => { rs.setHeader('content-type', 'image/png'); rs.end(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')); }).listen(0);
+  manager.get('mcpall').profilePicture = async () => `http://127.0.0.1:${srvAv.address().port}/pic.jpg`;
+  const { forgetAvatar } = await import('../src/avatars.js');
+  forgetAvatar('mcpall', J);
+  const avRes = await fetch(`${base}/api/avatar/mcpall/${J}`, { headers: { 'x-api-key': 'k' } });
+  assert.equal(avRes.status, 200); assert.equal(avRes.headers.get('content-type'), 'image/png');
+  const seen = await (await fetch(`${base}/mcp/k`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'see_person', arguments: { person: P } } }) })).json();
+  assert.equal(seen.result.content[1]?.type, 'image', 'the AI gets the picture itself');
+  assert.match(seen.result.content[0].text, /Profile picture of \+919733300001 — Toolbox Ravi/);
+  srvAv.close();
   await run('fetch_older_messages', { account: 'mcpall', chat: P, count: 10 });
   await run('backfill_history', { account: 'mcpall', since: '2026-01-01' });
   await run('recent_activity', { who: 'ai' });

@@ -460,3 +460,8 @@ details.day > summary .selall { margin-left: 8px; }
   .app.pane-open main { padding-right: min(580px, 46vw); }
   .board-pane { width: min(560px, 44vw); }
 }
+
+/* profile pictures (8 Nov 2026): inbox list, chat header, draft cards */
+.avatar { border-radius: 50%; object-fit: cover; background: var(--panel-2); flex: none; }
+.chatitem .top { align-items: center; }
+.chatitem .top .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

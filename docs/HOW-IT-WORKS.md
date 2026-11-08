@@ -175,6 +175,15 @@ list_templates, save_template, list_meta_templates, create_meta_template, meta_h
 hub_overview, owner_feedback, describe_data, inspect_data, edit_messages, find_contacts, save_contact, archive_list, remove_list_member, list_rules, save_rule, set_chat_state, get_playbook, save_playbook, recent_activity, save_media,
 fetch_older_messages, backfill_history, list_shared_contacts, find_followups`.
 
+**Profile pictures (8 Nov 2026).** The person's WhatsApp picture shows in the Inbox list and chat header, on every
+Drafts card and on the desks, so whoever approves sees who they are writing to. The AI sees it too: `see_person(phone
+or name)` returns the picture itself (menu: Chats & people), and the rules say to look when a name or gender is unclear
+— "Dear Mrs Savitha" or a business by its name, never "Sir / Madam". How: `src/avatars.js` asks a connected linked
+number (`session.profilePicture` → Baileys `profilePictureUrl`), fetches the bytes once and keeps them in memory ~12 h
+(no picture: asked again after 2 h); `GET /api/avatar/<number>/<jid>` (204 = none, the image hides itself),
+`GET /desk/api/avatar/<phone>` (desk key; only people with a message on that number). Meta API numbers cannot ask for
+pictures, and a person's privacy setting may hide theirs — then there is simply none. Nothing is stored in the database.
+
 **Calls in chats.** Linked numbers record WhatsApp calls as lines like `📞 Voice call — answered, 2:14` or
 `📞 Missed voice call`. Only calls WhatsApp shows to linked devices are captured; calls before 22 Oct 2026 and
 calls on the Meta number are not. If a call was answered (longer than 0:00) after our last message, the AI must not
@@ -781,6 +790,7 @@ tokens, but **a complete and accurate answer matters more than tokens**; non-rep
 | The owner got "⏳ … must go out soon" | a draft with a send-by time within 3 h is waiting for approval — approve or reject it in Drafts |
 | A routine run ended "Nothing due" while something waited | `hub_overview(campaign="all")` first line: which count was 0? Review cards (`status='review'`), owner notes (`list_tasks(owner_notes=true)`), rejections (`owner_feedback`), chats incl. `include_unlisted`, people who wrote after a draft (`waiting_at` in `inboxRows`). The verdict counts all of them; if a new hand-off path exists, add it to the verdict (mcp.js, "one-line verdict") |
 | The routine fetched person_context for every card anyway | the prompt should say `pack=true` / `with_messages=true`; read the live routine with the `schedule` skill (RemoteTrigger get) — the manual may be stale |
+| No profile picture shows for someone | normal when they hide it or have none; also when no linked number is connected (Meta-only); the hub remembers "none" for 2 h — `forgetAvatar` / a restart clears it |
 | The manual and the live routine disagree (model, times, steps) | the routine is the truth: RemoteTrigger `get`, then fix the manual (8 Nov: "Haiku" in the manual, Sonnet live) |
 
 

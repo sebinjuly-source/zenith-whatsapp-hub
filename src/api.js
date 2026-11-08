@@ -16,6 +16,7 @@ import { manager } from './wa/manager.js';
 import * as store from './store.js';
 import * as outbox from './outbox.js';
 import { getMedia } from './media.js';
+import { getAvatar } from './avatars.js';
 import { mountMcp, toolCatalog, runTool } from './mcp.js';
 import { mountMetaWebhook } from './meta.js';
 import { mountEmbeddedSignup } from './embedded-signup.js';
@@ -1100,6 +1101,12 @@ export function buildApp() {
   }));
 
   // ---- Media: serves the saved copy, or downloads from WhatsApp on demand (?save=1 keeps a copy)
+  // A person's WhatsApp profile picture (through a linked number, kept ~12 h in memory); 204 when there is none
+  api.get('/avatar/:id/:jid', wrap(async (req, res) => {
+    const a = await getAvatar(req.params.id, req.params.jid);
+    if (!a) return res.status(204).end();
+    res.set('Content-Type', a.mimetype).set('Cache-Control', 'private, max-age=3600').set('X-Content-Type-Options', 'nosniff').send(a.buffer);
+  }));
   api.get('/media/:id/:jid/:msgId', wrap(async (req, res) => {
     const { id, jid, msgId } = req.params;
     const rows = await query('SELECT * FROM messages WHERE account_id = $1 AND chat_jid = $2 AND id = $3', [id, jid, msgId]);

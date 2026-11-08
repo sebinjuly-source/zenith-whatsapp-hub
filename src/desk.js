@@ -13,6 +13,7 @@ import { fileURLToPath } from 'url';
 import { query, logEvent } from './db.js';
 import { manager } from './wa/manager.js';
 import * as outbox from './outbox.js';
+import { getAvatar } from './avatars.js';
 import { keyGuessBlocked } from './auth.js';
 import config from './config.js';
 
@@ -122,6 +123,15 @@ export function mountDesk(app) {
   app.get('/desk/api/me', guard, wrap(async (req, res) => {
     const s = manager.sessions.get(req.desk.account);
     res.json({ label: req.desk.label, number: s?.account?.phone || '', connected: s?.status === 'open' || s?.status === 'elsewhere', appName: req.desk.appName, appUrl: req.desk.appUrl });
+  }));
+  // the person's profile picture, only for someone with a message on this desk's number (the desk key sees nothing else)
+  app.get('/desk/api/avatar/:phone', guard, wrap(async (req, res) => {
+    const jid = `${String(req.params.phone).replace(/\D/g, '')}@s.whatsapp.net`;
+    const ok = await query(`SELECT 1 FROM outbox WHERE account_id = $1 AND to_jid = $2 LIMIT 1`, [req.desk.account, jid]);
+    if (!ok.length) return res.status(404).json({ error: 'No message to this person on this desk' });
+    const a = await getAvatar(req.desk.account, jid);
+    if (!a) return res.status(204).end();
+    res.set('Content-Type', a.mimetype).set('Cache-Control', 'private, max-age=3600').set('X-Content-Type-Options', 'nosniff').send(a.buffer);
   }));
   app.get('/desk/api/drafts', guard, wrap(async (req, res) => {
     const q = await outbox.queueStatus(req.desk.account).catch(() => null);

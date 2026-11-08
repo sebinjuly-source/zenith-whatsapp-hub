@@ -36,6 +36,10 @@
     return el;
   }
   const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
+  // the person's WhatsApp profile picture (8 Nov 2026): the server answers 204 when there is none — the image then hides itself
+  const avatar = (acc, jid, size = 36) => (!acc || !jid || !/@s\.whatsapp\.net$/.test(jid) ? null
+    : h('img', { class: 'avatar', src: `/api/avatar/${encodeURIComponent(acc)}/${encodeURIComponent(jid)}`, alt: '', loading: 'lazy', style: `width:${size}px;height:${size}px`,
+        onerror: (e) => { e.target.style.visibility = 'hidden'; } }));
   async function api(path, opts = {}) {
     if (opts.body || (opts.method && opts.method !== 'GET')) state.accountsAt = 0; // a change → next page reloads the numbers
     const res = await fetch(path, {
@@ -826,7 +830,7 @@
         ...(chats.length
           ? chats.map((c) =>
               h('div', { class: 'chatitem' + (c.jid === ib.chat ? ' on' : ''), role: 'listitem', tabindex: 0, onclick: () => openChat(c), onkeydown: (e) => e.key === 'Enter' && openChat(c) },
-                h('div', { class: 'top' }, h('span', { class: 'name' }, c.is_group ? '👥 ' : '', c.name || c.jid), h('span', { class: 'time' }, fmtShort(c.last_ts))),
+                h('div', { class: 'top' }, avatar(ib.account, c.jid, 34), h('span', { class: 'name' }, c.is_group ? '👥 ' : '', c.name || c.jid), h('span', { class: 'time' }, fmtShort(c.last_ts))),
                 h('div', { class: 'prev' }, c.last_from_me ? 'You: ' : '', c.last_preview || ''),
                 !state.campaign && c.campaign ? h('div', {}, h('span', { class: 'tag campaign-tag' }, '🎯 ', campaignLabel(c.campaign))) : null,
                 c.card ? h('div', { class: 'chat-card', title: 'The open Board card about this person' }, '🗂️ ', c.card) : null,
@@ -859,6 +863,7 @@
       const actionsBtn = h('button', { class: 'btn small', type: 'button', 'aria-label': 'More chat actions', title: 'More', onclick: (e) => { e.stopPropagation(); actions.hidden = !actions.hidden; } }, '⋯');
       const header = h('header', {},
         h('button', { class: 'btn small back', onclick: () => { ib.chat = null; wrap.classList.remove('has-chat'); }, 'aria-label': 'Back to chats', title: 'Back to chats' }, '←'),
+        avatar(ib.account, c.jid, 36),
         h('div', { class: 'who' }, h('b', {}, c.name || c.jid), h('span', { class: 'muted mono jid' }, c.jid.split('@')[0])),
         c.state !== 'done'
           ? h('button', { class: 'btn small', title: 'Done — it comes back if they write again', onclick: guard(async () => {
@@ -2155,6 +2160,7 @@
       const card = h('div', { class: 'card' },
         h('div', { class: 'row', style: 'align-items:center' },
           cb,
+          avatar(r.account_id, r.to_jid, 36),
           h('b', { class: 'grow' }, r.to_name || '+' + r.to_jid.split('@')[0]),
           from, h('span', { class: 'tag' }, { mcp: 'AI', campaign: 'bulk', api: 'script', dashboard: 'you' }[r.source] || r.source), h('span', { class: 'muted' }, new Date(r.created_at).toLocaleString()),
           h('span', { class: 'muted', style: 'font-size:12px;white-space:nowrap', title: r.price_note || '' }, r.price ? money(r.price, r.currency) : (r.price_category === 'free' ? 'free' : r.price_category === 'window_closed' ? '' : money(0, r.currency)))),
@@ -2171,7 +2177,11 @@
         r.payload.waTemplate ? h('p', { style: 'margin:6px 0' }, h('span', { class: 'tag' }, `Meta template: ${r.payload.waTemplate.name}`)) : null,
         r.preview_image ? h('a', { href: r.preview_image.startsWith('data:') ? undefined : r.preview_image, target: '_blank', rel: 'noopener', title: 'Image the person will receive' },
           h('img', { src: r.preview_image, alt: 'Image in this message', loading: 'lazy', style: 'display:block;max-width:100%;max-height:220px;border-radius:8px;margin:6px 0;object-fit:contain;background:#111' })) : null,
-        r.payload.attachment ? h('p', { class: 'muted', style: 'margin:6px 0' }, '📎 ', r.payload.attachment.fileName || r.payload.attachment.url || 'file') : null,
+        r.payload.attachment ? h('p', { class: 'muted', style: 'margin:6px 0' }, '📎 ',
+          // a link, so the owner can open the PDF/file before approving (6 Nov: a brochure was invisible on the Drafts page)
+          /^https?:\/\//.test(r.payload.attachment.url || '')
+            ? h('a', { href: r.payload.attachment.url, target: '_blank', rel: 'noopener', title: 'Open the file the person will receive' }, r.payload.attachment.fileName || 'Open file')
+            : (r.payload.attachment.fileName || 'file')) : null,
         r.status === 'draft'
           ? h('div', {}, ta, h('div', { class: 'row', style: 'margin-top:8px' },
               h('button', { class: 'btn primary small', onclick: guard(async () => {

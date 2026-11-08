@@ -23,7 +23,9 @@
   main { flex:1; overflow:auto; padding:12px; -webkit-overflow-scrolling:touch; }
   iframe { flex:1; border:0; width:100%; display:none; background:#fff; }
   .card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:12px 14px; margin:0 auto 12px; max-width:640px; }
-  .who { display:flex; justify-content:space-between; gap:8px; align-items:baseline; }
+  .who { display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  .who b { flex:1; min-width:0; }
+  .avatar { width:40px; height:40px; border-radius:50%; object-fit:cover; background:#e5ecea; flex:none; }
   .who b { font-size:17px; }
   .muted { color:var(--ink2); font-size:13px; }
   .chat { margin:8px 0; display:flex; flex-direction:column; gap:4px; }
@@ -78,7 +80,7 @@ function render(q) {
   if (!DRAFTS.length) { $('main').innerHTML = h + '<div class="empty">✅ Nothing is waiting for you.<br><span class="muted">New drafts appear here by themselves.</span></div>'; return; }
   if (DRAFTS.length > 1) h += '<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:10px"><span>' + DRAFTS.length + ' messages wait for your OK</span><button class="act" onclick="approveAll()">Approve all ' + DRAFTS.length + '</button></div>';
   DRAFTS.forEach(function (d) {
-    h += '<div class="card" id="d' + d.id + '"><div class="who"><b>' + esc(d.name || '+' + d.phone) + '</b><span class="muted">' + esc(d.campaign) + '</span></div>' +
+    h += '<div class="card" id="d' + d.id + '"><div class="who"><img class="avatar" id="av' + d.id + '" alt="" style="display:none"><b>' + esc(d.name || '+' + d.phone) + '</b><span class="muted">' + esc(d.campaign) + '</span></div>' +
       '<div class="muted">+' + esc(d.phone) + (d.sendBy ? ' · must go by ' + esc(when(d.sendBy)) : '') + '</div>' +
       (d.note ? '<div class="muted" style="margin-top:4px">Why: ' + esc(d.note) + '</div>' : '') +
       (d.held ? '<div class="banner" style="margin-top:8px">' + esc(d.held) + '</div>' : '');
@@ -89,6 +91,17 @@ function render(q) {
       '<div class="row"><button class="act send" onclick="approve(' + d.id + ')">Send</button><button class="act no" onclick="reject(' + d.id + ')">Don\'t send</button></div></div>';
   });
   $('main').innerHTML = h;
+  DRAFTS.forEach(function (d) { avatar(d.phone, 'av' + d.id); });
+}
+// the person's WhatsApp profile picture next to their name (fetched once per phone; nothing shown when there is none)
+var AVATARS = {};
+function avatar(phone, elId) {
+  var show = function (url) { var el = $(elId); if (el && url) { el.src = url; el.style.display = 'inline-block'; } };
+  if (AVATARS[phone] !== undefined) return show(AVATARS[phone]);
+  fetch('/desk/api/avatar/' + encodeURIComponent(phone), { headers: { 'x-desk-key': KEY } })
+    .then(function (r) { return r.status === 200 ? r.blob() : null; })
+    .then(function (b) { AVATARS[phone] = b ? URL.createObjectURL(b) : null; show(AVATARS[phone]); })
+    .catch(function () { AVATARS[phone] = null; });
 }
 function load(manual) {
   if (!KEY) { $('main').innerHTML = '<div class="empty">Open this page from the link you were given.</div>'; return; }

@@ -972,6 +972,12 @@ export class Session extends EventEmitter {
    * Which of these numbers have WhatsApp: [{ phone, exists: true | false | null }] — null = WhatsApp did not answer
    * for that one. Asks WhatsApp only (no message, nothing shown to the person). A send does the same check itself.
    */
+  /** URL of a person's WhatsApp profile picture — null when they have none, hide it, or the number is not connected. */
+  async profilePicture(jid) {
+    if (!this.sock || this.status !== 'open') return null;
+    return withTimeout(this.sock.profilePictureUrl(jid, 'image'), 15000, 'Profile picture').catch(() => null);
+  }
+
   async checkNumbers(phones) {
     if (!this.sock || this.status !== 'open') throw new Error(`Number "${this.id}" is not connected`);
     const list = [...new Set(phones.map((p) => String(p).split('@')[0].replace(/\D/g, '')).filter(Boolean))];
