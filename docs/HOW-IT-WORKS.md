@@ -256,10 +256,12 @@ closed without one it comes back only after a new message (`catchNoNextStep` in 
 **Messages for later.** `send_message(schedule_at="YYYY-MM-DD HH:MM")`, `POST /api/send` with `scheduleAt`, or ⏰ in
 the inbox composer. Each shows on the Board as "Scheduled: …" until it is sent (drafts still need your approval).
 
-**Scheduled AI run.** The routine "Zenith hub – replies & follow-ups" runs in the cloud (environment "Whatsapp") at
-10:00, 14:00, 18:00 and 22:00 IST on Haiku, with only the hub tools. Each run answers the reply cards, records
-interview dates and follow-up dates, drafts the follow-ups that are due, and asks you for call notes. It never sends;
-everything waits for your approval. Manage it at https://claude.ai/code/routines.
+**Scheduled AI runs** (claude.ai routines, environment "Whatsapp", all on **Sonnet** — the owner's choice, 8 Nov 2026:
+Haiku was not reliable at spotting what the cards and chats ask for). "Zenith hub – replies & follow-ups" at 10:00,
+14:00, 18:00 and 22:00 IST works the Board, the inbox, owner notes and rejections, guest leads and the Hoteliers United
+group; "evening review" at 20:45 (checklists, orders, repairs, files, promises); "weekly review" Sundays 18:00;
+"Chief of staff – morning brief" 08:00. They never send to anyone but the owner; everything else waits for approval.
+Manage them at https://claude.ai/code/routines (this PC can read and update them with the `schedule` skill).
 
 ---
 
@@ -679,7 +681,23 @@ pass on a throw-away database (phone and desktop widths).
   `hub_overview` starts with a one-line verdict — `WORK NOW: n item(s) for the AI …` or `NOTHING DUE for the AI right
   now … A routine run can end here` — so a quiet run costs one call. The lever left is the number of turns per
   person (overview → list_tasks → person_context → get_messages → draft → note → update): a bundled "work packet"
-  answer per due card would cut 5–7 turns to 2–3. Not built yet; decide after reading the Runs page figures.
+  answer per due card would cut 5–7 turns to 2–3.
+- **8 Nov 2026, later — the verdict's edge cases and the work packet.** The owner: "work only if there are no new
+  messages AND no new tasks on the Board; I put tasks for the AI in card notes and in rejection reasons; the AI must
+  get and act on every message in the inbox." `NOTHING DUE` is now claimed only when all of these are empty: AI cards
+  due (reply cards, undated AI to-dos, dated ones within the hour, **cards the owner marked Done — status review —
+  whatever their date**), chats waiting on lists and on no list, **people who wrote again after our draft was made**
+  (the draft may be stale: inbox_summary marks the line "THEY WROTE AFTER IT"), owner notes on open or recently closed
+  cards, rejections with a reason. A focused overview says "in campaign X" and never claims nothing for the whole hub.
+  Not covered on purpose (business steps the routine prompt owns): the daily Hoteliers United group check and guest
+  leads whose rhythm is not yet a follow-up card — the routine prompt does those cheap checks before ending.
+  **Work packet:** `list_tasks(for="ai", due_now=true, pack=true)` (also `kind="reply"`) returns each due card followed
+  by the person's list row (stage, visit, follow-up, outcome, notes), the messages already waiting for them ("change it
+  with edit_messages, never a second draft") and the last 8 messages of the chat, NEW-marked after the card's last
+  update; up to 12 cards packed, the rest one line each. `inbox_summary(with_messages=true)` does the same for up to
+  15 waiting chats (last 6 messages). Both use `packFor()` in mcp.js. A person now costs the packet + the draft + the
+  note/close instead of person_context + get_messages + list_outbox first. Tests: "owner feedback reaches the AI"
+  (pack, review card counted) and "funnel stages per campaign" (with_messages, wrote-again).
 
 **UI** (local copy, 375 px and desktop): no script errors, no sideways scrolling on Board, Inbox, Drafts, Lists,
 Numbers. Fixed on Lists: the list name was squeezed into a narrow column beside the send button on a phone, and the two

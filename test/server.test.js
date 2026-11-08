@@ -1413,6 +1413,20 @@ test('owner feedback reaches the AI: rejections (with reason) land on the person
   assert.match(r.data.task.details, /#\d+ Call Gopal .*\+919400000001/);
   const ai = await mcp('list_tasks', { for: 'ai', due_now: true });
   assert.match(ai, /Owner: Did not pick up my calls/);
+  // the work packet (8 Nov 2026): every due card with its person's chat, list row and waiting messages in ONE answer
+  const packed = await mcp('list_tasks', { for: 'ai', due_now: true, pack: true });
+  assert.match(packed, /card\(s\)(, each with its chat| — the first 12 packed)/);
+  assert.match(packed, /Owner: Did not pick up my calls[^\n]*\n\s+DETAILS: Did not pick up my calls[^\n]*Call Gopal/, 'a card without a chat shows its details');
+  const replyPack = await mcp('list_tasks', { kind: 'reply', account: 'fb1', pack: true });
+  assert.match(replyPack, /CHAT on fb1 \(last \d+\):\n\s+\[/, 'a reply card carries the chat');
+  assert.match(replyPack, /WAITING #\d+ draft on fb2: "Hi"/, 'and the message already waiting for the person (on any number)');
+  // a card the owner marked Done (review) counts as work for the AI whatever its date
+  const before = Number((await mcp('hub_overview', { campaign: 'all' })).match(/^WORK NOW: (\d+)/m)?.[1] || 0);
+  const t5 = (await call('POST', '/api/tasks', { account: 'fb1', title: 'Send Gopal the menu', due: new Date(Date.now() + 7 * 86400e3).toISOString() })).data;
+  await call('PATCH', `/api/tasks/${t5.id}`, { status: 'review' });
+  const after = Number((await mcp('hub_overview', { campaign: 'all' })).match(/^WORK NOW: (\d+)/m)?.[1] || 0);
+  assert.equal(after, before + 1, 'the review card is counted');
+  await mcp('update_task', { id: t5.id, status: 'done' });
   assert.equal((await query('SELECT status FROM tasks WHERE id = $1', [t1.id]))[0].status, 'done');
   assert.ok((await call('GET', `/api/tasks/${t2.id}/log`)).data.some((x) => x.kind === 'note' && /follow up on WhatsApp/.test(x.text)));
   assert.equal((await call('POST', '/api/tasks/bulk-note', { ids: [], text: 'x' })).status >= 400, true);
@@ -1879,6 +1893,15 @@ test('funnel stages per campaign (hiring, sales, win-back, own); closed custom s
   assert.match(await mcp('inbox_summary', { campaign: 'all' }), /919833300099.*not on a list.*1 unanswered.*room for 2 nights.*NO CARD/);
   assert.doesNotMatch(await mcp('inbox_summary', { campaign: 'all', include_unlisted: false }), /919833300099/);
   assert.match(await mcp('hub_overview', { campaign: 'all' }), /INBOX \(not on a list\): \d+ chat\(s\) waiting \([^)]*stg \d+/);
+  // with_messages: the chat comes with the line, so no get_messages per chat (8 Nov 2026)
+  assert.match(await mcp('inbox_summary', { campaign: 'all', with_messages: true }), /919833300099[^\n]*\n\s+CHAT on stg \(last 1\):\n\s+\[[^\n]*room for 2 nights/);
+  // they wrote AGAIN after our draft was made: the draft may be stale — the inbox and the overview both say so
+  const dr = await mcp('send_message', { account: 'stg', to: '919833300099', text: 'Yes, we have rooms. Which dates?', campaign: 'all' });
+  const drId = Number(dr.match(/#(\d+)/)[1]);
+  await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300099@s.whatsapp.net','IN1b',false,$1,'text','Friday to Sunday, 2 adults')`, [now + 5]);
+  assert.match(await mcp('inbox_summary', { campaign: 'all' }), /919833300099[^\n]*our #\d+ waiting — THEY WROTE AFTER IT/);
+  assert.match(await mcp('hub_overview', { campaign: 'all' }), /WORK NOW: \d+ item\(s\)[^\n]*1 wrote again after our draft/);
+  await mcp('reject_draft', { id: drId, campaign: 'all' });
   // a person on a list whose card was closed, then wrote again: shown (NO CARD)
   await query(`INSERT INTO messages (account_id, chat_jid, id, from_me, ts, type, body) VALUES ('stg','919833300001@s.whatsapp.net','IN2',false,$1,'text','Sample received, thanks')`, [now - 300]);
   await query(`UPDATE tasks SET status = 'done' WHERE ref = 'reply:stg:919833300001@s.whatsapp.net'`);

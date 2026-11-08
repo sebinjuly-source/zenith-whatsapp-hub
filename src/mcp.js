@@ -116,7 +116,8 @@ async function inboxRows({ since, account, campaign, waitingOnly = true, limit =
        (SELECT m.stage FROM list_members m JOIN lists li ON li.id = m.list_id WHERE m.jid = ib.chat_jid ORDER BY (li.account_id = ib.account_id) DESC, li.id DESC LIMIT 1) AS stage,
        (SELECT li.name FROM list_members m JOIN lists li ON li.id = m.list_id WHERE m.jid = ib.chat_jid ORDER BY (li.account_id = ib.account_id) DESC, li.id DESC LIMIT 1) AS list_name,
        (SELECT t.id FROM tasks t WHERE t.status NOT IN ('done','cancelled') AND t.ref = 'reply:' || ib.account_id || ':' || ib.chat_jid LIMIT 1) AS card,
-       (SELECT o.id FROM outbox o WHERE o.account_id = ib.account_id AND o.to_jid = ib.chat_jid AND o.status IN ('draft','queued') ORDER BY o.id DESC LIMIT 1) AS waiting_msg
+       (SELECT o.id FROM outbox o WHERE o.account_id = ib.account_id AND o.to_jid = ib.chat_jid AND o.status IN ('draft','queued') ORDER BY o.id DESC LIMIT 1) AS waiting_msg,
+       (SELECT extract(epoch FROM o.created_at) FROM outbox o WHERE o.account_id = ib.account_id AND o.to_jid = ib.chat_jid AND o.status IN ('draft','queued') ORDER BY o.id DESC LIMIT 1) AS waiting_at
      FROM ib LEFT JOIN contacts ct ON ct.account_id = ib.account_id AND ct.jid = ib.chat_jid
      LEFT JOIN chats ch ON ch.account_id = ib.account_id AND ch.jid = ib.chat_jid
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
@@ -321,6 +322,27 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
   const registry = new Map();
   server.hubTools = registry;
 
+  /**
+   * The "work packet" for one person (8 Nov 2026): what the AI used to fetch with 3–4 calls per card (person_context,
+   * get_messages, list_outbox) in a few lines — list row with stage and dates, messages waiting, the last messages of
+   * the chat (oldest→newest, NEW when after `sinceTs`). Used by list_tasks(pack) and inbox_summary(with_messages) so a
+   * person costs 2–3 turns instead of 5–7: every turn re-reads the whole conversation, so turns are what cost.
+   */
+  async function packFor(accountId, jid, { messages = 8, sinceTs = null, indent = '    ' } = {}) {
+    const out = [];
+    const mem = await query(
+      `SELECT l.name AS list, l.role, m.stage, m.visit_at, m.followup_at, m.followup_note, m.outcome, m.notes
+       FROM list_members m JOIN lists l ON l.id = m.list_id WHERE m.jid = $1 AND l.archived IS NULL ORDER BY (l.account_id = $2) DESC, l.id DESC LIMIT 2`, [jid, accountId]);
+    for (const m of mem) out.push(`${indent}LIST ${m.list}${m.role ? ` (${m.role})` : ''}: ${m.stage || 'no stage'}${m.visit_at ? ` · visit ${d(m.visit_at)}` : ''}${m.followup_at ? ` · follow-up ${d(m.followup_at)}` : ''}${m.followup_note ? ` · "${trim(m.followup_note, 80)}"` : ''}${m.outcome ? ` · outcome: ${trim(m.outcome, 60)}` : ''}${m.notes ? ` · notes: ${trim(m.notes, 120)}` : ''}`);
+    const waiting = await query(`SELECT id, account_id, status, scheduled_at, left(COALESCE(payload->>'text', payload->'waTemplate'->>'name', '[file]'), 140) AS text FROM outbox
+      WHERE to_jid = $1 AND status IN ('draft','queued','sending') ORDER BY id DESC LIMIT 3`, [jid]);
+    for (const o of waiting) out.push(`${indent}WAITING #${o.id} ${o.status} on ${o.account_id}${o.scheduled_at && new Date(o.scheduled_at) > new Date() ? ` for ${d(o.scheduled_at)}` : ''}: "${trim(o.text, 140)}" — change it with edit_messages, never a second draft`);
+    const rows = await store.getMessages(accountId, jid, { limit: messages });
+    if (!rows.length) out.push(`${indent}CHAT on ${accountId}: no messages yet`);
+    else out.push(`${indent}CHAT on ${accountId} (last ${rows.length}):`, ...rows.map((m) => `${indent}  ${sinceTs && !m.from_me && Number(m.ts) > sinceTs ? 'NEW ' : ''}${msgLine(m, 220)}`));
+    return out;
+  }
+
   tool('list_accounts', 'List the WhatsApp numbers in the hub: id, purpose, phone, connection status, AI mode (approve/auto), and how much history is stored. Start here.', {}, async () => {
     const lines = [];
     await manager.refresh();
@@ -364,8 +386,10 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
     out.push(cpShown ? 'RULES: this campaign\'s playbook is above — do not fetch it again; the main playbook once per session: get_playbook(campaign="all").' : 'RULES: get_playbook — the owner\'s rules; read them once per session before drafting or changing anything.');
     const verdictAt = out.length;
     let offCount = 0;
-    const dueNow = open.filter((t) => !t.due_at || new Date(t.due_at) <= new Date(now.getTime() + 3600e3));
-    const later = open.filter((t) => t.due_at && new Date(t.due_at) > new Date(now.getTime() + 3600e3));
+    let wroteAgainOff = 0;
+    // a card the owner marked Done waits for the AI's review whatever its date (2 Nov); an undated card is due now
+    const dueNow = open.filter((t) => t.status === 'review' || !t.due_at || new Date(t.due_at) <= new Date(now.getTime() + 3600e3));
+    const later = open.filter((t) => t.status !== 'review' && t.due_at && new Date(t.due_at) > new Date(now.getTime() + 3600e3));
     const byKind = (rows, k) => rows.filter((t) => t.kind === k).length;
     out.push(`1. DUE NOW (${dueNow.length}): ${byKind(dueNow, 'reply')} replies to answer, ${byKind(dueNow, 'followup')} follow-ups, ${dueNow.filter((t) => /^Call notes needed/.test(t.title)).length} call notes needed, ${dueNow.filter((t) => t.priority && (t.assignee || 'you') === 'you').length} owner must-dos. → list_tasks(for="ai", due_now=true), list_tasks(kind="reply")`);
     for (const t of dueNow.filter((x) => x.priority || x.kind === 'reply' || x.kind === 'followup').slice(0, 12)) out.push(`   - #${t.id} ${(t.assignee || 'you') === 'ai' ? 'AI' : 'owner'}${t.priority ? ' PRIORITY' : ''}: ${trim(t.title, 90)}`);
@@ -384,9 +408,11 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
     // and everyone on no list (guests, patients, leads, staff): the AI sorts them too (owner, 6 Nov)
     if (!a.campaign || /^(none|all)$/i.test(a.campaign)) {
       const listed = new Set(waiting.map((w) => `${w.account_id}:${w.chat_jid}`));
-      const off = (await inboxRows({ since: Math.floor(Date.now() / 1000) - 3 * 86400, limit: 200, unlisted: true }).catch(() => []))
-        .filter((w) => !listed.has(`${w.account_id}:${w.chat_jid}`) && !w.waiting_msg);
+      const offAll = (await inboxRows({ since: Math.floor(Date.now() / 1000) - 3 * 86400, limit: 200, unlisted: true }).catch(() => []))
+        .filter((w) => !listed.has(`${w.account_id}:${w.chat_jid}`));
+      const off = offAll.filter((w) => !w.waiting_msg);
       offCount = off.length;
+      wroteAgainOff = offAll.filter((w) => w.waiting_msg && w.waiting_at && Number(w.ts) > Number(w.waiting_at)).length;
       if (off.length) {
         const per = Object.entries(off.reduce((m, w) => ({ ...m, [w.account_id]: (m[w.account_id] || 0) + 1 }), {})).map(([k, n]) => `${k} ${n}`).join(', ');
         out.push(`   INBOX (not on a list): ${off.length} chat(s) waiting (${per}) — guests, patients, leads, staff. Sort each: reply → draft; owner must act → create_task for="you"; follow-up → import_list + follow_up_at; staff needing nothing → leave → inbox_summary`);
@@ -394,12 +420,18 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
     }
     const [fb] = await query(`SELECT count(*)::int n FROM outbox WHERE status = 'rejected' AND error LIKE 'Rejected:%' AND created_at > now() - interval '3 days'`);
     if (fb.n) out.push(`   OWNER FEEDBACK: ${fb.n} draft(s) rejected with a reason in the last 3 days → owner_feedback (some reasons are instructions, e.g. "wish him on festivals")`);
-    // one-line verdict at the top, so a quiet run (nothing for the AI) ends after this single call (8 Nov 2026)
-    const aiDue = dueNow.filter((t) => (t.assignee || 'you') === 'ai' || t.kind === 'reply').length;
-    const work = aiDue + unanswered.length + offCount + pendingNotes.length + fb.n;
+    // One-line verdict at the top, so a quiet run (nothing for the AI) ends after this single call (8 Nov 2026).
+    // "Nothing" is claimed only when EVERY way the owner hands the AI work is empty: AI cards due (incl. reply cards,
+    // undated to-dos, cards the owner marked Done for review), chats waiting (on lists and on none), people who wrote
+    // AGAIN after our draft was made (the draft may be stale), owner notes on cards (open or recently closed) and
+    // rejections with a reason. A focused overview never claims it for the whole hub.
+    const aiDue = dueNow.filter((t) => (t.assignee || 'you') === 'ai' || t.kind === 'reply' || t.status === 'review').length;
+    const wroteAgain = waiting.filter((w) => w.waiting_msg && w.waiting_at && Number(w.ts) > Number(w.waiting_at)).length + wroteAgainOff;
+    const work = aiDue + unanswered.length + offCount + wroteAgain + pendingNotes.length + fb.n;
+    const where = cpShown || (a.campaign && !/^(none|all)$/i.test(a.campaign)) ? ` in campaign "${a.campaign}"` : '';
     out.splice(verdictAt, 0, work
-      ? `WORK NOW: ${work} item(s) for the AI — ${aiDue} card(s) due, ${unanswered.length + offCount} chat(s) waiting, ${pendingNotes.length} owner note(s), ${fb.n} rejection(s) with a reason. Details below.`
-      : 'NOTHING DUE for the AI right now: no card due, no chat waiting, no owner note, no rejection to act on. A routine run can end here.');
+      ? `WORK NOW${where}: ${work} item(s) for the AI — ${aiDue} card(s) due, ${unanswered.length + offCount} chat(s) waiting${wroteAgain ? `, ${wroteAgain} wrote again after our draft (re-read before it goes)` : ''}, ${pendingNotes.length} owner note(s), ${fb.n} rejection(s) with a reason. Details below; list_tasks(for="ai", due_now=true, pack=true) gives every due card with its chat.`
+      : `NOTHING DUE for the AI right now${where}: no card due or marked Done for review, no chat waiting, no owner note, no rejection to act on.${where ? ' Other campaigns were not checked — hub_overview(campaign="all") covers everything.' : ' A routine run can end here.'}`);
     const upcomingVisits = later.filter((t) => t.kind === 'visit').slice(0, 5);
     out.push(`2. COMING UP: ${later.length} dated cards${upcomingVisits.length ? '; interviews: ' + upcomingVisits.map((t) => trim(t.title.replace(/^Interview: /, ''), 50)).join('; ') : ''}`);
     const [dr] = a.campaign
@@ -852,6 +884,7 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
     waiting_only: z.boolean().optional().describe('Only chats where they spoke last (default true); false = every chat with activity'),
     limit: z.number().int().min(1).max(200).optional(),
     include_unlisted: z.boolean().optional().describe('Default true: chats of people on no list are included (owner, 6 Nov: every recent chat gets sorted). false = campaign lists only'),
+    with_messages: z.boolean().optional().describe('Under each chat (up to 15 chats): the last 6 messages, the person\'s list row and messages waiting for them — sort and draft without a get_messages per chat'),
   }, async (a) => {
     // the same 3 days hub_overview counts (6 Nov: the overview said "102 waiting → inbox_summary", which then showed
     // 24 hours and at most 60 chats without saying so)
@@ -861,7 +894,7 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
     if (!all.length) return `Nothing ${a.waiting_only === false ? 'new' : 'waiting'} since ${d(new Date(since * 1000))}.`;
     // people on campaign lists first (newest first), then people on no list; what does not fit is counted, never dropped silently
     all.sort((x, y) => (x.list_name ? 0 : 1) - (y.list_name ? 0 : 1));
-    const rows = all.slice(0, a.limit || 60);
+    const rows = all.slice(0, a.with_messages ? Math.min(a.limit || 15, 15) : a.limit || 60);
     const rest = all.slice(rows.length);
     const byAcc = {};
     for (const r of rows) (byAcc[r.account_id] ||= []).push(r);
@@ -875,7 +908,8 @@ function buildServer(playbook = '', focus = '', { readOnly = false, allTools = f
       for (const r of list) {
         out.push(`- ${r.name || '+' + r.chat_jid.split('@')[0]} (${r.chat_jid.split('@')[0]})${r.campaign ? ` · ${r.campaign}` : ' · no campaign'}${r.list_name ? ` · ${r.list_name}${r.stage ? ` [${r.stage}]` : ''}` : ' · not on a list'}`
           + ` · ${r.from_me ? 'we wrote last' : `${r.unanswered} unanswered`} · ${d(new Date(Number(r.ts) * 1000))}: "${trim(r.body || '[' + r.type + ']', 120)}"`
-          + `${r.card ? ` · card #${r.card}` : r.from_me ? '' : ' · NO CARD'}${r.waiting_msg ? ` · our #${r.waiting_msg} waiting` : ''}`);
+          + `${r.card ? ` · card #${r.card}` : r.from_me ? '' : ' · NO CARD'}${r.waiting_msg ? ` · our #${r.waiting_msg} waiting${r.waiting_at && Number(r.ts) > Number(r.waiting_at) ? ' — THEY WROTE AFTER IT: re-read it' : ''}` : ''}`);
+        if (a.with_messages) out.push(...await packFor(r.account_id, r.chat_jid, { messages: 6 }));
       }
     }
     return out.join('\n');
@@ -1738,6 +1772,7 @@ ${p.text}` : `(No playbook for campaign "${camp}" — follow the main rules.)`;
     for: z.enum(['you', 'ai']).optional().describe('"you" = the owner cards, "ai" = the AI cards'),
     due_now: z.boolean().optional().describe('Only cards due by now (plus 1 hour)'),
     owner_notes: z.boolean().optional().describe('Only cards where the owner wrote a note the AI has not acted on yet — act on each (follow-up date, scheduled message, draft, …), then add_task_note saying what you did'),
+    pack: z.boolean().optional().describe('With each card (up to 12): the person\'s list row, messages waiting for them and the last 8 messages of their chat — so you can act without person_context / get_messages. Use with for="ai", due_now=true or kind="reply"'),
   }, async (a) => {
     let rows = await tasks.listTasks({ account: a.account ? (await manager.resolve(a.account)).id : undefined, past: a.past, role: a.role, assignee: a.for, limit: a.past ? 60 : 500, // finished cards: the latest 60 are plenty
       dueBefore: a.due_now ? new Date(Date.now() + 3600000) : undefined });
@@ -1779,6 +1814,22 @@ ${p.text}` : `(No playbook for campaign "${camp}" — follow the main rules.)`;
         t.due_at ? `due ${fmtTime(Math.floor(new Date(t.due_at).getTime() / 1000))}` : null,
         t.notes ? `last note: "${trim(t.last_note, 90)}"` : null].filter(Boolean).join(' | ') + chatOf(t)
       : `${taskLine(t)}${chatOf(t)}${nowLine(t)}`);
+    if (rows.length && a.pack && !a.past) {
+      // the work packet: each card followed by its person's list row, waiting messages and the last messages (8 Nov 2026)
+      const PACK = 12;
+      const packed = rows.slice(0, PACK);
+      const head = `${rows.length} card(s)${rows.length > PACK ? ` — the first ${PACK} packed with their chats; the rest one line each (call again after closing some)` : ', each with its chat'}; most important first. For each: act, add_task_note, then update_task done (or a note saying what still waits).`;
+      const lines = [head];
+      for (const t of packed) {
+        lines.push(`${taskLine(t)}${chatOf(t)}${t.last_note ? ` | last note: "${trim(t.last_note, 160)}"` : ''}`);
+        const j = jidOf(t);
+        const acc = String(t.ref || '').split(':')[0] === 'reply' || String(t.ref || '').split(':')[0] === 'remind' ? String(t.ref).split(':')[1] : t.account_id;
+        if (j && j.includes('@')) lines.push(...await packFor(acc, j, { sinceTs: new Date(t.updated_at).getTime() / 1000 }));
+        else if (t.details) lines.push(`    DETAILS: ${trim(String(t.details).replace(/\s+/g, ' '), 300)}`);
+      }
+      for (const t of rows.slice(PACK)) lines.push(line(t));
+      return lines.join('\n');
+    }
     if (rows.length) {
       const top = rows.filter((t) => rank(t) < 3).length;
       const head = compact ? `${rows.length} cards${top ? ` — ${top} need attention first (marked Done by the owner for your review / owner notes / PRIORITY / written by the owner)` : ''}; one line each — task_history(id) or person_context for the full story:\n` : '';
