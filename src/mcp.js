@@ -1877,6 +1877,10 @@ ${p.text}` : `(No playbook for campaign "${camp}" — follow the main rules.)`;
     const s = await manager.resolve(a.account);
     const t = await tasks.createTask({ account: s.id, title: a.title, details: a.details, dueAt: localTime(a.due) || null, createdBy: 'ai', assignee: a.for, priority: a.priority, role: a.campaign || null,
       summary: a.summary, nextStep: a.next_step, story: a.story });
+    if (t.merged) {
+      await ai(s.id, `Added a note to card #${t.id} instead of a new card ("${a.title}")`);
+      return `Already open: card #${t.id} "${t.title}" is about this person — your text was added to it as a note (one card per person; next time use add_task_note / update_task on it).`;
+    }
     await ai(s.id, `Created task #${t.id} "${t.title}"`);
     return `Task #${t.id} created on ${s.id} (for ${t.assignee === 'ai' ? 'AI' : 'owner'}${t.priority ? ', priority' : ''}${t.due_at ? `, due ${d(t.due_at)}` : ''}).`;
   });

@@ -2014,6 +2014,16 @@ test('MCP: every tool answers without an error (whole AI toolbox, in the order a
   await run('hub_api', { path: '/pricing' });
   await run('send_to_list', { list: 'Chef – Toolbox', statuses: ['new'], text: 'Namaste {first_name}' });
   const t = await run('create_task', { account: 'mcpall', title: 'Call Ravi 9733300001', for: 'you', priority: true, due: '2026-12-09 11:00' });
+  // one card per person (9 Nov 2026): a second AI card about the same number becomes a note on the open one
+  const dup = await run('create_task', { account: 'mcpall', title: 'Call now: Ravi (+91 97333 00001) – asked "Call me"', details: 'He wrote again', for: 'you' });
+  assert.match(dup, /Already open: card #/);
+  assert.equal(idOf(dup), idOf(t));
+  assert.equal((await query(`SELECT count(*)::int n FROM tasks WHERE title LIKE 'Call%Ravi%' AND ref IS NULL AND status NOT IN ('done','cancelled')`))[0].n, 1);
+  assert.ok((await query('SELECT 1 FROM task_log WHERE task_id = $1 AND kind = $2 AND text LIKE $3', [idOf(t), 'note', '%He wrote again%'])).length);
+  // a card for the AI about the same person is a different matter — it stays separate
+  const aiCard = await run('create_task', { account: 'mcpall', title: 'Send Ravi 9733300001 the menu', for: 'ai' });
+  assert.notEqual(idOf(aiCard), idOf(t));
+  await run('update_task', { id: idOf(aiCard), status: 'cancelled' });
   await run('update_task', { id: idOf(t), due: '2026-12-09 12:00', move_to_campaign: 'Chef' });
   // campaign="all" is the filter (routines pass it everywhere) — it must not re-tag the card
   await run('update_task', { id: idOf(t), status: 'in_progress', campaign: 'all' });

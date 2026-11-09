@@ -48,6 +48,8 @@ Node ≥ 20 ESM · Express 5 · Baileys 7 · Postgres (Supabase) / PGlite locall
 - Bookkeeping is code, judgement is AI (8 Nov 2026): phone lists (`src/phonelists.js`), cards, follow-up dates and the
   job queue (`src/workqueue.js`) are kept by the hub; the AI gets one small job per person (`next_job` / `finish_job`).
   Never move a "must happen every time" step into a routine prompt — a sweep stops when the model feels done.
+- One card per person (9 Nov 2026): an AI `create_task` about a phone number that already has an open card for the same
+  assignee becomes a note on that card (`openCardAbout`). Any new AI-made card type must put the person's number in the title.
 - AI cost = context × turns. Bundle what the AI always reads per person (`packFor()`: `list_tasks pack`,
   `inbox_summary with_messages`) rather than trimming coverage. The cloud routines run on Sonnet by the owner's choice;
   read them with the `schedule` skill (RemoteTrigger) before describing or changing them — never from the manual alone.

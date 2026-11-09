@@ -142,8 +142,39 @@ const storyText = (v) => {
   return lines.slice(-8).map((l) => l.slice(0, 300)).join('\n') || null;
 };
 
+/**
+ * The open card (not a hub-kept ref card) about the same person: a phone number in the text matches one in the card's
+ * title or details, digits only, last 10. `assignee` limits it to cards for the same person (owner / AI).
+ */
+export async function openCardAbout(text, assignee = null) {
+  const digits = [...new Set((String(text || '').match(PHONE_RE) || []).map((p) => p.replace(/\D/g, '').slice(-10)).filter((d) => d.length === 10))];
+  if (!digits.length) return null;
+  const [row] = await query(
+    `SELECT id, title, status, assignee, due_at FROM tasks
+      WHERE status NOT IN ('done','cancelled','review') AND ref IS NULL AND ($2::text IS NULL OR assignee = $2)
+        AND EXISTS (SELECT 1 FROM unnest($1::text[]) d WHERE regexp_replace(title || ' ' || COALESCE(details, ''), '[^0-9]', '', 'g') LIKE '%' || d || '%')
+      ORDER BY id DESC LIMIT 1`,
+    [digits, assignee],
+  );
+  return row || null;
+}
+
 export async function createTask({ account, title, details, kind = 'todo', dueAt, createdBy = 'you', idemKey = null, role = null, assignee, priority = false, summary, nextStep, story }) {
   if (!title?.trim()) throw new Error('A task needs a title');
+  // One matter per person (9 Nov 2026): three "Call Rabindra Jana" cards piled up, one per routine run, because each run
+  // saw only the chat. An AI card about a person who already has an open card for the same assignee becomes a note on
+  // that card (priority kept if either asked, the earlier due date wins). The owner's own duplicates are their choice.
+  if (createdBy === 'ai' && kind === 'todo') {
+    const open = await openCardAbout(`${title} ${details || ''}`, who(assignee) || 'you');
+    if (open) {
+      await addNote(open.id, `${title.trim()}${details ? ` — ${String(details).trim()}` : ''}`, 'ai').catch(() => {});
+      const [row] = await query(
+        `UPDATE tasks SET priority = priority OR $2, due_at = LEAST(due_at, $3::timestamptz), updated_at = now() WHERE id = $1 RETURNING *`,
+        [open.id, !!priority, dueAt || null],
+      );
+      return { ...row, merged: true };
+    }
+  }
   if (!role) role = await guessRole(account, `${title} ${details || ''}`).catch(() => null);
   const [row] = await query(
     `INSERT INTO tasks (account_id, title, details, kind, status, due_at, created_by, idem_key, role, assignee, priority, summary, next_step, story)
